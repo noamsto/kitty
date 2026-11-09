@@ -87,6 +87,19 @@ terminals.
 )
 
 opt(
+    'bidi_reorder',
+    'no',
+    option_type='to_bool',
+    ctype='bool',
+    long_text="""
+Experimental. Reorder bidirectional text (for example Hebrew or Arabic mixed
+with Latin text) to its visual order when drawing a line, following the Unicode
+Bidirectional Algorithm. The text stored in the screen stays in logical order.
+This option has no effect when :opt:`force_ltr` is enabled, which always wins.
+""",
+)
+
+opt(
     '+symbol_map',
     'U+E0A0-U+E0A3,U+E0C0-U+E0C7 PowerlineSymbols',
     option_type='symbol_map',

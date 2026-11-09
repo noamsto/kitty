@@ -44,6 +44,7 @@
 #include "keys.h"
 #include "vt-parser.h"
 #include "resize.h"
+#include "bidi.h"
 
 static const ScreenModes empty_modes = {0, .mDECAWM = true, .mDECTCEM = true, .mDECARM = true};
 
@@ -828,6 +829,7 @@ dealloc(Screen *self) {
 // Draw text {{{
 typedef struct text_loop_state {
     bool image_placeholder_marked;
+    bool bidi_marked;
     const CPUCell cc;
     const GPUCell g;
     CPUCell *cp;
@@ -916,6 +918,7 @@ init_text_loop_line(Screen *self, text_loop_state *s) {
     clear_intersecting_selections(self, self->cursor->y);
     linebuf_mark_line_dirty(self->linebuf, self->cursor->y);
     s->image_placeholder_marked = false;
+    s->bidi_marked = false;
     init_segmentation_state(self, s);
 }
 
@@ -1482,6 +1485,10 @@ draw_text_loop(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_
         if (UNLIKELY(!s->image_placeholder_marked && ch == IMAGE_PLACEHOLDER_CHAR)) {
             linebuf_set_line_has_image_placeholders(self->linebuf, self->cursor->y, true);
             s->image_placeholder_marked = true;
+        }
+        if (UNLIKELY(OPT(bidi_reorder) && !s->bidi_marked && bidi_codepoint_may_reorder(ch))) {
+            linebuf_set_line_has_bidi(self->linebuf, self->cursor->y, true);
+            s->bidi_marked = true;
         }
         CPUCell *fc = s->cp + self->cursor->x;
         if (char_width == 2) {

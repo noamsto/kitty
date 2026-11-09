@@ -92,8 +92,9 @@ typedef union LineAttrs {
         uint8_t has_dirty_text : 1;
         uint8_t has_image_placeholders : 1;
         uint8_t prompt_kind : 2;
+        uint8_t has_bidi : 1;
         // named so that initializers zero it, see CPUCell
-        uint8_t padding : 4;
+        uint8_t padding : 3;
     };
     uint8_t val;
 } LineAttrs;

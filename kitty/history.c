@@ -241,6 +241,11 @@ historybuf_set_line_has_image_placeholders(HistoryBuf *self, index_type y, bool 
 }
 
 void
+historybuf_mark_line_has_bidi(HistoryBuf *self, index_type y) {
+    attrptr(self, index_of(self, y))->has_bidi = true;
+}
+
+void
 historybuf_clear(HistoryBuf *self) {
     pagerhist_clear(self);
     self->count = 0;
