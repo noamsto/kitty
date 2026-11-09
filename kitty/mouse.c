@@ -335,6 +335,11 @@ cell_for_pos(Window *w, unsigned int *x, unsigned int *y, bool *in_left_half_of_
     if (mouse_y >= g->bottom) qy = screen->lines - 1;
     else if (mouse_y >= g->top) { qy = (unsigned int)((double)(mouse_y - g->top - screen->pixel_scroll_offset_y) / os_window->fonts_data->fcm.cell_height); }
     if (qx < screen->columns && qy < screen->lines) {
+        if (screen->bidi.v2l) {
+            const index_type render_row = qy + pixel_scroll_enabled(screen);
+            if (bidi_cell_is_rtl(&screen->bidi, render_row, bidi_logical_x(&screen->bidi, render_row, qx))) in_left_half = !in_left_half;
+            qx = bidi_logical_x(&screen->bidi, render_row, qx);
+        }
         *x = qx;
         *y = qy;
         *in_left_half_of_cell = in_left_half;
