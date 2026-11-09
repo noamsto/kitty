@@ -19,9 +19,10 @@
 typedef struct ShapedRunKey {
     uint32_t keysz_in_bytes;
     uint8_t disable_ligature, force_ltr, scale, subscale;
+    uint8_t direction, padding[3];
     uint8_t data[];
 } ShapedRunKey;
-static_assert(sizeof(ShapedRunKey) == 8, "Fix the ordering of ShapedRunKey");
+static_assert(sizeof(ShapedRunKey) == 12, "Fix the ordering of ShapedRunKey");
 
 typedef struct ShapedRunValue {
     unsigned num_glyphs, num_groups;
@@ -115,7 +116,7 @@ shaped_run_too_long(index_type num_cells) {
 
 static bool
 fill_key(
-    HashTable *ht, const CPUCell *cells, index_type num_cells, const TextCache *tc, bool disable_ligature, bool force_ltr, uint8_t scale, uint8_t subscale) {
+    HashTable *ht, const CPUCell *cells, index_type num_cells, const TextCache *tc, bool disable_ligature, bool force_ltr, uint8_t direction, uint8_t scale, uint8_t subscale) {
     const size_t keysz_in_bytes = (size_t)num_cells * (sizeof(uint32_t) + MAX_NUM_CODEPOINTS_PER_CELL * sizeof(char_type));
     if (!ht->scratch.key || keysz_in_bytes > ht->scratch.capacity) {
         const size_t newsz = sizeof(ht->scratch.key[0]) + keysz_in_bytes + 64;
@@ -132,6 +133,7 @@ fill_key(
     size_t used = 0;
     scratch->disable_ligature = disable_ligature;
     scratch->force_ltr = force_ltr;
+    scratch->direction = direction;
     scratch->scale = scale;
     scratch->subscale = subscale;
     for (; num_cells; cells++, num_cells--) {
@@ -163,6 +165,7 @@ shaped_run_get(
     const TextCache *tc,
     bool disable_ligature,
     bool force_ltr,
+    uint8_t direction,
     uint8_t scale,
     uint8_t subscale,
     ShapedRun *result) {
@@ -170,7 +173,7 @@ shaped_run_get(
     if (!ht) return false;
     ht->scratch.key_is_valid = false;
     if (shaped_run_too_long(num_cells)) return false;
-    if (!fill_key(ht, cells, num_cells, tc, disable_ligature, force_ltr, scale, subscale)) return false;
+    if (!fill_key(ht, cells, num_cells, tc, disable_ligature, force_ltr, direction, scale, subscale)) return false;
     shaped_run_map_itr n = vt_get(&ht->table, ht->scratch.key);
     if (vt_is_end(n)) {
         ht->scratch.key_is_valid = true; // so that shaped_run_put() can re-use it
