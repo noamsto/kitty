@@ -2651,6 +2651,25 @@ test_render_line(PyObject UNUSED *self, PyObject *args) {
     Py_RETURN_NONE;
 }
 
+extern PyTypeObject Screen_Type;
+
+static PyObject *
+test_screen_update_cell_data(PyObject UNUSED *self, PyObject *args) {
+    PyObject *screen;
+    unsigned int repeat = 1;
+    if (!PyArg_ParseTuple(args, "O!|I", &Screen_Type, &screen, &repeat)) return NULL;
+    if (!num_font_groups) {
+        PyErr_SetString(PyExc_RuntimeError, "must create font group first");
+        return NULL;
+    }
+    Screen *s = (Screen *)screen;
+    PyObject *ans = PyBytes_FromStringAndSize(NULL, (Py_ssize_t)(sizeof(GPUCell) * render_lines_for_screen(s) * s->columns));
+    if (!ans) return NULL;
+    memset(PyBytes_AS_STRING(ans), 0, PyBytes_GET_SIZE(ans));
+    for (unsigned int i = 0; i < repeat; i++) screen_update_cell_data(s, PyBytes_AS_STRING(ans), (FONTS_DATA_HANDLE)font_groups, false);
+    return ans;
+}
+
 static uint32_t
 alpha_blend(uint32_t fg, uint32_t bg) {
     uint32_t r1 = (fg >> 16) & 0xFF, g1 = (fg >> 8) & 0xFF, b1 = fg & 0xFF, a = (fg >> 24) & 0xff;
@@ -2959,6 +2978,7 @@ static PyMethodDef module_methods[] = {
     METHODB(test_shape, METH_VARARGS),
     METHODB(current_fonts, METH_VARARGS),
     METHODB(test_render_line, METH_VARARGS),
+    METHODB(test_screen_update_cell_data, METH_VARARGS),
     METHODB(get_fallback_font, METH_VARARGS),
     {"specialize_font_descriptor", (PyCFunction)pyspecialize_font_descriptor, METH_VARARGS, ""},
     {"render_box_char", (PyCFunction)pyrender_box_char, METH_VARARGS, ""},

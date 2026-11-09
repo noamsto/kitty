@@ -818,6 +818,7 @@ dealloc(Screen *self) {
     free(self->last_rendered_window_char.canvas);
     free(self->extra_cursors.locations);
     free(self->paused_rendering.extra_cursors.locations);
+    bidi_maps_free(&self->bidi);
     if (self->lc) {
         cleanup_list_of_chars(self->lc);
         free(self->lc);
@@ -4015,6 +4016,12 @@ update_line_data(Line *line, unsigned int dest_y, uint8_t *data) {
 }
 
 static void
+update_line_data_bidi(Line *line, unsigned int dest_y, uint8_t *data, const uint16_t *v2l) {
+    uint8_t *dest = data + sizeof(GPUCell) * dest_y * line->xnum;
+    for (index_type v = 0; v < line->xnum; v++, dest += sizeof(GPUCell)) memcpy(dest, line->gpu_cells + v2l[v], sizeof(GPUCell));
+}
+
+static void
 update_line_data_blank(unsigned xnum, unsigned int dest_y, uint8_t *data) {
     const size_t sz = xnum * sizeof(GPUCell);
     memset(data + sz * dest_y, 0, sz);
@@ -4151,6 +4158,120 @@ screen_render_line_graphics(Screen *self, Line *line, int32_t row) {
     }
 }
 
+// Bidi paragraph walker {{{
+typedef struct BidiParaSource {
+    Screen *self;
+    LineBuf *paused; // the snapshot when rendering is paused, otherwise NULL
+    Line line;       // owned by cells_at, as the walker must not touch the shared linebuf/historybuf views
+} BidiParaSource;
+
+static void
+bidi_source_line(BidiParaSource *s, int y, Line *line) {
+    if (s->paused) linebuf_init_line_at(s->paused, (index_type)y, line);
+    else range_line(s->self, y, line);
+}
+
+static const CPUCell *
+bidi_source_cells_at(void *ctx, int y) {
+    BidiParaSource *s = ctx;
+    bidi_source_line(s, y, &s->line);
+    return s->line.cpu_cells;
+}
+
+static bool
+bidi_source_is_continued(const BidiParaSource *s, int y) {
+    if (s->paused) return y > 0 && y < (int)s->paused->ynum && linebuf_is_line_continued(s->paused, (index_type)y);
+    return range_line_is_continued(s->self, y);
+}
+
+static void
+bidi_source_mark_dirty(BidiParaSource *s, int y) {
+    if (s->paused) linebuf_mark_line_dirty(s->paused, (index_type)y);
+    else if (y < 0) historybuf_mark_line_dirty(s->self->historybuf, (index_type)(-(y + 1)));
+    else linebuf_mark_line_dirty(s->self->linebuf, (index_type)y);
+}
+
+static bool
+bidi_paragraph_needs_reordering(BidiParaSource *s, int first, int last) {
+    Line l = {0};
+    bool flagged = false;
+    for (int y = first; y <= last; y++) {
+        bidi_source_line(s, y, &l);
+        if (l.attrs.has_image_placeholders) return false;
+        if (l.attrs.has_bidi) flagged = true;
+    }
+    if (!flagged) return false;
+    for (int y = first; y <= last; y++) {
+        const CPUCell *cells = bidi_source_cells_at(s, y);
+        for (index_type x = 0; x < s->self->columns; x++) {
+            if (cells[x].is_multicell && cells[x].scale > 1) return false;
+        }
+    }
+    return true;
+}
+
+// Prepares the map of a render row and returns its per-cell levels, or NULL if
+// the row is not to be reordered. range_y is the row in range_line() coordinates
+// or, when paused is not NULL, the row in the snapshot. Rows must be visited in
+// ascending order, so that the first on-screen row of a paragraph resolves it.
+static const uint8_t *
+screen_bidi_prepare_row(Screen *self, LineBuf *paused, unsigned render_row, int range_y, Line *linep) {
+    BidiMaps *b = &self->bidi;
+    if (b->para.valid && b->para.first <= range_y && range_y <= b->para.last) {
+        if (b->para.dirty_any) linep->attrs.has_dirty_text = true;
+        if (b->para.has_bidi) return b->active[render_row] ? b->levels + (size_t)render_row * b->cols : NULL;
+        bidi_set_row_inactive(b, render_row);
+        return NULL;
+    }
+    BidiParaSource src = {.self = self, .paused = paused};
+    if (!linep->attrs.has_bidi && !linep->cpu_cells[linep->xnum - 1].next_char_was_wrapped && !bidi_source_is_continued(&src, range_y)) {
+        bidi_set_row_inactive(b, render_row);
+        return NULL;
+    }
+    const int lowest = paused ? 0 : -(int)self->historybuf->count;
+    int first = range_y, last = range_y;
+    // Leave room below for the rest of the screen when the paragraph is longer than the cap
+    while (range_y - first < BIDI_MAX_PARAGRAPH_ROWS / 2 && first > lowest && bidi_source_is_continued(&src, first)) first--;
+    while (last - first + 1 < BIDI_MAX_PARAGRAPH_ROWS && bidi_source_is_continued(&src, last + 1)) last++;
+    while (last - first + 1 < BIDI_MAX_PARAGRAPH_ROWS && first > lowest && bidi_source_is_continued(&src, first)) first--;
+
+    b->para.first = first;
+    b->para.last = last;
+    b->para.valid = true;
+    b->para.has_bidi = false;
+    b->para.dirty_any = false;
+    if (!bidi_paragraph_needs_reordering(&src, first, last) || !bidi_maps_ensure(b, render_lines_for_screen(self), self->columns)) {
+        bidi_set_row_inactive(b, render_row);
+        return NULL;
+    }
+    const int y_to_render_row = (int)render_row - range_y;
+    const BidiCellSource cell_source = {.cells_at = bidi_source_cells_at, .text_cache = self->text_cache};
+    if (!bidi_resolve_paragraph(b, cell_source, &src, first, last, y_to_render_row)) return NULL;
+    b->para.has_bidi = true;
+
+    const int first_on_screen = MAX(first, -y_to_render_row), last_on_screen = MIN(last, (int)b->rows - 1 - y_to_render_row);
+    Line l = {0};
+    for (int y = first_on_screen; y <= last_on_screen && !b->para.dirty_any; y++) {
+        bidi_source_line(&src, y, &l);
+        b->para.dirty_any = l.attrs.has_dirty_text;
+    }
+    if (b->para.dirty_any) {
+        for (int y = first_on_screen; y <= last_on_screen; y++) bidi_source_mark_dirty(&src, y);
+        // linep->attrs is a copy taken before the row was marked dirty above
+        linep->attrs.has_dirty_text = true;
+    }
+    return b->active[render_row] ? b->levels + (size_t)render_row * b->cols : NULL;
+}
+
+static void
+screen_bidi_start_frame(Screen *self) {
+    BidiMaps *b = &self->bidi;
+    b->para.valid = false;
+    const index_type render_lines = render_lines_for_screen(self);
+    if (b->v2l && (b->rows != render_lines || b->cols != self->columns)) bidi_maps_ensure(b, render_lines, self->columns);
+}
+// }}}
+
 // This functions is similar to screen_update_cell_data, but it only updates
 // line graphics (cell images) and then marks lines as clean. It's used
 // exclusively for testing unicode placeholders.
@@ -4180,6 +4301,8 @@ screen_update_only_line_graphics_data(Screen *self) {
 
 void
 screen_update_cell_data(Screen *self, void *address, FONTS_DATA_HANDLE fonts_data, bool cursor_has_moved) {
+    const bool bidi = bidi_enabled();
+    screen_bidi_start_frame(self);
     if (self->paused_rendering.expires_at) {
         if (!self->paused_rendering.cell_data_updated) {
             LineBuf *linebuf = self->paused_rendering.linebuf;
@@ -4188,15 +4311,17 @@ screen_update_cell_data(Screen *self, void *address, FONTS_DATA_HANDLE fonts_dat
             const index_type row_offset = self->paused_rendering.pixel_scroll;
             for (index_type y = 0; y < linebuf->ynum; y++) {
                 linebuf_init_line(linebuf, y);
+                const uint8_t *levels = bidi ? screen_bidi_prepare_row(self, linebuf, y, (int)y, linebuf->line) : NULL;
                 if (linebuf->line->attrs.has_dirty_text) {
                     // The extra leading row is never the cursor row
                     const index_type lnum = y < row_offset ? self->lines : y - row_offset;
-                    render_line(fonts_data, linebuf->line, lnum, &self->paused_rendering.cursor, self->disable_ligatures, self->lc, NULL);
+                    render_line(fonts_data, linebuf->line, lnum, &self->paused_rendering.cursor, self->disable_ligatures, self->lc, levels);
                     // Cell images are not rendered here: this would modify the live grman using snapshot row numbers
                     if (linebuf->line->attrs.has_dirty_text && screen_has_marker(self)) mark_text_in_line(self->marker, linebuf->line, &self->as_ansi_buf);
                     linebuf_mark_line_clean(linebuf, y);
                 }
-                update_line_data(linebuf->line, y, address);
+                if (levels) update_line_data_bidi(linebuf->line, y, address, self->bidi.v2l + (size_t)y * self->columns);
+                else update_line_data(linebuf->line, y, address);
             }
         }
         return;
@@ -4217,28 +4342,36 @@ screen_update_cell_data(Screen *self, void *address, FONTS_DATA_HANDLE fonts_dat
         index_type lnum = 0;
         Line *linep = render_line_for_virtual_y(self, virtual_y, &line, &lnum, &is_history);
         if (linep == NULL) {
+            if (bidi) bidi_set_row_inactive(&self->bidi, render_row);
             update_line_data_blank(self->columns, render_row, address);
             continue;
+        }
+        const uint8_t *levels = bidi ? screen_bidi_prepare_row(self, NULL, render_row, virtual_y - (int)self->scrolled_by, linep) : NULL;
+        if (levels && is_overlay_active && !is_history && lnum == self->overlay_line.ynum) {
+            // The overlay (IME pre-edit) row gets no bidi
+            levels = NULL;
+            bidi_set_row_inactive(&self->bidi, render_row);
         }
         if (is_history) {
             // we render line graphics even if the line is not dirty as graphics commands received after
             // the unicode placeholder was first scanned can alter it.
             screen_render_line_graphics(self, linep, virtual_y - (int)self->scrolled_by);
             if (force_history_render || linep->attrs.has_dirty_text) {
-                render_line(fonts_data, linep, lnum, self->cursor, self->disable_ligatures, self->lc, NULL);
+                render_line(fonts_data, linep, lnum, self->cursor, self->disable_ligatures, self->lc, levels);
                 if (screen_has_marker(self)) mark_text_in_line(self->marker, linep, &self->as_ansi_buf);
                 historybuf_mark_line_clean(self->historybuf, lnum);
             }
         } else {
             if (linep->attrs.has_dirty_text || (cursor_has_moved && (self->cursor->y == lnum || self->last_rendered.cursor.y == lnum))) {
-                render_line(fonts_data, linep, lnum, self->cursor, self->disable_ligatures, self->lc, NULL);
+                render_line(fonts_data, linep, lnum, self->cursor, self->disable_ligatures, self->lc, levels);
                 screen_render_line_graphics(self, linep, virtual_y - (int)self->scrolled_by);
                 if (linep->attrs.has_dirty_text && screen_has_marker(self)) mark_text_in_line(self->marker, linep, &self->as_ansi_buf);
                 if (is_overlay_active && lnum == self->overlay_line.ynum) render_overlay_line(self, linep, fonts_data);
                 linebuf_mark_line_clean(self->linebuf, lnum);
             }
         }
-        update_line_data(linep, render_row, address);
+        if (levels) update_line_data_bidi(linep, render_row, address, self->bidi.v2l + (size_t)render_row * self->columns);
+        else update_line_data(linep, render_row, address);
     }
     if (is_overlay_active && self->overlay_line.ynum + self->scrolled_by < self->lines) {
         if (self->overlay_line.is_dirty) {
@@ -4246,6 +4379,7 @@ screen_update_cell_data(Screen *self, void *address, FONTS_DATA_HANDLE fonts_dat
             render_overlay_line(self, self->linebuf->line, fonts_data);
         }
         update_overlay_line_data(self, address);
+        if (bidi) bidi_set_row_inactive(&self->bidi, self->overlay_line.ynum + self->scrolled_by + render_row_offset);
     }
 }
 
@@ -4510,11 +4644,26 @@ screen_apply_selection(Screen *self, void *address_, size_t size) {
         apply_selection(self, address, s, 2, offset, scrolled_by);
     }
     sel->last_rendered_count = sel->count;
+    const bool has_bidi_maps = self->bidi.v2l && self->bidi.cols == self->columns;
+    if (has_bidi_maps) {
+        const size_t num_rows = MIN((size_t)self->bidi.rows, size / self->columns);
+        for (size_t r = 0; r < num_rows; r++) {
+            if (self->bidi.active[r]) bidi_permute_row_bytes(&self->bidi, (index_type)r, address + r * self->columns);
+        }
+        self->bidi.changed = false;
+    }
     address += (size_t)offset * self->columns;
     size -= (size_t)offset * self->columns;
     ExtraCursors *ec = self->paused_rendering.expires_at ? &self->paused_rendering.extra_cursors : &self->extra_cursors;
     for (unsigned i = 0; i < ec->count; i++) {
-        if (ec->locations[i].cell < size) address[ec->locations[i].cell] |= (ec->locations[i].shape & 7) << 2;
+        if (ec->locations[i].cell < size) {
+            index_type cell = ec->locations[i].cell;
+            if (has_bidi_maps) {
+                const index_type row = cell / self->columns;
+                cell = row * self->columns + bidi_visual_left_x(&self->bidi, row + offset, cell % self->columns, 1);
+            }
+            address[cell] |= (ec->locations[i].shape & 7) << 2;
+        }
     }
     ec->dirty = false;
 }
@@ -6280,6 +6429,7 @@ bool
 screen_is_selection_dirty(Screen *self) {
     IterationData q;
     if (self->paused_rendering.expires_at) return false;
+    if (self->bidi.changed) return true;
     if (self->scrolled_by != self->last_rendered.scrolled_by) return true;
     if (self->selections.last_rendered_count != self->selections.count || self->url_ranges.last_rendered_count != self->url_ranges.count ||
         self->extra_cursors.dirty)
@@ -7195,6 +7345,107 @@ test_create_write_buffer(Screen *screen UNUSED, PyObject *args UNUSED) {
 }
 
 static PyObject *
+test_bidi_refresh(Screen *self, PyObject *a UNUSED) {
+    if (!bidi_enabled()) Py_RETURN_NONE;
+    screen_bidi_start_frame(self);
+    Line line = {.text_cache = self->text_cache};
+    if (self->paused_rendering.expires_at) {
+        LineBuf *linebuf = self->paused_rendering.linebuf;
+        for (index_type y = 0; y < linebuf->ynum; y++) {
+            linebuf_init_line_at(linebuf, y, &line);
+            screen_bidi_prepare_row(self, linebuf, y, (int)y, &line);
+        }
+        Py_RETURN_NONE;
+    }
+    const unsigned render_lines = render_lines_for_screen(self);
+    const int render_row_offset = pixel_scroll_enabled(self);
+    for (unsigned render_row = 0; render_row < render_lines; render_row++) {
+        const int virtual_y = (int)render_row - render_row_offset;
+        bool is_history = false;
+        index_type lnum = 0;
+        Line *linep = render_line_for_virtual_y(self, virtual_y, &line, &lnum, &is_history);
+        if (linep) screen_bidi_prepare_row(self, NULL, render_row, virtual_y - (int)self->scrolled_by, linep);
+        else bidi_set_row_inactive(&self->bidi, render_row);
+    }
+    Py_RETURN_NONE;
+}
+
+// The render row for a screen row, if it has an active bidi map
+static bool
+bidi_test_active_row(Screen *self, unsigned y, index_type *render_row) {
+    *render_row = y + pixel_scroll_enabled(self);
+    return self->bidi.v2l && *render_row < self->bidi.rows && self->bidi.active[*render_row];
+}
+
+static PyObject *
+test_bidi_v2l(Screen *self, PyObject *args) {
+    unsigned y;
+    index_type render_row;
+    if (!PyArg_ParseTuple(args, "I", &y)) return NULL;
+    if (!bidi_test_active_row(self, y, &render_row)) Py_RETURN_NONE;
+    const BidiMaps *b = &self->bidi;
+    RAII_PyObject(ans, PyTuple_New(b->cols));
+    if (!ans) return NULL;
+    for (index_type x = 0; x < b->cols; x++) {
+        PyObject *v = PyLong_FromUnsignedLong(b->v2l[(size_t)render_row * b->cols + x]);
+        if (!v) return NULL;
+        PyTuple_SET_ITEM(ans, x, v);
+    }
+    Py_INCREF(ans);
+    return ans;
+}
+
+static PyObject *
+test_bidi_levels(Screen *self, PyObject *args) {
+    unsigned y;
+    index_type render_row;
+    if (!PyArg_ParseTuple(args, "I", &y)) return NULL;
+    if (!bidi_test_active_row(self, y, &render_row)) Py_RETURN_NONE;
+    const BidiMaps *b = &self->bidi;
+    RAII_PyObject(ans, PyTuple_New(b->cols));
+    if (!ans) return NULL;
+    for (index_type x = 0; x < b->cols; x++) {
+        PyObject *v = PyLong_FromUnsignedLong(b->levels[(size_t)render_row * b->cols + x]);
+        if (!v) return NULL;
+        PyTuple_SET_ITEM(ans, x, v);
+    }
+    Py_INCREF(ans);
+    return ans;
+}
+
+static PyObject *
+test_bidi_visual_x(Screen *self, PyObject *args) {
+    unsigned x, y;
+    if (!PyArg_ParseTuple(args, "II", &x, &y)) return NULL;
+    return PyLong_FromUnsignedLong(bidi_visual_left_x(&self->bidi, y + pixel_scroll_enabled(self), x, 1));
+}
+
+static PyObject *
+test_bidi_logical_x(Screen *self, PyObject *args) {
+    unsigned x, y;
+    if (!PyArg_ParseTuple(args, "II", &x, &y)) return NULL;
+    return PyLong_FromUnsignedLong(bidi_logical_x(&self->bidi, y + pixel_scroll_enabled(self), x));
+}
+
+static PyObject *
+test_bidi_is_rtl(Screen *self, PyObject *args) {
+    unsigned x, y;
+    if (!PyArg_ParseTuple(args, "II", &x, &y)) return NULL;
+    return PyBool_FromLong(bidi_cell_is_rtl(&self->bidi, y + pixel_scroll_enabled(self), x));
+}
+
+static PyObject *
+test_bidi_line_flag(Screen *self, PyObject *args) {
+    unsigned y;
+    if (!PyArg_ParseTuple(args, "I", &y)) return NULL;
+    if (y >= self->lines) {
+        PyErr_SetString(PyExc_IndexError, "y out of range");
+        return NULL;
+    }
+    return PyBool_FromLong(self->linebuf->line_attrs[y].has_bidi);
+}
+
+static PyObject *
 overlay_line_start(Screen *self, PyObject *a UNUSED) {
     return PyLong_FromUnsignedLong(screen_overlay_line_start(self));
 }
@@ -7391,6 +7642,13 @@ static PyMethodDef methods[] = {
     METHODB(test_parse_written_data, METH_VARARGS),
     METHODB(test_draw_overlay_line, METH_VARARGS),
     METHODB(test_update_overlay_text, METH_VARARGS),
+    METHODB(test_bidi_refresh, METH_NOARGS),
+    METHODB(test_bidi_v2l, METH_VARARGS),
+    METHODB(test_bidi_levels, METH_VARARGS),
+    METHODB(test_bidi_visual_x, METH_VARARGS),
+    METHODB(test_bidi_logical_x, METH_VARARGS),
+    METHODB(test_bidi_is_rtl, METH_VARARGS),
+    METHODB(test_bidi_line_flag, METH_VARARGS),
     METHODB(restore_scrollback, METH_O),
     METHODB(cursor_prompt_line, METH_NOARGS),
     MND(overlay_line_start, METH_NOARGS) MND(line_edge_colors, METH_NOARGS) MND(ime_text_around_cursor, METH_NOARGS) MND(line, METH_O)
