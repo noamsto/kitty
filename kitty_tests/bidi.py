@@ -774,8 +774,8 @@ class TestBidi(BaseTest):
             self.trigger_case(build, trigger, (rev, None, None, None, None))
 
     def test_cache_option_toggle(self):
-        # Trigger: bidi_reorder off then on, force_ltr on then off. Turning
-        # either on drops the maps, turning it back must resolve again.
+        # Trigger: bidi_reorder off then on, force_ltr on then off. Either change
+        # drops the maps, undoing it must resolve again.
         # 'abc' + three R letters: L L L R R R, maps (0, 1, 2, 5, 4, 3, ...).
         want = (0, 1, 2, 5, 4, 3, 6, 7, 8, 9)
         with setup_for_testing():
@@ -866,8 +866,8 @@ class TestBidi(BaseTest):
             self.ae(s.test_bidi_v2l(0), want)
 
     def test_cache_reset(self):
-        # Trigger: RIS. A correctness check only: cleared rows take the plain row
-        # path whatever the cache says, so it does not prove the generation bump.
+        # Trigger: RIS. Cleared rows take the plain row path whatever the cache
+        # says, so this checks the maps, not that the reset invalidated the cache.
         want = (0, 1, 2, 5, 4, 3, 6, 7, 8, 9)
         with setup_for_testing():
             s = self.screen()
