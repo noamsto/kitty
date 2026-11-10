@@ -4240,27 +4240,32 @@ screen_bidi_resolve_row(Screen *self, LineBuf *paused, unsigned render_row, int 
     b->para.has_bidi = false;
     b->para.dirty_any = false;
 
-    // A change on any row can change the levels of the others, even when the
-    // paragraph no longer needs reordering, so a dirty row redraws the rows not
-    // yet rendered this frame. Off-screen history rows are not counted, they
-    // stay dirty until first rendered and would force a redraw every frame.
+    // A change on any row can change the levels of the others, so a dirty row
+    // redraws the rows not yet rendered this frame. Rows that lose their levels
+    // are redrawn through rendered_with_bidi, so a paragraph with nothing to
+    // reorder redraws only its own dirty rows. Off-screen history rows are not
+    // counted, they stay dirty until first rendered and would force a redraw
+    // every frame.
     const int render_lines = (int)render_lines_for_screen(self);
     const int y_to_render_row = (int)render_row - range_y;
-    Line l = {0};
-    for (int y = first; y <= last && !b->para.dirty_any; y++) {
-        const int r = y + y_to_render_row;
-        if (y < 0 && (r < 0 || r >= render_lines)) continue;
-        bidi_source_line(&src, y, &l);
-        b->para.dirty_any = l.attrs.has_dirty_text;
-    }
-    if (b->para.dirty_any) {
-        const int last_on_screen = MIN(last, render_lines - 1 - y_to_render_row);
-        for (int y = range_y; y <= last_on_screen; y++) bidi_source_mark_dirty(&src, y);
-        // linep->attrs is a copy taken before the row was marked dirty above
-        linep->attrs.has_dirty_text = true;
+    const bool needs = bidi_paragraph_needs_reordering(&src, first, last);
+    if (needs) {
+        Line l = {0};
+        for (int y = first; y <= last && !b->para.dirty_any; y++) {
+            const int r = y + y_to_render_row;
+            if (y < 0 && (r < 0 || r >= render_lines)) continue;
+            bidi_source_line(&src, y, &l);
+            b->para.dirty_any = l.attrs.has_dirty_text;
+        }
+        if (b->para.dirty_any) {
+            const int last_on_screen = MIN(last, render_lines - 1 - y_to_render_row);
+            for (int y = range_y; y <= last_on_screen; y++) bidi_source_mark_dirty(&src, y);
+            // linep->attrs is a copy taken before the row was marked dirty above
+            linep->attrs.has_dirty_text = true;
+        }
     }
 
-    if (!bidi_paragraph_needs_reordering(&src, first, last) || !bidi_maps_ensure(b, (index_type)render_lines, self->columns)) {
+    if (!needs || !bidi_maps_ensure(b, (index_type)render_lines, self->columns)) {
         bidi_set_row_inactive(b, render_row);
         return NULL;
     }
@@ -4685,8 +4690,10 @@ screen_apply_selection(Screen *self, void *address_, size_t size) {
         for (size_t r = 0; r < num_rows; r++) {
             if (self->bidi.active[r]) bidi_permute_row_bytes(&self->bidi, (index_type)r, address + r * self->columns);
         }
-        self->bidi.changed = false;
     }
+    // Cleared even without usable maps, e.g. after a resize with bidi turned
+    // off, which never reallocates them, or the selection is dirty every frame
+    self->bidi.changed = false;
     address += (size_t)offset * self->columns;
     size -= (size_t)offset * self->columns;
     ExtraCursors *ec = self->paused_rendering.expires_at ? &self->paused_rendering.extra_cursors : &self->extra_cursors;

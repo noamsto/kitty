@@ -323,6 +323,37 @@ class TestBidi(BaseTest):
         self.ae([s.test_bidi_visual_x(x, 0) for x in range(10)], list(ID10))
         self.ae(self.refresh(s, 0), tuple(range(9, -1, -1)))
 
+    def test_selection_clean_after_resize_with_option_off(self):
+        # a resize after bidi is turned off drops the maps, the next selection
+        # apply must leave the selection clean instead of dirty every frame
+        s = self.screen()
+        s.draw('abc' + A)
+        self.refresh(s, 0)
+        s.current_selections()
+        self.set_options({'bidi_reorder': False})
+        s.resize(5, 8)
+        s.test_bidi_refresh()
+        s.current_selections()
+        self.assertFalse(s.is_selection_dirty())
+        s.test_bidi_refresh()
+        self.assertFalse(s.is_selection_dirty())
+
+    def test_latin_paragraph_dirties_only_written_row(self):
+        # with nothing to reorder, a write to one row of a soft-wrapped paragraph
+        # must not redraw the rest of it
+        from kitty.fast_data_types import test_screen_update_cell_data
+        from kitty.fonts.render import setup_for_testing
+
+        with setup_for_testing():
+            s = self.screen(cols=10, lines=8)
+            s.draw('x' * 75)
+            test_screen_update_cell_data(s)
+            self.ae(s.linebuf.dirty_lines(), [])
+            s.draw('x')
+            self.ae(s.linebuf.dirty_lines(), [7])
+            s.test_bidi_refresh()
+            self.ae(s.linebuf.dirty_lines(), [7])
+
     def test_level_change_redraws_paragraph(self):
         from kitty.fast_data_types import test_screen_update_cell_data
         from kitty.fonts.render import setup_for_testing
