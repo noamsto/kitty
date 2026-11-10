@@ -392,6 +392,36 @@ class TestBidi(BaseTest):
             self.assertTrue(any(c.sprite_idx for c in fresh))
             self.ae([c.sprite_idx for c in row1], [c.sprite_idx for c in fresh])
 
+    def test_split_paragraph_reshapes_lower_part(self):
+        # In the paragraph, searching back from 12 the first strong type is R (ה),
+        # so W7 leaves it EN; ( (ON, unpaired) lies between R and EN (EN counts as
+        # R for N1), so level 1 and mirrored; 12 at level 0 goes to 2 (I1); ב is 1;
+        # the trailing empty cell (WS) is 0 by L1: (1, 2, 2, 1, 0). Overwriting row
+        # 0's last cell clears its soft wrap, so row 1 becomes its own paragraph
+        # with no dirty row: searching back from 12 reaches sos (L), so W7 makes it
+        # L; ( lies between sos and L, level 0, not mirrored; 12 is 0; ב 1; trailing
+        # 0: (0, 0, 0, 1, 0). Row 1 must be reshaped at the new levels, so its
+        # sprites match the same text rendered alone.
+        with setup_for_testing():
+            s = self.screen(cols=5, lines=5)
+            s.draw('אבגדה')
+            s.draw('(12ב')
+            test_screen_update_cell_data(s)
+            self.ae(s.test_bidi_levels(1), (1, 2, 2, 1, 0))
+            self.assertTrue(s.test_bidi_line_flag(1))
+            self.ae(s.linebuf.dirty_lines(), [])
+            s.cursor_position(1, 5)
+            s.draw('ו')
+            self.assertFalse(s.linebuf.is_continued(1))
+            self.ae(s.linebuf.dirty_lines(), [0])
+            row1 = gpu_row(s, test_screen_update_cell_data(s), 1)
+            self.ae(s.test_bidi_levels(1), (0, 0, 0, 1, 0))
+            f = self.screen(cols=5, lines=5)
+            f.draw('(12ב')
+            fresh = gpu_row(f, test_screen_update_cell_data(f), 0)
+            self.assertTrue(any(c.sprite_idx for c in fresh))
+            self.ae([c.sprite_idx for c in row1], [c.sprite_idx for c in fresh])
+
     def test_dirty_row_below_view_redraws_paragraph(self):
         # scrolled up, a dirty linebuf row of the paragraph below the view marks
         # the on-screen rows dirty
