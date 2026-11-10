@@ -4315,8 +4315,11 @@ screen_bidi_resolve_row(Screen *self, LineBuf *paused, unsigned render_row, int 
 // ascending order, so that the first on-screen row of a paragraph resolves it.
 static const uint8_t *
 screen_bidi_prepare_row(Screen *self, LineBuf *paused, unsigned render_row, int range_y, Line *linep) {
-    BidiParaSource id_src = {.self = self, .paused = paused};
-    bidi_set_line_id(&self->bidi, render_row, bidi_source_line_id(&id_src, range_y));
+    // Paused frames keep the line identities of the last live frame
+    if (!paused) {
+        BidiParaSource id_src = {.self = self};
+        bidi_set_line_id(&self->bidi, render_row, bidi_source_line_id(&id_src, range_y));
+    }
     const uint8_t *levels = screen_bidi_resolve_row(self, paused, render_row, range_y, linep);
     // Cells shaped with levels keep their RTL glyphs until shaped again, and a
     // row can stop being reordered without being written to, e.g. when its
@@ -4329,19 +4332,32 @@ screen_bidi_prepare_row(Screen *self, LineBuf *paused, unsigned render_row, int 
     return levels;
 }
 
-static void
-screen_bidi_start_frame(Screen *self, bool scroll_changed) {
+// Returns false when bidi is off
+static bool
+screen_bidi_frame_setup(Screen *self) {
     BidiMaps *b = &self->bidi;
     b->para.valid = false;
     // Turned off at runtime: drop the old maps; clearing them sets changed
     if (!bidi_enabled()) {
         if (b->v2l) bidi_set_all_rows_inactive(b);
         bidi_cache_invalidate(b);
-        return;
+        return false;
     }
     const index_type render_lines = render_lines_for_screen(self);
-    // Before bidi_frame_begin, as a reallocation invalidates the key and the line ids
+    // Before the frame begins, as a reallocation invalidates the key and the line ids
     if (b->v2l && (b->rows != render_lines || b->cols != self->columns)) bidi_maps_ensure(b, render_lines, self->columns);
+    return true;
+}
+
+static void
+screen_bidi_start_paused_frame(Screen *self) {
+    if (screen_bidi_frame_setup(self)) bidi_frame_begin_paused(&self->bidi);
+}
+
+static void
+screen_bidi_start_frame(Screen *self, bool scroll_changed) {
+    if (!screen_bidi_frame_setup(self)) return;
+    const index_type render_lines = render_lines_for_screen(self);
     const BidiFrameKey key = {.linebuf = self->linebuf,
         .historybuf = self->historybuf,
         .linebuf_generation = self->linebuf->bidi_generation,
@@ -4351,7 +4367,7 @@ screen_bidi_start_frame(Screen *self, bool scroll_changed) {
         .scrolled_by = self->scrolled_by,
         .row_offset = pixel_scroll_enabled(self),
         .valid = true};
-    bidi_frame_begin(b, key, scroll_changed);
+    bidi_frame_begin(&self->bidi, key, scroll_changed);
 }
 // }}}
 
@@ -4386,9 +4402,9 @@ void
 screen_update_cell_data(Screen *self, void *address, FONTS_DATA_HANDLE fonts_data, bool cursor_has_moved) {
     const bool bidi = bidi_enabled();
     if (self->paused_rendering.expires_at) {
-        // The snapshot has no line identities: no paused frame is cached, nor the next live one
-        screen_bidi_start_frame(self, self->scroll_changed);
-        bidi_cache_invalidate(&self->bidi);
+        // The snapshot has no line identities: no paused frame is cached, nor
+        // the next live one, which compares levels with the last live frame
+        screen_bidi_start_paused_frame(self);
         if (!self->paused_rendering.cell_data_updated) {
             LineBuf *linebuf = self->paused_rendering.linebuf;
             // The GPU buffer was invalidated so every row must be written. The

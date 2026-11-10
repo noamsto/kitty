@@ -58,6 +58,7 @@ typedef struct BidiMaps {
     bool *prev_active;                 // snapshot, rows
     uint8_t *prev_levels;              // snapshot, rows*cols
     bool snapshot_taken, moved;
+    bool hold; // paused frames since the last live one: the snapshot and line_id are that frame's
     index_type id_hint;
     BidiFrameKey key;
     unsigned long long resolve_count;
@@ -77,6 +78,10 @@ void bidi_set_all_rows_inactive(BidiMaps *b);
 // Starts a frame: the stamps of the last frame stay valid only if the key is
 // unchanged and the view did not scroll.
 void bidi_frame_begin(BidiMaps *b, BidiFrameKey now, bool scroll_changed);
+// Starts a paused frame, which reads a snapshot without line identities: no
+// stamp is trusted, and the line state of the last live frame is kept for the
+// level compare of the next live one.
+void bidi_frame_begin_paused(BidiMaps *b);
 void bidi_cache_invalidate(BidiMaps *b);
 // True when every on-screen row of the paragraph on [first, last], from
 // first_render_row down, still holds the maps of that same paragraph.

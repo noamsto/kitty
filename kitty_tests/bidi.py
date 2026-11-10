@@ -422,6 +422,42 @@ class TestBidi(BaseTest):
             self.assertTrue(any(c.sprite_idx for c in fresh))
             self.ae([c.sprite_idx for c in row1], [c.sprite_idx for c in fresh])
 
+    def test_split_paragraph_reshapes_after_pause(self):
+        # As test_split_paragraph_reshapes_lower_part, with a paused frame
+        # between the last live frame and the split: the first live frame after
+        # the pause must still see that row 1's levels changed since the last
+        # live frame, as rendering is paused for synchronized output. When the
+        # split comes before the pause, the paused frames already show it, so a
+        # second paused frame must not replace what the first one kept.
+        def split(s):
+            s.cursor_position(1, 5)
+            s.draw('ו')
+            self.assertFalse(s.linebuf.is_continued(1))
+
+        for split_before_pause in (False, True):
+            for paused_frames in (1, 2):
+                with self.subTest(split_before_pause=split_before_pause, paused_frames=paused_frames), setup_for_testing():
+                    s = self.screen(cols=5, lines=5)
+                    s.draw('אבגדה')
+                    s.draw('(12ב')
+                    test_screen_update_cell_data(s)
+                    self.ae(s.test_bidi_levels(1), (1, 2, 2, 1, 0))
+                    if split_before_pause:
+                        split(s)
+                    s.pause_rendering(True, 1000)
+                    for i in range(paused_frames):
+                        test_screen_update_cell_data(s)
+                    if not split_before_pause:
+                        split(s)
+                    s.pause_rendering(False)
+                    row1 = gpu_row(s, test_screen_update_cell_data(s), 1)
+                    self.ae(s.test_bidi_levels(1), (0, 0, 0, 1, 0))
+                    f = self.screen(cols=5, lines=5)
+                    f.draw('(12ב')
+                    fresh = gpu_row(f, test_screen_update_cell_data(f), 0)
+                    self.assertTrue(any(c.sprite_idx for c in fresh))
+                    self.ae([c.sprite_idx for c in row1], [c.sprite_idx for c in fresh])
+
     def test_dirty_row_below_view_redraws_paragraph(self):
         # scrolled up, a dirty linebuf row of the paragraph below the view marks
         # the on-screen rows dirty

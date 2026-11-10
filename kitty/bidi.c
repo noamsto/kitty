@@ -35,6 +35,7 @@ free_row_maps(BidiMaps *b) {
     b->prev_active = NULL;
     b->prev_levels = NULL;
     b->snapshot_taken = false;
+    b->hold = false;
     b->rows = 0;
     b->cols = 0;
 }
@@ -85,14 +86,19 @@ bidi_maps_ensure(BidiMaps *b, index_type rows, index_type cols) {
     return true;
 }
 
-// Keeps last frame's state for the level compare; taken before the first change
-// of a frame, as the compare looks lines up by their position last frame.
 static void
-take_snapshot(BidiMaps *b) {
-    if (b->snapshot_taken) return;
+copy_snapshot(BidiMaps *b) {
     memcpy(b->prev_active, b->active, b->rows * sizeof(b->active[0]));
     memcpy(b->prev_levels, b->levels, (size_t)b->rows * b->cols * sizeof(b->levels[0]));
     b->snapshot_taken = true;
+}
+
+// Keeps last frame's state for the level compare; taken before the first change
+// of a frame, as the compare looks lines up by their position last frame. A
+// held snapshot counts as taken.
+static void
+take_snapshot(BidiMaps *b) {
+    if (!b->snapshot_taken) copy_snapshot(b);
 }
 
 static void
@@ -112,6 +118,8 @@ bidi_set_row_inactive(BidiMaps *b, index_type render_row) {
 
 void
 bidi_set_all_rows_inactive(BidiMaps *b) {
+    // The rows are drawn without levels from now on: compare with that instead
+    b->hold = false;
     for (index_type r = 0; r < b->rows; r++) bidi_set_row_inactive(b, r);
 }
 
@@ -127,13 +135,25 @@ bidi_frame_begin(BidiMaps *b, BidiFrameKey now, bool scroll_changed) {
     b->moved = !(b->key.valid && keys_equal(&b->key, &now) && !scroll_changed);
     b->key = now;
     b->key.valid = true;
-    b->snapshot_taken = false;
+    // A held snapshot and line_id are both from the last live frame
+    b->snapshot_taken = b->hold;
+    b->hold = false;
     if (!b->v2l) return;
     if (b->moved) memset(b->stamp_valid, 0, b->rows * sizeof(b->stamp_valid[0]));
     uint64_t *ids = b->prev_line_id;
     b->prev_line_id = b->line_id;
     b->line_id = ids;
     memset(b->line_id, 0, b->rows * sizeof(b->line_id[0]));
+}
+
+void
+bidi_frame_begin_paused(BidiMaps *b) {
+    if (b->v2l && !b->hold) {
+        copy_snapshot(b);
+        b->hold = true;
+    }
+    b->moved = true;
+    bidi_cache_invalidate(b);
 }
 
 void
