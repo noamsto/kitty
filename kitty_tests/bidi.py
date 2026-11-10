@@ -459,6 +459,317 @@ class TestBidi(BaseTest):
         self.ae(set(maps), {(0, 1), (1, 0)})
         self.ae([y for y, m in enumerate(maps) if m == (0, 1)], [155, 283, 299])
 
+    # Paragraph cache. Every trigger starts from a screen warmed until a frame
+    # resolves nothing, then must make the next frame resolve again, and the maps
+    # must equal those of a fresh screen given the same content in one frame.
+    def frame(self, s):
+        before = s.test_bidi_resolve_count()
+        test_screen_update_cell_data(s)
+        return s.test_bidi_resolve_count() - before
+
+    def warm(self, s):
+        for i in range(4):
+            if self.frame(s) == 0:
+                return
+        self.ae(self.frame(s), 0, 'the screen never settled')
+
+    def maps(self, s):
+        return tuple(s.test_bidi_v2l(y) for y in range(s.lines))
+
+    def fill(self, s, rows):
+        for y, text in enumerate(rows):
+            s.cursor_position(y + 1, 1)
+            s.draw(text)
+        s.cursor_position(1, 1)
+
+    def prerender(self, s):
+        # history lines stay dirty until first shown: show them all, come back
+        for up in (True, False):
+            s.scroll(s.historybuf.count, up)
+            test_screen_update_cell_data(s)
+
+    def plain_maps(self, rows, cols=10):
+        # the maps of a screen that is only filled with rows, never scrolled
+        f = self.screen(cols=cols, lines=len(rows))
+        self.fill(f, rows)
+        self.frame(f)
+        return self.maps(f)
+
+    def trigger_case(self, build, trigger, expect=None, fresh=True):
+        # build() returns a new screen; trigger(s) changes it. Returns the maps
+        # after the trigger frame, equal to those of a fresh screen that sees the
+        # trigger and one frame only (fresh=False when the first frame of a
+        # screen changes the view, as the history count is applied then) and to
+        # expect when given.
+        s = build()
+        self.frame(s)
+        self.warm(s)
+        trigger(s)
+        self.assertGreater(self.frame(s), 0, 'the trigger must make the paragraph resolve again')
+        got = self.maps(s)
+        if fresh:
+            f = build()
+            trigger(f)
+            self.frame(f)
+            self.ae(got, self.maps(f))
+        if expect is not None:
+            self.ae(got, expect)
+        return got
+
+    def test_cache_reuses_unchanged_paragraphs(self):
+        # Unchanged rows reuse their maps and resolve nothing; one written cell
+        # makes only its own paragraph resolve again (trigger: a dirty row).
+        # 'אבג abc' sets paragraph level 1 (first strong is R); the letters are
+        # level 1 and abc level 2, so every row has a non-trivial map.
+        with setup_for_testing():
+            s = self.screen()
+            rows = ['אבג abc'] * 3
+            self.fill(s, rows)
+            self.ae(self.frame(s), 3)
+            self.ae(self.frame(s), 0)
+            before = self.maps(s)
+            self.assertTrue(all(before[y] is not None for y in range(3)))
+            self.assertIsNone(before[3])
+            s.current_selections()
+            self.assertFalse(s.is_selection_dirty())
+            s.cursor_position(2, 10)
+            s.draw('z')
+            self.ae(self.frame(s), 1)
+            after = self.maps(s)
+            self.ae(after[0], before[0])
+            self.ae(after[2], before[2])
+            f = self.screen()
+            self.fill(f, rows)
+            f.cursor_position(2, 10)
+            f.draw('z')
+            self.frame(f)
+            self.ae(after, self.maps(f))
+            self.ae(self.frame(s), 0)
+
+    def test_cache_scroll_index(self):
+        # Trigger: the screen scrolls (index at the last row). Every row now
+        # holds another line, so no stamp may be trusted.
+        rows = ['אבג abc', 'abc אבג', 'אב', 'xyz', 'אבגד']
+
+        def build():
+            s = self.screen()
+            self.fill(s, rows)
+            return s
+
+        def trigger(s):
+            parse_bytes(s, b'\x1b[5;1H\x1bD')
+
+        with setup_for_testing():
+            got = self.trigger_case(build, trigger)
+            f = self.screen()
+            self.fill(f, rows[1:])
+            self.frame(f)
+            self.ae(got, self.maps(f))
+
+    def test_cache_reverse_index(self):
+        # Trigger: reverse index at the top row moves every line down one row.
+        rows = ['אבג abc', 'abc אבג', 'אב', 'xyz', 'אבגד']
+
+        def build():
+            s = self.screen()
+            self.fill(s, rows)
+            return s
+
+        def trigger(s):
+            parse_bytes(s, b'\x1b[1;1H\x1bM')
+
+        with setup_for_testing():
+            got = self.trigger_case(build, trigger)
+            f = self.screen()
+            self.fill(f, [''] + rows[:-1])
+            self.frame(f)
+            self.ae(got, self.maps(f))
+
+    def test_cache_insert_delete_lines_net_zero(self):
+        # Trigger: insert then delete a line at row 0 of the alt screen. The last
+        # row is lost by the insert, so the paragraph on the last two rows ends up
+        # as its first row alone, one row higher; its rows moved even though the
+        # screen looks the same size and shape. 10 R letters at level 1 reverse
+        # fully: (9, ..., 0).
+        def build():
+            s = self.screen()
+            parse_bytes(s, b'\x1b[?1049h')
+            s.cursor_position(4, 1)
+            s.draw('אבגדהוזחטיכלמ')
+            s.cursor_position(1, 1)
+            return s
+
+        def trigger(s):
+            parse_bytes(s, b'\x1b[L\x1b[M')
+
+        with setup_for_testing():
+            rev = tuple(range(9, -1, -1))
+            self.trigger_case(build, trigger, (None, None, None, rev, None))
+
+    def test_cache_scrollback_view(self):
+        # Trigger: scrolling the view up one line shows other lines on every row
+        rows = ['אבג', 'abאב', 'אב12', 'xyz', 'אבגדה', 'a', 'אבג abc']
+
+        def build():
+            s = self.screen(cols=5, lines=3, scrollback=10)
+            for r in rows:
+                parse_bytes(s, r.encode() + b'\r\n')
+            self.prerender(s)
+            return s
+
+        def trigger(s):
+            s.scroll(1, True)
+
+        with setup_for_testing():
+            # 7 lines and a blank one under them: the view was the last 3, now
+            # the three above
+            self.trigger_case(build, trigger, self.plain_maps(rows[4:], 5), fresh=False)
+
+    def test_cache_history_add_while_scrolled(self):
+        # Trigger: scrolled up, a line enters the history; the view follows it
+        # and every row shows another line than before
+        rows = ['אבג', 'abאב', 'אב12', 'xyz', 'אבגדה', 'a']
+
+        def build():
+            s = self.screen(cols=5, lines=3, scrollback=10)
+            for r in rows:
+                parse_bytes(s, r.encode() + b'\r\n')
+            # render every history line once (they stay dirty until first shown),
+            # which also applies the history count, then scroll up 2
+            self.prerender(s)
+            s.scroll(2, True)
+            return s
+
+        def trigger(s):
+            parse_bytes(s, '\x1b[3;1H\nאב'.encode())
+
+        with setup_for_testing():
+            # the view follows its lines into the history and shows the same text
+            self.trigger_case(build, trigger, self.plain_maps(rows[2:5], 5), fresh=False)
+
+    def test_cache_resize_rewrap(self):
+        # Trigger: a wider screen rewraps the paragraph. 13 R letters on one row
+        # reverse fully: (12, ..., 0).
+        def build():
+            s = self.screen()
+            s.draw('אבגדהוזחטיכלמ')
+            return s
+
+        def trigger(s):
+            s.resize(5, 13)
+
+        with setup_for_testing():
+            rev = tuple(range(12, -1, -1))
+            self.trigger_case(build, trigger, (rev, None, None, None, None))
+
+    def test_cache_option_toggle(self):
+        # Trigger: bidi_reorder off then on, force_ltr on then off. Turning
+        # either on drops the maps, turning it back must resolve again.
+        # 'abc' + three R letters: L L L R R R, maps (0, 1, 2, 5, 4, 3, ...).
+        want = (0, 1, 2, 5, 4, 3, 6, 7, 8, 9)
+        with setup_for_testing():
+            try:
+                for off in ({'bidi_reorder': False}, {'bidi_reorder': True, 'force_ltr': True}):
+                    s = self.screen()
+                    s.draw('abc' + A)
+                    self.frame(s)
+                    self.warm(s)
+                    self.ae(s.test_bidi_v2l(0), want)
+                    self.set_options(off)
+                    self.frame(s)
+                    self.assertIsNone(s.test_bidi_v2l(0), off)
+                    self.set_options({'bidi_reorder': True, 'force_ltr': False})
+                    self.assertGreater(self.frame(s), 0, off)
+                    self.ae(s.test_bidi_v2l(0), want, off)
+                    self.ae(self.frame(s), 0)
+            finally:
+                self.set_options({'bidi_reorder': True, 'force_ltr': False})
+
+    def test_cache_losing_and_gaining_rtl(self):
+        # Trigger: a dirty row. Overwriting the only RTL run leaves a Latin row,
+        # which resolves nothing, writing Hebrew into a Latin row resolves it.
+        with setup_for_testing():
+            s = self.screen()
+            s.draw('abc' + A)
+            self.frame(s)
+            self.warm(s)
+            s.cursor_position(1, 4)
+            s.draw('xyz')
+            self.frame(s)
+            self.assertIsNone(s.test_bidi_v2l(0))
+            self.warm(s)
+            s.cursor_position(1, 4)
+            s.draw(A)
+            self.ae(self.frame(s), 1)
+            self.ae(s.test_bidi_v2l(0), (0, 1, 2, 5, 4, 3, 6, 7, 8, 9))
+            self.ae(self.frame(s), 0)
+
+    def test_cache_tall_paragraph_always_resolves(self):
+        # A paragraph cut by the row cap is never cached, as its bounds depend on
+        # the row it is entered from: unchanged frames still resolve it.
+        with setup_for_testing():
+            s = self.screen(cols=2, lines=300, scrollback=200)
+            s.draw('א!' * 400)
+            self.assertGreater(self.frame(s), 0)
+            first = self.maps(s)
+            self.assertGreater(self.frame(s), 0)
+            self.ae(self.maps(s), first)
+            self.assertGreater(self.frame(s), 0)
+
+    def test_cache_paused_rendering(self):
+        # Trigger: rendering is paused, then resumed. Paused frames read a
+        # snapshot and are not cached, the live frame after must resolve again.
+        def build():
+            s = self.screen()
+            self.fill(s, ['אבג abc', 'abc אבג'])
+            return s
+
+        with setup_for_testing():
+            s = build()
+            self.frame(s)
+            self.warm(s)
+            s.pause_rendering(True, 1000)
+            self.frame(s)
+            s.pause_rendering(False)
+            self.assertGreater(self.frame(s), 0)
+            f = build()
+            self.frame(f)
+            self.ae(self.maps(s), self.maps(f))
+
+    def test_cache_overlay_row(self):
+        # Trigger: an overlay line on a Hebrew row, then removed. The row is
+        # unmapped while the overlay shows and mapped again afterwards.
+        want = (0, 1, 2, 5, 4, 3, 6, 7, 8, 9)
+        with setup_for_testing():
+            s = self.screen()
+            s.draw('abc' + A)
+            s.cursor_position(1, 9)
+            self.frame(s)
+            self.warm(s)
+            self.ae(s.test_bidi_v2l(0), want)
+            s.test_draw_overlay_line('xy', 8, 0)
+            self.frame(s)
+            self.assertIsNone(s.test_bidi_v2l(0))
+            s.test_update_overlay_text('')
+            self.assertGreater(self.frame(s), 0)
+            self.ae(s.test_bidi_v2l(0), want)
+
+    def test_cache_reset(self):
+        # Trigger: RIS. A correctness check only: cleared rows take the plain row
+        # path whatever the cache says, so it does not prove the generation bump.
+        want = (0, 1, 2, 5, 4, 3, 6, 7, 8, 9)
+        with setup_for_testing():
+            s = self.screen()
+            s.draw('abc' + A)
+            self.frame(s)
+            self.warm(s)
+            parse_bytes(s, b'\x1bc')
+            self.frame(s)
+            self.ae(self.maps(s), (None,) * 5)
+            s.draw('abc' + A)
+            self.assertGreater(self.frame(s), 0)
+            self.ae(s.test_bidi_v2l(0), want)
+
     def test_pointed_hebrew_shaping(self):
         # (n) shin + qamats + shin dot, lamed, vav + holam, final mem: 4 cells
         # (marks join their base cell). Shaped RTL with the test font, every
