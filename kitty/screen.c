@@ -7453,7 +7453,8 @@ test_create_write_buffer(Screen *screen UNUSED, PyObject *args UNUSED) {
 
 static PyObject *
 test_bidi_refresh(Screen *self, PyObject *a UNUSED) {
-    screen_bidi_start_frame(self, self->scroll_changed);
+    if (self->paused_rendering.expires_at) screen_bidi_start_paused_frame(self);
+    else screen_bidi_start_frame(self, self->scroll_changed);
     if (!bidi_enabled()) Py_RETURN_NONE;
     Line line = {.text_cache = self->text_cache};
     if (self->paused_rendering.expires_at) {

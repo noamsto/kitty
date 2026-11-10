@@ -427,8 +427,10 @@ class TestBidi(BaseTest):
         # between the last live frame and the split: the first live frame after
         # the pause must still see that row 1's levels changed since the last
         # live frame, as rendering is paused for synchronized output. When the
-        # split comes before the pause, the paused frames already show it, so a
-        # second paused frame must not replace what the first one kept.
+        # split comes before the pause, the paused frames already resolve the
+        # new levels, though with no level compare in a paused frame row 1 keeps
+        # its old glyphs until the next live frame; so a second paused frame must
+        # not replace the line state the first one kept.
         def split(s):
             s.cursor_position(1, 5)
             s.draw('ו')
