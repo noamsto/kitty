@@ -4241,11 +4241,8 @@ screen_bidi_resolve_row(Screen *self, LineBuf *paused, unsigned render_row, int 
     b->para.dirty_any = false;
 
     // A change on any row can change the levels of the others, so a dirty row
-    // redraws the rows not yet rendered this frame. Rows that lose their levels
-    // are redrawn through rendered_with_bidi, so a paragraph with nothing to
-    // reorder redraws only its own dirty rows. Off-screen history rows are not
-    // counted, they stay dirty until first rendered and would force a redraw
-    // every frame.
+    // redraws the rows not yet rendered this frame. Off-screen history rows are
+    // not counted: they stay dirty until first rendered.
     const int render_lines = (int)render_lines_for_screen(self);
     const int y_to_render_row = (int)render_row - range_y;
     const bool needs = bidi_paragraph_needs_reordering(&src, first, last);
@@ -4284,9 +4281,9 @@ screen_bidi_resolve_row(Screen *self, LineBuf *paused, unsigned render_row, int 
 static const uint8_t *
 screen_bidi_prepare_row(Screen *self, LineBuf *paused, unsigned render_row, int range_y, Line *linep) {
     const uint8_t *levels = screen_bidi_resolve_row(self, paused, render_row, range_y, linep);
-    // Cells shaped with levels keep their RTL glyphs (mirrored brackets, reversed
-    // runs) until shaped again, and a row can stop being reordered without being
-    // written to, e.g. when its paragraph is split above it
+    // Cells shaped with levels keep their RTL glyphs until shaped again, and a
+    // row can stop being reordered without being written to, e.g. when its
+    // paragraph is split above it
     if (!levels && linep->attrs.rendered_with_bidi && !linep->attrs.has_dirty_text) {
         BidiParaSource src = {.self = self, .paused = paused};
         bidi_source_mark_dirty(&src, range_y);
@@ -4300,8 +4297,7 @@ screen_bidi_start_frame(Screen *self) {
     BidiMaps *b = &self->bidi;
     b->para.valid = false;
     if (!b->v2l) return;
-    // Turned off at runtime: the old maps must stop applying to the selection,
-    // cursor and mouse. Clearing them sets changed, re-applying the selection.
+    // Turned off at runtime: drop the old maps; clearing them sets changed
     if (!bidi_enabled()) {
         bidi_set_all_rows_inactive(b);
         return;

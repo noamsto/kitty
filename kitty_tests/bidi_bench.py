@@ -1,24 +1,21 @@
 #!/usr/bin/env python
-# License: GPLv3 Copyright: 2025, Kovid Goyal <kovid at kovidgoyal.net>
+# License: GPLv3
 
 # Parse and render timing harness for the bidi row reordering at GPU upload.
-# Not a test: all work lives under the __main__ guard because the test runner
-# imports every module in kitty_tests/.
+# Not a test: all work lives in main() because the test runner imports every
+# module in kitty_tests/.
 #
-# Run from a kitty build directory (also works on a build without the
-# bidi_reorder option, provided test_screen_update_cell_data is available):
+# Run from a kitty build directory:
 #
 #   ./kitty/launcher/kitty +launch /abs/path/to/bidi_bench.py [--bidi on|off] [--runs N] [--count N]
 #
 # The font is $BIDI_BENCH_FONT, or LiberationMono-Regular.ttf next to this file.
-# The shaped-run cache is deliberately not cleared between runs: runs after the
-# first measure the warm-cache cost, which is what a terminal sees in steady
-# state. Compare the first run separately if cold-cache cost matters.
+# The shaped-run cache is not cleared between runs, so runs after the first
+# measure the warm-cache cost.
 #
 # Each frame is rendered once and holds at most LINES - 1 screen rows, so every
-# parsed row is rendered exactly once; cells is the number of cells in those
-# rows and ns/cell the render time per rendered cell, which compares scenarios
-# of different line lengths.
+# parsed row is rendered exactly once. cells is the number of cells in those
+# rows and ns/cell the render time per cell.
 
 import os
 import sys
@@ -57,7 +54,6 @@ def main() -> None:
 
     COLS, LINES, SCROLLBACK = 120, 50, 2000
 
-    # Data
     latin_words = ['alpha', 'beta', 'gamma', 'delta', 'kitty', 'render', 'cell', 'shape', 'row', 'glyph']
     hebrew_words = ['שלום', 'עולם', 'טרמינל', 'בדיקה', 'ברוכים', 'הבאים', 'שורה', 'תא', 'גופן', 'צבע']
 
@@ -87,7 +83,7 @@ def main() -> None:
                 length = 240 if n % 5 == 4 else 80
                 words = [hebrew_words, latin_words] if kind == 'bidi_heavy' else [latin_words]
                 ln = fill(words, length, n)
-                # make sure a line never ends in a space (it would be eaten by nothing, but keep it tidy)
+                # pad with x so a line never ends in a space and has exactly `length` characters
                 ln = ln.rstrip() + 'x' * (length - len(ln.rstrip()))
             lines.append(ln)
             total += len(ln)

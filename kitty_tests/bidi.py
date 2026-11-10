@@ -1,12 +1,13 @@
 #!/usr/bin/env python
-# License: GPLv3 Copyright: 2025, Kovid Goyal <kovid at kovidgoyal.net>
+# License: GPLv3
 
 import os
 import struct
 import tempfile
 from collections import namedtuple
 
-from kitty.fonts.render import shape_string
+from kitty.fast_data_types import test_screen_update_cell_data
+from kitty.fonts.render import setup_for_testing, shape_string
 
 from .base import BaseTest, draw_multicell, parse_bytes
 from .fonts import testing_font_data
@@ -139,9 +140,6 @@ class TestBidi(BaseTest):
         s.draw('abc' + A)
         self.assertIsNone(self.refresh(s, 0))
         # and a real frame uploads the row unpermuted
-        from kitty.fast_data_types import test_screen_update_cell_data
-        from kitty.fonts.render import setup_for_testing
-
         with setup_for_testing():
             s = self.screen(force_ltr=True)
             fgs = draw_coloured(s, 'abc' + A)
@@ -256,9 +254,6 @@ class TestBidi(BaseTest):
     def test_upload_permutes_cells(self):
         # each visual cell of the uploaded buffer is the logical cell v2l[visual],
         # told apart by fg colour, on a row whose map is not its own inverse
-        from kitty.fast_data_types import test_screen_update_cell_data
-        from kitty.fonts.render import setup_for_testing
-
         with setup_for_testing():
             s = self.screen(cols=5)
             fgs = draw_coloured(s, NSI)
@@ -285,9 +280,6 @@ class TestBidi(BaseTest):
     def test_overlay_row_unmapped(self):
         # IME overlay rows are not permuted, observed through the real
         # update-cell-data path
-        from kitty.fast_data_types import test_screen_update_cell_data
-        from kitty.fonts.render import setup_for_testing
-
         with setup_for_testing():
             s = self.screen()
             s.draw('abc' + A)
@@ -341,9 +333,6 @@ class TestBidi(BaseTest):
     def test_latin_paragraph_dirties_only_written_row(self):
         # with nothing to reorder, a write to one row of a soft-wrapped paragraph
         # must not redraw the rest of it
-        from kitty.fast_data_types import test_screen_update_cell_data
-        from kitty.fonts.render import setup_for_testing
-
         with setup_for_testing():
             s = self.screen(cols=10, lines=8)
             s.draw('x' * 75)
@@ -355,9 +344,6 @@ class TestBidi(BaseTest):
             self.ae(s.linebuf.dirty_lines(), [7])
 
     def test_level_change_redraws_paragraph(self):
-        from kitty.fast_data_types import test_screen_update_cell_data
-        from kitty.fonts.render import setup_for_testing
-
         with setup_for_testing():
             # the paragraph loses its last RTL char: the clean continuation row
             # was shaped at levels 2,2,1,2,2 (the . is CS between R and EN, so R)
@@ -379,14 +365,10 @@ class TestBidi(BaseTest):
 
     def test_split_paragraph_redraws_old_continuation(self):
         # Row 1 holds (12) soft-wrapped after five R letters. N0 makes the brackets
-        # R (EN inside counts as R, R before the opening bracket), so the row was
+        # R (EN inside counts as R, R before the opening bracket), so the row is
         # shaped with levels 1,2,2,1,0 and mirrored brackets. Overwriting the last
         # cell of row 0 clears its soft wrap: row 1 becomes its own paragraph with
-        # no RTL and no flag, and must be redrawn without levels although only
-        # row 0 was written to.
-        from kitty.fast_data_types import test_screen_update_cell_data
-        from kitty.fonts.render import setup_for_testing
-
+        # no RTL and no flag, and must be redrawn without levels.
         with setup_for_testing():
             s = self.screen(cols=5, lines=5)
             s.draw('אבגדה')
@@ -413,9 +395,6 @@ class TestBidi(BaseTest):
     def test_dirty_row_below_view_redraws_paragraph(self):
         # scrolled up, a dirty linebuf row of the paragraph below the view marks
         # the on-screen rows dirty
-        from kitty.fast_data_types import test_screen_update_cell_data
-        from kitty.fonts.render import setup_for_testing
-
         with setup_for_testing():
             s = self.screen(cols=5, lines=3, scrollback=10)
             s.draw('אבגדה' * 4)
