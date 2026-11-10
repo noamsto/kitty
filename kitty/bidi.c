@@ -263,7 +263,11 @@ bidi_resolve_paragraph(BidiMaps *b, BidiCellSource src, void *ctx, int first_y, 
     index_type first_render_row, bool cacheable) {
     const int num_rows = last_y - first_y + 1;
     const index_type cols = b->cols;
-    if (num_rows < 1 || num_rows > BIDI_MAX_PARAGRAPH_ROWS || !ensure_scratch(b, (size_t)num_rows * cols)) goto no_bidi;
+    // A failed resolve leaves the rows unmapped for this frame only
+    if (num_rows < 1 || num_rows > BIDI_MAX_PARAGRAPH_ROWS || !ensure_scratch(b, (size_t)num_rows * cols)) {
+        cacheable = false;
+        goto no_bidi;
+    }
     uint32_t n = 0;
     for (int r = 0; r < num_rows; r++) {
         b->row_start[r] = n;
@@ -283,7 +287,11 @@ bidi_resolve_paragraph(BidiMaps *b, BidiCellSource src, void *ctx, int first_y, 
     fribidi_get_bracket_types(b->text, (FriBidiStrIndex)n, b->types, b->brackets);
     FriBidiParType base_dir = FRIBIDI_PAR_LTR;
     b->resolve_count++;
-    if (fribidi_get_par_embedding_levels_ex(b->types, b->brackets, (FriBidiStrIndex)n, &base_dir, b->para_levels) <= 1) goto no_bidi;
+    // Returns the highest level plus one, or 0 on failure
+    const FriBidiLevel max_level =
+        fribidi_get_par_embedding_levels_ex(b->types, b->brackets, (FriBidiStrIndex)n, &base_dir, b->para_levels);
+    if (!max_level) cacheable = false;
+    if (max_level <= 1) goto no_bidi;
 
     for (uint32_t i = 0; i < n; i++) b->map[i] = (FriBidiStrIndex)i;
     bool any_active = false;
