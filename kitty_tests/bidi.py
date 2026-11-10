@@ -488,10 +488,12 @@ class TestBidi(BaseTest):
             s.scroll(s.historybuf.count, up)
             test_screen_update_cell_data(s)
 
-    def plain_maps(self, rows, cols=10):
-        # the maps of a screen that is only filled with rows, never scrolled
-        f = self.screen(cols=cols, lines=len(rows))
+    def plain_maps(self, rows, cols=10, lines=0):
+        # the maps of a screen filled with rows from the top, lines tall
+        # (default: one per row), with nothing pushed into the history
+        f = self.screen(cols=cols, lines=lines or len(rows))
         self.fill(f, rows)
+        self.ae(f.historybuf.count, 0)
         self.frame(f)
         return self.maps(f)
 
@@ -519,8 +521,9 @@ class TestBidi(BaseTest):
     def test_cache_reuses_unchanged_paragraphs(self):
         # Unchanged rows reuse their maps and resolve nothing; one written cell
         # makes only its own paragraph resolve again (trigger: a dirty row).
-        # 'אבג abc' sets paragraph level 1 (first strong is R); the letters are
-        # level 1 and abc level 2, so every row has a non-trivial map.
+        # 'אבג abc' at the forced paragraph level 0: the letters are level 1,
+        # the space (between R and L, N2) and abc level 0, so every row has the
+        # non-trivial map (2, 1, 0, 3, 4, ...).
         with setup_for_testing():
             s = self.screen()
             rows = ['אבג abc'] * 3
@@ -586,11 +589,14 @@ class TestBidi(BaseTest):
             self.ae(got, self.maps(f))
 
     def test_cache_insert_delete_lines_net_zero(self):
-        # Trigger: insert then delete a line at row 0 of the alt screen. The last
-        # row is lost by the insert, so the paragraph on the last two rows ends up
-        # as its first row alone, one row higher; its rows moved even though the
-        # screen looks the same size and shape. 10 R letters at level 1 reverse
-        # fully: (9, ..., 0).
+        # Trigger: insert then delete a line at row 0 of the alt screen. The
+        # insert pushes the paragraph's second row off the bottom, the delete
+        # brings the long row back to row 3 with a blank row 4 under it. The
+        # long row keeps its wrap flag, so row 4 still counts as its
+        # continuation: the paragraph is still [3, 4] and matches the stored
+        # bounds, only the linebuf movement generation forces the re-resolve.
+        # 10 R letters at level 1 reverse fully: (9, ..., 0); the blank row 4
+        # is all level 0 and unmapped.
         def build():
             s = self.screen()
             parse_bytes(s, b'\x1b[?1049h')
@@ -601,6 +607,7 @@ class TestBidi(BaseTest):
 
         def trigger(s):
             parse_bytes(s, b'\x1b[L\x1b[M')
+            self.assertTrue(s.linebuf.is_continued(4))
 
         with setup_for_testing():
             rev = tuple(range(9, -1, -1))
@@ -621,9 +628,75 @@ class TestBidi(BaseTest):
             s.scroll(1, True)
 
         with setup_for_testing():
-            # 7 lines and a blank one under them: the view was the last 3, now
-            # the three above
-            self.trigger_case(build, trigger, self.plain_maps(rows[4:], 5), fresh=False)
+            # the last line soft-wraps onto two rows, then comes a blank row: the
+            # view showed 'אבג a', 'bc' and the blank row, one line up it shows
+            # 'a' and the wrapped paragraph. The paragraph fits in the view both
+            # times, so its stamps no longer match its render rows.
+            self.trigger_case(build, trigger, self.plain_maps(rows[5:], 5, lines=3), fresh=False)
+
+    # A soft-wrapped paragraph of three rows on 5 columns, of which one row is
+    # out of view after the scroll. Its range-y bounds are the same before and
+    # after, and the render rows it keeps on screen held two of its own rows last
+    # frame, so their stamps still match: only the scroll in the frame key makes
+    # it resolve again. The expected maps are those of the paragraph alone at the
+    # top of a fresh screen.
+    EDGE_PARAGRAPH = 'אבג abאב 12ab'
+
+    def edge_paragraph_maps(self):
+        f = self.screen(cols=5, lines=5)
+        f.draw(self.EDGE_PARAGRAPH)
+        self.ae(f.historybuf.count, 0)
+        self.frame(f)
+        m = self.maps(f)
+        self.assertTrue(all(m[y] is not None for y in range(3)))
+        self.ae(m[3:], (None, None))
+        return m
+
+    def test_cache_scrollback_view_crossing_bottom_edge(self):
+        # Trigger: scrolling the view up one line. One Latin line in the
+        # history, two on screen, then the paragraph on screen rows 2-4. After
+        # the scroll the view shows the history line, the two Latin lines and
+        # the paragraph's first two rows; its third row is below the view. The
+        # extra leading render row of pixel scroll is above the history line,
+        # where there is no line.
+        def build():
+            s = self.screen(cols=5, lines=5, scrollback=10)
+            parse_bytes(s, b'x0\r\nx1\r\nx2\r\n')
+            s.draw(self.EDGE_PARAGRAPH)
+            self.assertTrue(s.linebuf.is_continued(4))
+            self.prerender(s)
+            self.ae(s.historybuf.count, 1)
+            return s
+
+        def trigger(s):
+            s.scroll(1, True)
+
+        with setup_for_testing():
+            m = self.edge_paragraph_maps()
+            self.trigger_case(build, trigger, (None, None, None, m[0], m[1]), fresh=False)
+
+    def test_cache_scrollback_view_crossing_top_edge(self):
+        # Trigger: scrolling the view down one line. The paragraph then four
+        # Latin lines and a blank row: the paragraph is the whole history.
+        # Scrolled up 3 the view shows the paragraph on rows 0-2; one line down
+        # its first row is above the view and its other two on rows 0-1. Pixel
+        # scroll is off, as its extra leading render row would still show the
+        # first row.
+        def build():
+            s = self.screen(cols=5, lines=5, scrollback=10, pixel_scroll=False)
+            s.draw(self.EDGE_PARAGRAPH)
+            parse_bytes(s, b'\r\nx1\r\nx2\r\nx3\r\nx4\r\n')
+            self.prerender(s)
+            self.ae(s.historybuf.count, 3)
+            s.scroll(3, True)
+            return s
+
+        def trigger(s):
+            s.scroll(1, False)
+
+        with setup_for_testing():
+            m = self.edge_paragraph_maps()
+            self.trigger_case(build, trigger, (m[1], m[2], None, None, None), fresh=False)
 
     def test_cache_history_add_while_scrolled(self):
         # Trigger: scrolled up, a line enters the history; the view follows it
