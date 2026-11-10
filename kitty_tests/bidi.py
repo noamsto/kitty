@@ -2,7 +2,9 @@
 # License: GPLv3 Copyright: 2025, Kovid Goyal <kovid at kovidgoyal.net>
 
 import os
+import struct
 import tempfile
+from collections import namedtuple
 
 from kitty.fast_data_types import Screen
 from kitty.fonts.render import shape_string
@@ -13,6 +15,16 @@ from .fonts import testing_font_data
 
 A = 'אבג'  # three Hebrew letters, bidi class R
 ID10 = tuple(range(10))
+GPUCellData = namedtuple('GPUCellData', 'fg bg decoration_fg sprite_idx attrs')
+GPU_CELL = struct.Struct('=5I')  # GPUCell in kitty/line.h, 20 bytes
+
+
+def gpu_row(s, buf, y):
+    # the cells of screen row y in the buffer test_screen_update_cell_data
+    # returns, which has an extra leading render row when pixel scroll is on
+    row_size = s.columns * GPU_CELL.size
+    start = (y + len(buf) // row_size - s.lines) * row_size
+    return [GPUCellData(*c) for c in GPU_CELL.iter_unpack(buf[start:start + row_size])]
 
 
 class TestBidi(BaseTest):
@@ -265,6 +277,38 @@ class TestBidi(BaseTest):
             s.test_bidi_refresh()
             self.assertIsNone(s.test_bidi_v2l(1))
             self.ae(s.linebuf.dirty_lines(), [0, 1])
+
+    def test_split_paragraph_redraws_old_continuation(self):
+        # Row 1 holds (12) soft-wrapped after five R letters. N0 makes the brackets
+        # R (EN inside counts as R, R before the opening bracket), so the row was
+        # shaped with levels 1,2,2,1,0 and mirrored brackets. Overwriting the last
+        # cell of row 0 clears its soft wrap: row 1 becomes its own paragraph with
+        # no RTL and no flag, and must be redrawn without levels although only
+        # row 0 was written to.
+        from kitty.fast_data_types import test_screen_update_cell_data
+        from kitty.fonts.render import setup_for_testing
+        with setup_for_testing():
+            s = self.screen(cols=5, lines=5)
+            s.draw('אבגדה')
+            s.draw('(12)')
+            test_screen_update_cell_data(s)
+            self.ae(s.test_bidi_levels(1), (1, 2, 2, 1, 0))
+            self.assertFalse(s.test_bidi_line_flag(1))
+            self.ae(s.linebuf.dirty_lines(), [])
+            s.cursor_position(1, 5)
+            s.draw('x')
+            self.assertFalse(s.linebuf.is_continued(1))
+            self.ae(s.linebuf.dirty_lines(), [0])
+            s.test_bidi_refresh()
+            self.assertIsNone(s.test_bidi_v2l(1))
+            self.ae(s.linebuf.dirty_lines(), [0, 1])
+            row1 = gpu_row(s, test_screen_update_cell_data(s), 1)
+            # the same text rendered on a fresh screen, never bidi
+            f = self.screen(cols=5, lines=5)
+            f.draw('(12)')
+            fresh = gpu_row(f, test_screen_update_cell_data(f), 0)
+            self.assertTrue(any(c.sprite_idx for c in fresh))
+            self.ae([c.sprite_idx for c in row1], [c.sprite_idx for c in fresh])
 
     def test_dirty_row_below_view_redraws_paragraph(self):
         # scrolled up, a dirty linebuf row of the paragraph below the view marks

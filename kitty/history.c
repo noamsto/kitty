@@ -241,6 +241,13 @@ historybuf_set_line_has_image_placeholders(HistoryBuf *self, index_type y, bool 
 }
 
 void
+historybuf_mark_line_rendered(HistoryBuf *self, index_type y, bool with_bidi) {
+    LineAttrs *a = attrptr(self, index_of(self, y));
+    a->has_dirty_text = false;
+    a->rendered_with_bidi = with_bidi;
+}
+
+void
 historybuf_mark_line_has_bidi(HistoryBuf *self, index_type y) {
     attrptr(self, index_of(self, y))->has_bidi = true;
 }

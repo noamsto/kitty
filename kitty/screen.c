@@ -4213,12 +4213,8 @@ bidi_paragraph_needs_reordering(BidiParaSource *s, int first, int last) {
     return true;
 }
 
-// Prepares the map of a render row and returns its per-cell levels, or NULL if
-// the row is not to be reordered. range_y is the row in range_line() coordinates
-// or, when paused is not NULL, the row in the snapshot. Rows must be visited in
-// ascending order, so that the first on-screen row of a paragraph resolves it.
 static const uint8_t *
-screen_bidi_prepare_row(Screen *self, LineBuf *paused, unsigned render_row, int range_y, Line *linep) {
+screen_bidi_resolve_row(Screen *self, LineBuf *paused, unsigned render_row, int range_y, Line *linep) {
     BidiMaps *b = &self->bidi;
     if (b->para.valid && b->para.first <= range_y && range_y <= b->para.last) {
         if (b->para.dirty_any) linep->attrs.has_dirty_text = true;
@@ -4274,6 +4270,24 @@ screen_bidi_prepare_row(Screen *self, LineBuf *paused, unsigned render_row, int 
     if (!bidi_resolve_paragraph(b, cell_source, &src, first, last, y_to_render_row, render_row)) return NULL;
     b->para.has_bidi = true;
     return b->active[render_row] ? b->levels + (size_t)render_row * b->cols : NULL;
+}
+
+// Prepares the map of a render row and returns its per-cell levels, or NULL if
+// the row is not to be reordered. range_y is the row in range_line() coordinates
+// or, when paused is not NULL, the row in the snapshot. Rows must be visited in
+// ascending order, so that the first on-screen row of a paragraph resolves it.
+static const uint8_t *
+screen_bidi_prepare_row(Screen *self, LineBuf *paused, unsigned render_row, int range_y, Line *linep) {
+    const uint8_t *levels = screen_bidi_resolve_row(self, paused, render_row, range_y, linep);
+    // Cells shaped with levels keep their RTL glyphs (mirrored brackets, reversed
+    // runs) until shaped again, and a row can stop being reordered without being
+    // written to, e.g. when its paragraph is split above it
+    if (!levels && linep->attrs.rendered_with_bidi && !linep->attrs.has_dirty_text) {
+        BidiParaSource src = {.self = self, .paused = paused};
+        bidi_source_mark_dirty(&src, range_y);
+        linep->attrs.has_dirty_text = true;
+    }
+    return levels;
 }
 
 static void
@@ -4338,7 +4352,7 @@ screen_update_cell_data(Screen *self, void *address, FONTS_DATA_HANDLE fonts_dat
                     render_line(fonts_data, linebuf->line, lnum, &self->paused_rendering.cursor, self->disable_ligatures, self->lc, levels);
                     // Cell images are not rendered here: this would modify the live grman using snapshot row numbers
                     if (linebuf->line->attrs.has_dirty_text && screen_has_marker(self)) mark_text_in_line(self->marker, linebuf->line, &self->as_ansi_buf);
-                    linebuf_mark_line_clean(linebuf, y);
+                    linebuf_mark_line_rendered(linebuf, y, linebuf->line->attrs.rendered_with_bidi);
                 }
                 if (levels) update_line_data_bidi(linebuf->line, y, address, self->bidi.v2l + (size_t)y * self->columns);
                 else update_line_data(linebuf->line, y, address);
@@ -4371,6 +4385,7 @@ screen_update_cell_data(Screen *self, void *address, FONTS_DATA_HANDLE fonts_dat
             // The overlay (IME pre-edit) row gets no bidi
             levels = NULL;
             bidi_set_row_inactive(&self->bidi, render_row);
+            if (linep->attrs.rendered_with_bidi) linep->attrs.has_dirty_text = true;
         }
         if (is_history) {
             // we render line graphics even if the line is not dirty as graphics commands received after
@@ -4379,7 +4394,7 @@ screen_update_cell_data(Screen *self, void *address, FONTS_DATA_HANDLE fonts_dat
             if (force_history_render || linep->attrs.has_dirty_text) {
                 render_line(fonts_data, linep, lnum, self->cursor, self->disable_ligatures, self->lc, levels);
                 if (screen_has_marker(self)) mark_text_in_line(self->marker, linep, &self->as_ansi_buf);
-                historybuf_mark_line_clean(self->historybuf, lnum);
+                historybuf_mark_line_rendered(self->historybuf, lnum, linep->attrs.rendered_with_bidi);
             }
         } else {
             if (linep->attrs.has_dirty_text || (cursor_has_moved && (self->cursor->y == lnum || self->last_rendered.cursor.y == lnum))) {
@@ -4387,7 +4402,7 @@ screen_update_cell_data(Screen *self, void *address, FONTS_DATA_HANDLE fonts_dat
                 screen_render_line_graphics(self, linep, virtual_y - (int)self->scrolled_by);
                 if (linep->attrs.has_dirty_text && screen_has_marker(self)) mark_text_in_line(self->marker, linep, &self->as_ansi_buf);
                 if (is_overlay_active && lnum == self->overlay_line.ynum) render_overlay_line(self, linep, fonts_data);
-                linebuf_mark_line_clean(self->linebuf, lnum);
+                linebuf_mark_line_rendered(self->linebuf, lnum, linep->attrs.rendered_with_bidi);
             }
         }
         if (levels) update_line_data_bidi(linep, render_row, address, self->bidi.v2l + (size_t)render_row * self->columns);

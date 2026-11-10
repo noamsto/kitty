@@ -60,6 +60,12 @@ linebuf_set_line_has_image_placeholders(LineBuf *self, index_type y, bool val) {
 }
 
 void
+linebuf_mark_line_rendered(LineBuf *self, index_type y, bool with_bidi) {
+    self->line_attrs[y].has_dirty_text = false;
+    self->line_attrs[y].rendered_with_bidi = with_bidi;
+}
+
+void
 linebuf_set_line_has_bidi(LineBuf *self, index_type y, bool val) {
     self->line_attrs[y].has_bidi = val;
 }

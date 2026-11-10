@@ -2287,6 +2287,8 @@ render_line(FONTS_DATA_HANDLE fg_, Line *line, index_type lnum, Cursor *cursor, 
     bool center_glyph = false;
     bool disable_ligature_at_cursor = cursor != NULL && disable_ligature_strategy == DISABLE_LIGATURES_CURSOR;
     const bool bidi = levels != NULL;
+    // the caller writes this back to the line's source along with the clean state
+    line->attrs.rendered_with_bidi = bidi;
     uint8_t run_level = 0;
     index_type first_cell_in_run, i;
     for (i = 0, first_cell_in_run = 0; i < line->xnum; i++) {
