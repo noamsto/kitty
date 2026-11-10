@@ -2189,8 +2189,10 @@ render_run(
                     break;
                 }
             }
-            // a PUA+space ligature is a single glyph drawn across its cells, its sprites are not mirrored
-            render_groups(fg, rf, center_glyph, tc, pua_space_ligature ? BIDI_DIR_GUESS : dir);
+            // a PUA+space ligature is a single glyph drawn across its cells; on an
+            // RTL level its cells are displayed last to first, so its sprites are
+            // mirrored like those of any other multi-cell group
+            render_groups(fg, rf, center_glyph, tc, dir);
             break;
         case BLANK_FONT:
             while (num_cells--) {

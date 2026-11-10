@@ -219,6 +219,92 @@ class TestBidi(BaseTest):
             test_screen_update_cell_data(s)
             self.assertIsNone(s.test_bidi_v2l(0))
 
+    def test_option_off_at_runtime(self):
+        # turning bidi off at runtime (config reload) drops the maps on the next
+        # frame instead of leaving the old ones applied to selection, cursor and mouse
+        for opts in ({'bidi_reorder': False}, {'bidi_reorder': True, 'force_ltr': True}):
+            s = self.screen()
+            s.draw('abc' + A)
+            self.ae(self.refresh(s, 0), (0, 1, 2, 5, 4, 3, 6, 7, 8, 9))
+            self.set_options(opts)
+            s.cursor_position(1, 1)
+            s.erase_in_line(2)
+            s.draw('hello')
+            s.test_bidi_refresh()
+            self.assertIsNone(s.test_bidi_v2l(0), opts)
+            self.ae([s.test_bidi_logical_x(x, 0) for x in range(s.columns)], list(ID10), opts)
+
+    def test_resize_narrower_drops_maps(self):
+        # until the next frame, maps sized for the old width must not be used
+        s = self.screen(cols=20, lines=3)
+        s.draw(''.join(chr(0x5d0 + i) for i in range(20)))
+        self.ae(self.refresh(s, 0), tuple(range(19, -1, -1)))
+        s.resize(3, 10)
+        self.ae([s.test_bidi_logical_x(x, 0) for x in range(10)], list(ID10))
+        self.ae([s.test_bidi_visual_x(x, 0) for x in range(10)], list(ID10))
+        self.ae(self.refresh(s, 0), tuple(range(9, -1, -1)))
+
+    def test_level_change_redraws_paragraph(self):
+        from kitty.fast_data_types import test_screen_update_cell_data
+        from kitty.fonts.render import setup_for_testing
+        with setup_for_testing():
+            # the paragraph loses its last RTL char: the clean continuation row
+            # was shaped at levels 2,2,1,2,2 (the . is CS between R and EN, so R)
+            # and must be redrawn at level 0. Row 0 keeps its last cell, as
+            # writing it would clear the soft wrap and split the paragraph.
+            s = self.screen(cols=5, lines=5)
+            s.draw('אבגד.')
+            s.draw('12 34')
+            test_screen_update_cell_data(s)
+            self.ae(s.test_bidi_levels(1), (2, 2, 1, 2, 2))
+            self.ae(s.linebuf.dirty_lines(), [])
+            s.cursor_position(1, 1)
+            s.draw('abcd')
+            self.assertTrue(s.linebuf.is_continued(1))
+            self.ae(s.linebuf.dirty_lines(), [0])
+            s.test_bidi_refresh()
+            self.assertIsNone(s.test_bidi_v2l(1))
+            self.ae(s.linebuf.dirty_lines(), [0, 1])
+
+    def test_dirty_row_below_view_redraws_paragraph(self):
+        # scrolled up, a dirty linebuf row of the paragraph below the view marks
+        # the on-screen rows dirty
+        from kitty.fast_data_types import test_screen_update_cell_data
+        from kitty.fonts.render import setup_for_testing
+        with setup_for_testing():
+            s = self.screen(cols=5, lines=3, scrollback=10)
+            s.draw('אבגדה' * 4)
+            self.ae(s.historybuf.count, 1)
+            test_screen_update_cell_data(s)
+            s.scroll(1, True)
+            test_screen_update_cell_data(s)
+            self.ae(s.scrolled_by, 1)
+            self.ae(s.linebuf.dirty_lines(), [])
+            s.cursor_position(3, 1)
+            s.draw('a')
+            self.ae(s.scrolled_by, 1)
+            self.ae(s.linebuf.dirty_lines(), [2])
+            s.test_bidi_refresh()
+            self.ae(s.linebuf.dirty_lines(), [0, 1, 2])
+
+    def test_tall_paragraph_keeps_uploaded_maps(self):
+        # One paragraph of 400 rows of 'א!' on a 300 line screen, 100 rows in the
+        # history. Each ! (ON) lies between R letters, N1 makes it R (level 1) and
+        # each row maps to (1, 0), except at the end of a resolved window, where the
+        # ! lies between R and eos (L), N2 gives it level 0 and its row maps to
+        # (0, 1). With BIDI_MAX_PARAGRAPH_ROWS = 256:
+        # row 0 resolves [-100, 155], row 156 resolves [28, 283] and row 284
+        # resolves [44, 299]. Later windows must not rewrite the maps of rows
+        # already uploaded with an earlier one, so rows 155 and 283 keep the map
+        # their glyphs were shaped with; 299 is the true end of the paragraph.
+        s = self.screen(cols=2, lines=300, scrollback=200)
+        s.draw('א!' * 400)
+        self.ae(s.historybuf.count, 100)
+        s.test_bidi_refresh()
+        maps = [s.test_bidi_v2l(y) for y in range(s.lines)]
+        self.ae(set(maps), {(0, 1), (1, 0)})
+        self.ae([y for y, m in enumerate(maps) if m == (0, 1)], [155, 283, 299])
+
     def test_pointed_hebrew_shaping(self):
         # (n) shin + qamats + shin dot, lamed, vav + holam, final mem: 4 cells
         # (marks join their base cell). Shaped RTL with the test font, every

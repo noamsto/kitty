@@ -66,6 +66,11 @@ bidi_set_row_inactive(BidiMaps *b, index_type render_row) {
     b->changed = true;
 }
 
+void
+bidi_set_all_rows_inactive(BidiMaps *b) {
+    for (index_type r = 0; r < b->rows; r++) bidi_set_row_inactive(b, r);
+}
+
 static bool
 ensure_scratch(BidiMaps *b, size_t cap) {
     if (!b->row_start) {
@@ -91,10 +96,10 @@ ensure_scratch(BidiMaps *b, size_t cap) {
 }
 
 static void
-set_paragraph_inactive(BidiMaps *b, int first_y, int last_y, int y_to_render_row) {
+set_paragraph_inactive(BidiMaps *b, int first_y, int last_y, int y_to_render_row, index_type first_render_row) {
     for (int y = first_y; y <= last_y; y++) {
         const int render_row = y + y_to_render_row;
-        if (render_row >= 0) bidi_set_row_inactive(b, (index_type)render_row);
+        if (render_row >= (int)first_render_row) bidi_set_row_inactive(b, (index_type)render_row);
     }
 }
 
@@ -128,7 +133,7 @@ write_row(BidiMaps *b, index_type render_row, uint32_t row_first_char, uint32_t 
 }
 
 bool
-bidi_resolve_paragraph(BidiMaps *b, BidiCellSource src, void *ctx, int first_y, int last_y, int y_to_render_row) {
+bidi_resolve_paragraph(BidiMaps *b, BidiCellSource src, void *ctx, int first_y, int last_y, int y_to_render_row, index_type first_render_row) {
     const int num_rows = last_y - first_y + 1;
     const index_type cols = b->cols;
     if (num_rows < 1 || num_rows > BIDI_MAX_PARAGRAPH_ROWS || !ensure_scratch(b, (size_t)num_rows * cols)) goto no_bidi;
@@ -156,7 +161,7 @@ bidi_resolve_paragraph(BidiMaps *b, BidiCellSource src, void *ctx, int first_y, 
     bool any_active = false;
     for (int r = 0; r < num_rows; r++) {
         const int render_row = first_y + r + y_to_render_row;
-        if (render_row < 0 || render_row >= (int)b->rows) continue;
+        if (render_row < (int)first_render_row || render_row >= (int)b->rows) continue;
         const uint32_t row_first = b->row_start[r], row_end = b->row_start[r + 1];
         const FriBidiLevel ret = fribidi_reorder_line(
             0, b->types, (FriBidiStrIndex)(row_end - row_first), (FriBidiStrIndex)row_first, FRIBIDI_PAR_LTR, b->para_levels, NULL, b->map);
@@ -170,7 +175,7 @@ bidi_resolve_paragraph(BidiMaps *b, BidiCellSource src, void *ctx, int first_y, 
     return any_active;
 
 no_bidi:
-    set_paragraph_inactive(b, first_y, last_y, y_to_render_row);
+    set_paragraph_inactive(b, first_y, last_y, y_to_render_row, first_render_row);
     return false;
 }
 

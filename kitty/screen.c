@@ -648,6 +648,9 @@ screen_resize(Screen *self, unsigned int lines, unsigned int columns) {
     screen_pause_rendering(self, false, 0);
     lines = MAX(1u, lines);
     columns = MAX(1u, columns);
+    // The maps are sized and laid out for the old geometry; the mouse and the
+    // cursor read them before the next frame rebuilds them
+    bidi_set_all_rows_inactive(&self->bidi);
 
     bool is_main = self->linebuf == self->main_linebuf;
     index_type num_content_lines_before, num_content_lines_after;
@@ -4240,26 +4243,36 @@ screen_bidi_prepare_row(Screen *self, LineBuf *paused, unsigned render_row, int 
     b->para.valid = true;
     b->para.has_bidi = false;
     b->para.dirty_any = false;
-    if (!bidi_paragraph_needs_reordering(&src, first, last) || !bidi_maps_ensure(b, render_lines_for_screen(self), self->columns)) {
-        bidi_set_row_inactive(b, render_row);
-        return NULL;
-    }
-    const int y_to_render_row = (int)render_row - range_y;
-    const BidiCellSource cell_source = {.cells_at = bidi_source_cells_at, .text_cache = self->text_cache};
-    if (!bidi_resolve_paragraph(b, cell_source, &src, first, last, y_to_render_row)) return NULL;
-    b->para.has_bidi = true;
 
-    const int first_on_screen = MAX(first, -y_to_render_row), last_on_screen = MIN(last, (int)b->rows - 1 - y_to_render_row);
+    // A change on any row can change the levels of the others, even when the
+    // paragraph no longer needs reordering, so a dirty row redraws the rows not
+    // yet rendered this frame. Off-screen history rows are not counted, they
+    // stay dirty until first rendered and would force a redraw every frame.
+    const int render_lines = (int)render_lines_for_screen(self);
+    const int y_to_render_row = (int)render_row - range_y;
     Line l = {0};
-    for (int y = first_on_screen; y <= last_on_screen && !b->para.dirty_any; y++) {
+    for (int y = first; y <= last && !b->para.dirty_any; y++) {
+        const int r = y + y_to_render_row;
+        if (y < 0 && (r < 0 || r >= render_lines)) continue;
         bidi_source_line(&src, y, &l);
         b->para.dirty_any = l.attrs.has_dirty_text;
     }
     if (b->para.dirty_any) {
-        for (int y = first_on_screen; y <= last_on_screen; y++) bidi_source_mark_dirty(&src, y);
+        const int last_on_screen = MIN(last, render_lines - 1 - y_to_render_row);
+        for (int y = range_y; y <= last_on_screen; y++) bidi_source_mark_dirty(&src, y);
         // linep->attrs is a copy taken before the row was marked dirty above
         linep->attrs.has_dirty_text = true;
     }
+
+    if (!bidi_paragraph_needs_reordering(&src, first, last) || !bidi_maps_ensure(b, (index_type)render_lines, self->columns)) {
+        bidi_set_row_inactive(b, render_row);
+        return NULL;
+    }
+    const BidiCellSource cell_source = {.cells_at = bidi_source_cells_at, .text_cache = self->text_cache};
+    // A paragraph longer than the window can start a new window above this row:
+    // the rows above were uploaded with the previous window's maps and keep them
+    if (!bidi_resolve_paragraph(b, cell_source, &src, first, last, y_to_render_row, render_row)) return NULL;
+    b->para.has_bidi = true;
     return b->active[render_row] ? b->levels + (size_t)render_row * b->cols : NULL;
 }
 
@@ -4267,8 +4280,15 @@ static void
 screen_bidi_start_frame(Screen *self) {
     BidiMaps *b = &self->bidi;
     b->para.valid = false;
+    if (!b->v2l) return;
+    // Turned off at runtime: the old maps must stop applying to the selection,
+    // cursor and mouse. Clearing them sets changed, re-applying the selection.
+    if (!bidi_enabled()) {
+        bidi_set_all_rows_inactive(b);
+        return;
+    }
     const index_type render_lines = render_lines_for_screen(self);
-    if (b->v2l && (b->rows != render_lines || b->cols != self->columns)) bidi_maps_ensure(b, render_lines, self->columns);
+    if (b->rows != render_lines || b->cols != self->columns) bidi_maps_ensure(b, render_lines, self->columns);
 }
 // }}}
 
@@ -7346,8 +7366,8 @@ test_create_write_buffer(Screen *screen UNUSED, PyObject *args UNUSED) {
 
 static PyObject *
 test_bidi_refresh(Screen *self, PyObject *a UNUSED) {
-    if (!bidi_enabled()) Py_RETURN_NONE;
     screen_bidi_start_frame(self);
+    if (!bidi_enabled()) Py_RETURN_NONE;
     Line line = {.text_cache = self->text_cache};
     if (self->paused_rendering.expires_at) {
         LineBuf *linebuf = self->paused_rendering.linebuf;
