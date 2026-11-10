@@ -15,11 +15,26 @@ free_row_maps(BidiMaps *b) {
     free(b->levels);
     free(b->active);
     free(b->row_scratch);
+    free(b->stamp_first);
+    free(b->stamp_last);
+    free(b->stamp_valid);
+    free(b->line_id);
+    free(b->prev_line_id);
+    free(b->prev_active);
+    free(b->prev_levels);
     b->v2l = NULL;
     b->l2v = NULL;
     b->levels = NULL;
     b->active = NULL;
     b->row_scratch = NULL;
+    b->stamp_first = NULL;
+    b->stamp_last = NULL;
+    b->stamp_valid = NULL;
+    b->line_id = NULL;
+    b->prev_line_id = NULL;
+    b->prev_active = NULL;
+    b->prev_levels = NULL;
+    b->snapshot_taken = false;
     b->rows = 0;
     b->cols = 0;
 }
@@ -42,7 +57,10 @@ bidi_maps_ensure(BidiMaps *b, index_type rows, index_type cols) {
     if (b->v2l && b->rows == rows && b->cols == cols) return true;
     const bool had_maps = b->v2l != NULL;
     free_row_maps(b);
-    if (had_maps) b->changed = true;
+    if (had_maps) {
+        b->changed = true;
+        bidi_cache_invalidate(b);
+    }
     if (!rows || !cols || cols > UINT16_MAX) return false;
     const size_t cells = (size_t)rows * cols;
     b->v2l = malloc(cells * sizeof(b->v2l[0]));
@@ -50,7 +68,15 @@ bidi_maps_ensure(BidiMaps *b, index_type rows, index_type cols) {
     b->levels = malloc(cells * sizeof(b->levels[0]));
     b->active = calloc(rows, sizeof(b->active[0]));
     b->row_scratch = malloc(cols);
-    if (!b->v2l || !b->l2v || !b->levels || !b->active || !b->row_scratch) {
+    b->stamp_first = calloc(rows, sizeof(b->stamp_first[0]));
+    b->stamp_last = calloc(rows, sizeof(b->stamp_last[0]));
+    b->stamp_valid = calloc(rows, sizeof(b->stamp_valid[0]));
+    b->line_id = calloc(rows, sizeof(b->line_id[0]));
+    b->prev_line_id = calloc(rows, sizeof(b->prev_line_id[0]));
+    b->prev_active = calloc(rows, sizeof(b->prev_active[0]));
+    b->prev_levels = calloc(cells, sizeof(b->prev_levels[0]));
+    if (!b->v2l || !b->l2v || !b->levels || !b->active || !b->row_scratch || !b->stamp_first || !b->stamp_last ||
+        !b->stamp_valid || !b->line_id || !b->prev_line_id || !b->prev_active || !b->prev_levels) {
         free_row_maps(b);
         return false;
     }
@@ -59,16 +85,111 @@ bidi_maps_ensure(BidiMaps *b, index_type rows, index_type cols) {
     return true;
 }
 
-void
-bidi_set_row_inactive(BidiMaps *b, index_type render_row) {
-    if (!b->v2l || render_row >= b->rows || !b->active[render_row]) return;
+// Keeps last frame's state for the level compare; taken before the first change
+// of a frame, as the compare looks lines up by their position last frame.
+static void
+take_snapshot(BidiMaps *b) {
+    if (b->snapshot_taken) return;
+    memcpy(b->prev_active, b->active, b->rows * sizeof(b->active[0]));
+    memcpy(b->prev_levels, b->levels, (size_t)b->rows * b->cols * sizeof(b->levels[0]));
+    b->snapshot_taken = true;
+}
+
+static void
+row_inactive(BidiMaps *b, index_type render_row) {
+    if (!b->active[render_row]) return;
+    take_snapshot(b);
     b->active[render_row] = false;
     b->changed = true;
 }
 
 void
+bidi_set_row_inactive(BidiMaps *b, index_type render_row) {
+    if (!b->v2l || render_row >= b->rows) return;
+    b->stamp_valid[render_row] = false;
+    row_inactive(b, render_row);
+}
+
+void
 bidi_set_all_rows_inactive(BidiMaps *b) {
     for (index_type r = 0; r < b->rows; r++) bidi_set_row_inactive(b, r);
+}
+
+static bool
+keys_equal(const BidiFrameKey *a, const BidiFrameKey *k) {
+    return a->linebuf == k->linebuf && a->historybuf == k->historybuf && a->linebuf_generation == k->linebuf_generation &&
+           a->historybuf_generation == k->historybuf_generation && a->rows == k->rows && a->cols == k->cols &&
+           a->scrolled_by == k->scrolled_by && a->row_offset == k->row_offset;
+}
+
+void
+bidi_frame_begin(BidiMaps *b, BidiFrameKey now, bool scroll_changed) {
+    b->moved = !(b->key.valid && keys_equal(&b->key, &now) && !scroll_changed);
+    b->key = now;
+    b->key.valid = true;
+    b->snapshot_taken = false;
+    if (!b->v2l) return;
+    if (b->moved) memset(b->stamp_valid, 0, b->rows * sizeof(b->stamp_valid[0]));
+    uint64_t *ids = b->prev_line_id;
+    b->prev_line_id = b->line_id;
+    b->line_id = ids;
+    memset(b->line_id, 0, b->rows * sizeof(b->line_id[0]));
+}
+
+void
+bidi_cache_invalidate(BidiMaps *b) {
+    b->key.valid = false;
+    if (b->stamp_valid) memset(b->stamp_valid, 0, b->rows * sizeof(b->stamp_valid[0]));
+}
+
+bool
+bidi_paragraph_cached(const BidiMaps *b, int first, int last, int y_to_render_row, index_type first_render_row) {
+    if (b->moved || !b->v2l) return false;
+    for (int y = first; y <= last; y++) {
+        const int r = y + y_to_render_row;
+        if (r < (int)first_render_row || r >= (int)b->rows) continue;
+        if (!b->stamp_valid[r] || b->stamp_first[r] != first || b->stamp_last[r] != last) return false;
+    }
+    return true;
+}
+
+void
+bidi_set_line_id(BidiMaps *b, index_type render_row, uint64_t id) {
+    if (b->line_id && render_row < b->rows) b->line_id[render_row] = id;
+}
+
+// Marks line y dirty when its active bit or levels differ from those it had
+// last frame, wherever it was on screen then: a split or join can change the
+// levels of a line whose text did not change, and its shaping depends on them.
+static void
+note_line_state(BidiMaps *b, BidiCellSource src, void *ctx, int y, index_type r) {
+    if (!src.line_id_at || !src.mark_dirty) return;
+    const uint64_t id = src.line_id_at(ctx, y);
+    if (!id) return;
+    index_type p = r;
+    if (b->prev_line_id[p] != id) {
+        p = b->id_hint + 1;
+        if (p >= b->rows || b->prev_line_id[p] != id) {
+            for (p = 0; p < b->rows && b->prev_line_id[p] != id; p++);
+            if (p >= b->rows) return;
+        }
+    }
+    b->id_hint = p;
+    // Before any change this frame, the live maps are still last frame's
+    const bool *prev_active = b->snapshot_taken ? b->prev_active : b->active;
+    const uint8_t *prev_levels = b->snapshot_taken ? b->prev_levels : b->levels;
+    const size_t cols = b->cols;
+    if (prev_active[p] != b->active[r] ||
+        (b->active[r] && memcmp(prev_levels + p * cols, b->levels + r * cols, cols * sizeof(b->levels[0])) != 0))
+        src.mark_dirty(ctx, y);
+}
+
+static void
+settle_row(BidiMaps *b, BidiCellSource src, void *ctx, int y, index_type r, int first_y, int last_y, bool cacheable) {
+    b->stamp_first[r] = first_y;
+    b->stamp_last[r] = last_y;
+    b->stamp_valid[r] = cacheable;
+    note_line_state(b, src, ctx, y, r);
 }
 
 static bool
@@ -95,17 +216,22 @@ ensure_scratch(BidiMaps *b, size_t cap) {
     return true;
 }
 
-static void
-set_paragraph_inactive(BidiMaps *b, int first_y, int last_y, int y_to_render_row, index_type first_render_row) {
+void
+bidi_paragraph_inactive(BidiMaps *b, BidiCellSource src, void *ctx, int first_y, int last_y, int y_to_render_row,
+    index_type first_render_row, bool cacheable) {
+    if (!b->v2l) return;
     for (int y = first_y; y <= last_y; y++) {
         const int render_row = y + y_to_render_row;
-        if (render_row >= (int)first_render_row) bidi_set_row_inactive(b, (index_type)render_row);
+        if (render_row < (int)first_render_row || render_row >= (int)b->rows) continue;
+        row_inactive(b, (index_type)render_row);
+        settle_row(b, src, ctx, y, (index_type)render_row, first_y, last_y, cacheable);
     }
 }
 
 // Writes the row's maps from the visual order of its characters in b->map.
 static void
 write_row(BidiMaps *b, index_type render_row, uint32_t row_first_char, uint32_t row_end_char) {
+    take_snapshot(b);
     const index_type cols = b->cols;
     // l2v is rebuilt below, so it doubles as the buffer for the candidate
     // v2l, which has to be compared with the previous frame's before overwrite
@@ -133,7 +259,8 @@ write_row(BidiMaps *b, index_type render_row, uint32_t row_first_char, uint32_t 
 }
 
 bool
-bidi_resolve_paragraph(BidiMaps *b, BidiCellSource src, void *ctx, int first_y, int last_y, int y_to_render_row, index_type first_render_row) {
+bidi_resolve_paragraph(BidiMaps *b, BidiCellSource src, void *ctx, int first_y, int last_y, int y_to_render_row,
+    index_type first_render_row, bool cacheable) {
     const int num_rows = last_y - first_y + 1;
     const index_type cols = b->cols;
     if (num_rows < 1 || num_rows > BIDI_MAX_PARAGRAPH_ROWS || !ensure_scratch(b, (size_t)num_rows * cols)) goto no_bidi;
@@ -155,6 +282,7 @@ bidi_resolve_paragraph(BidiMaps *b, BidiCellSource src, void *ctx, int first_y, 
     fribidi_get_bidi_types(b->text, (FriBidiStrIndex)n, b->types);
     fribidi_get_bracket_types(b->text, (FriBidiStrIndex)n, b->types, b->brackets);
     FriBidiParType base_dir = FRIBIDI_PAR_LTR;
+    b->resolve_count++;
     if (fribidi_get_par_embedding_levels_ex(b->types, b->brackets, (FriBidiStrIndex)n, &base_dir, b->para_levels) <= 1) goto no_bidi;
 
     for (uint32_t i = 0; i < n; i++) b->map[i] = (FriBidiStrIndex)i;
@@ -165,17 +293,17 @@ bidi_resolve_paragraph(BidiMaps *b, BidiCellSource src, void *ctx, int first_y, 
         const uint32_t row_first = b->row_start[r], row_end = b->row_start[r + 1];
         const FriBidiLevel ret = fribidi_reorder_line(
             0, b->types, (FriBidiStrIndex)(row_end - row_first), (FriBidiStrIndex)row_first, FRIBIDI_PAR_LTR, b->para_levels, NULL, b->map);
-        if (ret <= 1) {
-            bidi_set_row_inactive(b, (index_type)render_row);
-            continue;
+        if (ret <= 1) row_inactive(b, (index_type)render_row);
+        else {
+            write_row(b, (index_type)render_row, row_first, row_end);
+            any_active = true;
         }
-        write_row(b, (index_type)render_row, row_first, row_end);
-        any_active = true;
+        settle_row(b, src, ctx, first_y + r, (index_type)render_row, first_y, last_y, cacheable);
     }
     return any_active;
 
 no_bidi:
-    set_paragraph_inactive(b, first_y, last_y, y_to_render_row, first_render_row);
+    bidi_paragraph_inactive(b, src, ctx, first_y, last_y, y_to_render_row, first_render_row, cacheable);
     return false;
 }
 

@@ -4266,10 +4266,11 @@ screen_bidi_resolve_row(Screen *self, LineBuf *paused, unsigned render_row, int 
         bidi_set_row_inactive(b, render_row);
         return NULL;
     }
-    const BidiCellSource cell_source = {.cells_at = bidi_source_cells_at, .text_cache = self->text_cache};
+    const BidiCellSource cell_source = {
+        .cells_at = bidi_source_cells_at, .line_id_at = NULL, .mark_dirty = NULL, .text_cache = self->text_cache};
     // A paragraph longer than the window can start a new window above this row:
     // the rows above were uploaded with the previous window's maps and keep them
-    if (!bidi_resolve_paragraph(b, cell_source, &src, first, last, y_to_render_row, render_row)) return NULL;
+    if (!bidi_resolve_paragraph(b, cell_source, &src, first, last, y_to_render_row, render_row, false)) return NULL;
     b->para.has_bidi = true;
     return b->active[render_row] ? b->levels + (size_t)render_row * b->cols : NULL;
 }
