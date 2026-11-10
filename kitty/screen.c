@@ -7450,9 +7450,9 @@ test_bidi_levels(Screen *self, PyObject *args) {
 
 static PyObject *
 test_bidi_visual_x(Screen *self, PyObject *args) {
-    unsigned x, y;
-    if (!PyArg_ParseTuple(args, "II", &x, &y)) return NULL;
-    return PyLong_FromUnsignedLong(bidi_visual_left_x(&self->bidi, y + pixel_scroll_enabled(self), x, 1));
+    unsigned x, y, cell_cols = 1;
+    if (!PyArg_ParseTuple(args, "II|I", &x, &y, &cell_cols)) return NULL;
+    return PyLong_FromUnsignedLong(bidi_visual_left_x(&self->bidi, y + pixel_scroll_enabled(self), x, cell_cols));
 }
 
 static PyObject *

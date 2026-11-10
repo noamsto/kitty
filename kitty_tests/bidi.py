@@ -6,15 +6,21 @@ import struct
 import tempfile
 from collections import namedtuple
 
-from kitty.fast_data_types import Screen
 from kitty.fonts.render import shape_string
 
-from .base import BaseTest
-from .base import draw_multicell
+from .base import BaseTest, draw_multicell, parse_bytes
 from .fonts import testing_font_data
 
 A = 'אבג'  # three Hebrew letters, bidi class R
 ID10 = tuple(range(10))
+# A row whose map is not its own inverse, on 5 columns: R R WS EN EN at
+# paragraph level 0. W2 and W7 keep EN (last strong is R), N1 makes the space,
+# between R and EN (as R), R. I1: R -> 1, EN -> 2. L2 reverses cols 3..4, then
+# 0..4: v2l = 3 4 2 1 0, so l2v = 4 3 2 0 1.
+NSI = 'אב 12'
+NSI_LEVELS = (1, 1, 1, 2, 2)
+NSI_V2L = (3, 4, 2, 1, 0)
+NSI_L2V = (4, 3, 2, 0, 1)
 GPUCellData = namedtuple('GPUCellData', 'fg bg decoration_fg sprite_idx attrs')
 GPU_CELL = struct.Struct('=5I')  # GPUCell in kitty/line.h, 20 bytes
 
@@ -24,11 +30,19 @@ def gpu_row(s, buf, y):
     # returns, which has an extra leading render row when pixel scroll is on
     row_size = s.columns * GPU_CELL.size
     start = (y + len(buf) // row_size - s.lines) * row_size
-    return [GPUCellData(*c) for c in GPU_CELL.iter_unpack(buf[start:start + row_size])]
+    return [GPUCellData(*c) for c in GPU_CELL.iter_unpack(buf[start : start + row_size])]
+
+
+def draw_coloured(s, text):
+    # draws each character with its own 256-colour fg and returns the GPUCell.fg
+    # of each, an indexed colour being stored as (index << 8) | 1
+    for i, ch in enumerate(text):
+        parse_bytes(s, f'\x1b[38;5;{i + 1}m{ch}'.encode())
+    parse_bytes(s, b'\x1b[m')
+    return [((i + 1) << 8) | 1 for i in range(len(text))]
 
 
 class TestBidi(BaseTest):
-
     def screen(self, cols=10, lines=5, scrollback=5, **opts):
         o = {'bidi_reorder': True}
         o.update(opts)
@@ -72,8 +86,10 @@ class TestBidi(BaseTest):
         v2l = self.refresh(s, 0)
         self.ae(s.test_bidi_levels(0), (1, 1, 1, 1, 0, 0, 0, 0, 0, 0))
         self.ae(v2l, (3, 2, 1, 0, 4, 5, 6, 7, 8, 9))
-        # the leftmost visual cell of the wide char is its second cell, with span 2
+        # with a span of 1 logical cell 1 alone is at visual column 2; with the
+        # emoji's span of 2 its leftmost visual cell is its second cell, column 1
         self.ae(s.test_bidi_visual_x(1, 0), 2)
+        self.ae(s.test_bidi_visual_x(1, 0, 2), 1)
         # (c2) א好ב: 好 is strong L so it stays level 0 and its two cells keep order;
         # the single-cell R runs on either side reverse to themselves.
         s = self.screen()
@@ -92,7 +108,8 @@ class TestBidi(BaseTest):
         # (d) cols=5: אבגדה fills row 0, 12 34 soft-wraps to row 1 and has no RTL
         # character so its has_bidi is False. Paragraph: R*5 EN EN WS EN EN.
         # W2 keeps EN (last strong is R). N1 treats EN as R, so the space is R.
-        # I2: R -> level 1 and EN -> level 2. Row 0 is all level 1: (4,3,2,1,0).
+        # I1 (the paragraph level, 0, is even): R -> level 1 and EN -> level 2.
+        # Row 0 is all level 1: (4,3,2,1,0).
         # Row 1 levels 2,2,1,2,2: reverse level>=2 runs -> 1 0 2 4 3, then
         # reverse the whole level>=1 span -> 3 4 2 0 1.
         s = self.screen(cols=5, lines=5)
@@ -121,6 +138,16 @@ class TestBidi(BaseTest):
         s = self.screen(force_ltr=True)
         s.draw('abc' + A)
         self.assertIsNone(self.refresh(s, 0))
+        # and a real frame uploads the row unpermuted
+        from kitty.fast_data_types import test_screen_update_cell_data
+        from kitty.fonts.render import setup_for_testing
+
+        with setup_for_testing():
+            s = self.screen(force_ltr=True)
+            fgs = draw_coloured(s, 'abc' + A)
+            row = gpu_row(s, test_screen_update_cell_data(s), 0)
+            self.assertIsNone(s.test_bidi_v2l(0))
+            self.ae([c.fg for c in row[: len(fgs)]], fgs)
 
     def test_flag_latch(self):
         # (g) the flag is a latch set when a reorderable codepoint is drawn.
@@ -169,21 +196,39 @@ class TestBidi(BaseTest):
         draw_multicell(s, 'x', scale=2)
         self.assertIsNone(self.refresh(s, 0))
 
+    def selected_columns(self, s, start, end):
+        # the visual columns lit on screen row 0 when logical cells start..end
+        # of it are selected; no other row may be lit
+        s.clear_selection()
+        s.start_selection(start, 0)
+        s.update_selection(end, 0)
+        s.test_bidi_refresh()
+        raw = s.current_selections()
+        offset = len(raw) // s.columns - s.lines
+        self.assertIn(offset, (0, 1))
+        lit = []
+        for y in range(s.lines):
+            row = raw[s.columns * (y + offset) : s.columns * (y + offset + 1)]
+            nonzero = [x for x, b in enumerate(row) if b]
+            if y:
+                self.ae(nonzero, [], f'row {y}')
+            else:
+                lit = nonzero
+        return lit
+
     def test_selection_permutation(self):
         # (j) logical cells 3 and 4 of abcאבג sit at visual columns 5 and 4
         # (v2l = 0 1 2 5 4 3 ...: visual 5 shows logical 3, visual 4 logical 4).
         s = self.screen()
         s.draw('abc' + A)
-        s.start_selection(3, 0)
-        s.update_selection(4, 0)
-        s.test_bidi_refresh()
-        raw = s.current_selections()
-        offset = len(raw) // s.columns - s.lines
-        self.assertIn(offset, (0, 1))
-        for y in range(s.lines):
-            row = raw[s.columns * (y + offset):s.columns * (y + offset + 1)]
-            nonzero = [x for x, b in enumerate(row) if b]
-            self.ae(nonzero, [4, 5] if y == 0 else [], f'row {y}')
+        self.ae(self.selected_columns(s, 3, 4), [4, 5])
+        # on a row whose map is not its own inverse, a swapped map lights
+        # visual 3 for logical 0 and visual 1 for logical 3
+        s = self.screen(cols=5)
+        s.draw(NSI)
+        self.ae(self.refresh(s, 0), NSI_V2L)
+        self.ae(self.selected_columns(s, 0, 0), [4])
+        self.ae(self.selected_columns(s, 3, 3), [0])
 
     def test_inverse_maps(self):
         # (k) logical_x(visual_x(x)) == x; v2l and visual_x are inverse
@@ -199,6 +244,27 @@ class TestBidi(BaseTest):
             self.ae(s.test_bidi_is_rtl(x, 0), bool(levels[x] & 1))
         # rows without a map give identity
         self.ae((s.test_bidi_visual_x(2, 3), s.test_bidi_logical_x(2, 3), s.test_bidi_is_rtl(2, 3)), (2, 2, False))
+        # the map above is its own inverse, so this one tells v2l from l2v
+        s = self.screen(cols=5)
+        s.draw(NSI)
+        self.ae(self.refresh(s, 0), NSI_V2L)
+        self.ae(s.test_bidi_levels(0), NSI_LEVELS)
+        self.ae(tuple(s.test_bidi_logical_x(x, 0) for x in range(5)), NSI_V2L)
+        self.ae(tuple(s.test_bidi_visual_x(x, 0) for x in range(5)), NSI_L2V)
+        self.assertNotEqual(NSI_V2L, NSI_L2V)
+
+    def test_upload_permutes_cells(self):
+        # each visual cell of the uploaded buffer is the logical cell v2l[visual],
+        # told apart by fg colour, on a row whose map is not its own inverse
+        from kitty.fast_data_types import test_screen_update_cell_data
+        from kitty.fonts.render import setup_for_testing
+
+        with setup_for_testing():
+            s = self.screen(cols=5)
+            fgs = draw_coloured(s, NSI)
+            row = gpu_row(s, test_screen_update_cell_data(s), 0)
+            self.ae(s.test_bidi_v2l(0), NSI_V2L)
+            self.ae([c.fg for c in row], [fgs[NSI_V2L[v]] for v in range(5)])
 
     def test_widen_merges_flag_and_map(self):
         # (m) row 0 abcde is Latin, the continuation row holds the only Hebrew.
@@ -221,6 +287,7 @@ class TestBidi(BaseTest):
         # update-cell-data path
         from kitty.fast_data_types import test_screen_update_cell_data
         from kitty.fonts.render import setup_for_testing
+
         with setup_for_testing():
             s = self.screen()
             s.draw('abc' + A)
@@ -249,7 +316,7 @@ class TestBidi(BaseTest):
     def test_resize_narrower_drops_maps(self):
         # until the next frame, maps sized for the old width must not be used
         s = self.screen(cols=20, lines=3)
-        s.draw(''.join(chr(0x5d0 + i) for i in range(20)))
+        s.draw(''.join(chr(0x5D0 + i) for i in range(20)))
         self.ae(self.refresh(s, 0), tuple(range(19, -1, -1)))
         s.resize(3, 10)
         self.ae([s.test_bidi_logical_x(x, 0) for x in range(10)], list(ID10))
@@ -259,6 +326,7 @@ class TestBidi(BaseTest):
     def test_level_change_redraws_paragraph(self):
         from kitty.fast_data_types import test_screen_update_cell_data
         from kitty.fonts.render import setup_for_testing
+
         with setup_for_testing():
             # the paragraph loses its last RTL char: the clean continuation row
             # was shaped at levels 2,2,1,2,2 (the . is CS between R and EN, so R)
@@ -287,6 +355,7 @@ class TestBidi(BaseTest):
         # row 0 was written to.
         from kitty.fast_data_types import test_screen_update_cell_data
         from kitty.fonts.render import setup_for_testing
+
         with setup_for_testing():
             s = self.screen(cols=5, lines=5)
             s.draw('אבגדה')
@@ -315,6 +384,7 @@ class TestBidi(BaseTest):
         # the on-screen rows dirty
         from kitty.fast_data_types import test_screen_update_cell_data
         from kitty.fonts.render import setup_for_testing
+
         with setup_for_testing():
             s = self.screen(cols=5, lines=3, scrollback=10)
             s.draw('אבגדה' * 4)
