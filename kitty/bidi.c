@@ -313,7 +313,10 @@ write_row(BidiMaps *b, index_type render_row, uint32_t row_first_char, uint32_t 
         const index_type col = b->cell_of_char[logical] & 0xffff;
         const index_type next = logical + 1 < row_end_char ? (b->cell_of_char[logical + 1] & 0xffff) : cols;
         const uint8_t level = (uint8_t)b->para_levels[logical];
-        for (index_type c = col; c < next; c++) levels[c] = level;
+        if (next <= col) continue;
+        levels[col] = level;
+        if (next == col + 1) { candidate[v++] = (uint16_t)col; continue; }
+        for (index_type c = col + 1; c < next; c++) levels[c] = level;
         if (level & 1) {
             for (index_type c = next; c-- > col;) candidate[v++] = (uint16_t)c;
         } else {
