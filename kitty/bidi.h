@@ -50,7 +50,7 @@ typedef struct BidiMaps {
     bool changed; // any row map differs from last frame; makes the selection dirty
     struct {
         int first, last;
-        bool valid, has_bidi, dirty_any;
+        bool valid, has_bidi;
     } para; // current-frame paragraph cache, range-y addressed
     int *stamp_first, *stamp_last; // range-y bounds of the paragraph that last wrote the row
     bool *stamp_valid;

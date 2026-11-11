@@ -427,10 +427,10 @@ class TestBidi(BaseTest):
         # between the last live frame and the split: the first live frame after
         # the pause must still see that row 1's levels changed since the last
         # live frame, as rendering is paused for synchronized output. When the
-        # split comes before the pause, the paused frames already resolve the
-        # new levels, though with no level compare in a paused frame row 1 keeps
-        # its old glyphs until the next live frame; so a second paused frame must
-        # not replace the line state the first one kept.
+        # split comes before the pause, the paused frames resolve the new levels
+        # and reshape row 1, whose levels may have changed since the last live
+        # frame, so the paused upload has glyphs shaped at them; a second paused
+        # frame must not replace the line state the first one kept.
         def split(s):
             s.cursor_position(1, 5)
             s.draw('ו')
@@ -444,40 +444,161 @@ class TestBidi(BaseTest):
                     s.draw('(12ב')
                     test_screen_update_cell_data(s)
                     self.ae(s.test_bidi_levels(1), (1, 2, 2, 1, 0))
+                    f = self.screen(cols=5, lines=5)
+                    f.draw('(12ב')
+                    fresh = gpu_row(f, test_screen_update_cell_data(f), 0)
+                    self.assertTrue(any(c.sprite_idx for c in fresh))
                     if split_before_pause:
                         split(s)
                     s.pause_rendering(True, 1000)
                     for i in range(paused_frames):
-                        test_screen_update_cell_data(s)
+                        buf = test_screen_update_cell_data(s)
+                        if split_before_pause:
+                            self.ae(s.test_bidi_levels(1), (0, 0, 0, 1, 0))
+                            self.ae([c.sprite_idx for c in gpu_row(s, buf, 1)], [c.sprite_idx for c in fresh])
                     if not split_before_pause:
                         split(s)
                     s.pause_rendering(False)
                     row1 = gpu_row(s, test_screen_update_cell_data(s), 1)
                     self.ae(s.test_bidi_levels(1), (0, 0, 0, 1, 0))
-                    f = self.screen(cols=5, lines=5)
-                    f.draw('(12ב')
-                    fresh = gpu_row(f, test_screen_update_cell_data(f), 0)
-                    self.assertTrue(any(c.sprite_idx for c in fresh))
                     self.ae([c.sprite_idx for c in row1], [c.sprite_idx for c in fresh])
 
+    def test_dirty_row_redraws_only_rows_whose_levels_change(self):
+        # One paragraph of 5 rows, all soft-wrapped. In row 1 the ! (ON) lies
+        # between 3 (EN, counts as R for N1) and a (L) of row 2: N2, embedding
+        # direction, level 0; 12 3 are 2 2 1 2 by I1 (W7 keeps EN, last strong
+        # is R): (2, 2, 1, 2, 0). Writing ב over row 2's first cell puts ! between
+        # R and R: N1, level 1. Rows 0, 3 and 4 keep their levels, so only row 1
+        # (levels) and row 2 (written) are redrawn.
+        text = ('אבגדה', '12 3!', 'abcde', 'fghij', 'klmno')
+        with setup_for_testing():
+            s = self.screen(cols=5, lines=6)
+            for line in text:
+                s.draw(line)
+            # the first frame allocates the maps, so lines have no state until the second
+            test_screen_update_cell_data(s)
+            test_screen_update_cell_data(s)
+            self.ae(s.test_bidi_levels(1), (2, 2, 1, 2, 0))
+            self.ae(s.linebuf.dirty_lines(), [])
+            count = s.test_bidi_resolve_count()
+            s.cursor_position(3, 1)
+            s.draw('ב')
+            self.ae(s.linebuf.dirty_lines(), [2])
+            s.test_bidi_refresh()
+            self.ae(s.linebuf.dirty_lines(), [1, 2])
+            self.ae(s.test_bidi_resolve_count() - count, 1)
+            self.ae(s.test_bidi_levels(1), (2, 2, 1, 2, 1))
+            buf = test_screen_update_cell_data(s)
+            f = self.screen(cols=5, lines=6)
+            for line in ('אבגדה', '12 3!', 'בbcde', 'fghij', 'klmno'):
+                f.draw(line)
+            fbuf = test_screen_update_cell_data(f)
+            self.ae(f.test_bidi_levels(1), (2, 2, 1, 2, 1))
+            for y in range(5):
+                fresh = gpu_row(f, fbuf, y)
+                self.assertTrue(any(c.sprite_idx for c in fresh))
+                self.ae([c.sprite_idx for c in gpu_row(s, buf, y)], [c.sprite_idx for c in fresh])
+            # Latin over Latin changes no levels: only the written row is redrawn
+            s.cursor_position(4, 2)
+            s.draw('z')
+            s.test_bidi_refresh()
+            self.ae(s.linebuf.dirty_lines(), [3])
+
+    def test_line_scrolled_into_view_reshaped_after_split(self):
+        # linebuf rows y, אבגדה and (12ב, with x in history. In (12ב, searching
+        # back from 12 the first strong type is R, so W7 leaves it EN; ( lies
+        # between R and EN (as R): level 1; 12 is 2; ב is 1; the trailing cell 0:
+        # (1, 2, 2, 1, 0). Overwriting the last cell of אבגדה clears its soft wrap,
+        # so (12ב becomes its own paragraph: W7 makes 12 L, ( is 0, 12 is 0, ב is
+        # 1: (0, 0, 0, 1, 0). The line was out of view in the last frame and its
+        # paragraph has no dirty row, so it has no state to compare and is
+        # reshaped when it comes back into view.
+        for paused in (False, True):
+            with self.subTest(paused=paused), setup_for_testing():
+                s = self.screen(cols=5, lines=3, scrollback=10)
+                parse_bytes(s, b'x\r\ny\r\n')
+                s.draw('אבגדה')
+                s.draw('(12ב')
+                test_screen_update_cell_data(s)
+                self.ae(s.test_bidi_levels(2), (1, 2, 2, 1, 0))
+                s.scroll(1, True)
+                test_screen_update_cell_data(s)
+                self.ae(s.scrolled_by, 1)
+                s.cursor_position(2, 5)
+                s.draw('ו')
+                self.assertFalse(s.linebuf.is_continued(2))
+                s.scroll(1, False)
+                self.ae(s.scrolled_by, 0)
+                if paused:
+                    s.pause_rendering(True, 1000)
+                row = gpu_row(s, test_screen_update_cell_data(s), 2)
+                self.ae(s.test_bidi_levels(2), (0, 0, 0, 1, 0))
+                f = self.screen(cols=5, lines=3)
+                f.draw('(12ב')
+                fresh = gpu_row(f, test_screen_update_cell_data(f), 0)
+                self.assertTrue(any(c.sprite_idx for c in fresh))
+                self.ae([c.sprite_idx for c in row], [c.sprite_idx for c in fresh])
+
+    def test_paused_frame_row_continuing_from_history(self):
+        # linebuf row 0, (12ב, continues אבגדה in history: levels (1, 2, 2, 1, 0)
+        # as in test_split_paragraph_reshapes_lower_part. The paused snapshot walk
+        # cannot see history, so row 0 resolves alone, as a paragraph of its own:
+        # (0, 0, 0, 1, 0). The paused frame must upload it with glyphs shaped at
+        # those levels, and the next live frame at the paragraph's again. With
+        # pixel scroll on the snapshot has a leading row from history, which this
+        # needs not to see.
+        with setup_for_testing():
+            s = self.screen(cols=5, lines=3, scrollback=10, pixel_scroll=False)
+            s.draw('אבגדה')
+            s.draw('(12ב')
+            parse_bytes(s, b'\r\nx\r\ny')
+            test_screen_update_cell_data(s)
+            self.ae(s.test_bidi_levels(0), (1, 2, 2, 1, 0))
+            s.pause_rendering(True, 1000)
+            buf = test_screen_update_cell_data(s)
+            self.ae(s.test_bidi_levels(0), (0, 0, 0, 1, 0))
+            f = self.screen(cols=5, lines=3)
+            f.draw('(12ב')
+            fresh = gpu_row(f, test_screen_update_cell_data(f), 0)
+            self.assertTrue(any(c.sprite_idx for c in fresh))
+            self.ae([c.sprite_idx for c in gpu_row(s, buf, 0)], [c.sprite_idx for c in fresh])
+            s.pause_rendering(False)
+            buf = test_screen_update_cell_data(s)
+            self.ae(s.test_bidi_levels(0), (1, 2, 2, 1, 0))
+            g = self.screen(cols=5, lines=3)
+            g.draw('אבגדה')
+            g.draw('(12ב')
+            fresh = gpu_row(g, test_screen_update_cell_data(g), 1)
+            self.ae([c.sprite_idx for c in gpu_row(s, buf, 0)], [c.sprite_idx for c in fresh])
+
     def test_dirty_row_below_view_redraws_paragraph(self):
-        # scrolled up, a dirty linebuf row of the paragraph below the view marks
-        # the on-screen rows dirty
+        # scrolled up, a dirty linebuf row of the paragraph below the view
+        # re-resolves the paragraph and redraws the on-screen rows whose levels
+        # change. As in test_dirty_row_redraws_only_rows_whose_levels_change, row
+        # 1 (12 3!) goes from (2, 2, 1, 2, 0) to (2, 2, 1, 2, 1) when ב is
+        # written over the first cell of the next row; the row above is unchanged.
         with setup_for_testing():
             s = self.screen(cols=5, lines=3, scrollback=10)
-            s.draw('אבגדה' * 4)
+            s.draw('אבגדה')
+            s.draw('אבגדה')
+            s.draw('12 3!')
+            s.draw('abcde')
             self.ae(s.historybuf.count, 1)
             test_screen_update_cell_data(s)
             s.scroll(1, True)
             test_screen_update_cell_data(s)
             self.ae(s.scrolled_by, 1)
             self.ae(s.linebuf.dirty_lines(), [])
+            self.ae(s.test_bidi_levels(2), (2, 2, 1, 2, 0))
+            count = s.test_bidi_resolve_count()
             s.cursor_position(3, 1)
-            s.draw('a')
+            s.draw('ב')
             self.ae(s.scrolled_by, 1)
             self.ae(s.linebuf.dirty_lines(), [2])
             s.test_bidi_refresh()
-            self.ae(s.linebuf.dirty_lines(), [0, 1, 2])
+            self.ae(s.linebuf.dirty_lines(), [1, 2])
+            self.ae(s.test_bidi_resolve_count() - count, 1)
+            self.ae(s.test_bidi_levels(2), (2, 2, 1, 2, 1))
 
     def test_tall_paragraph_keeps_uploaded_maps(self):
         # One paragraph of 400 rows of 'א!' on a 300 line screen, 100 rows in the

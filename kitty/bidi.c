@@ -178,21 +178,27 @@ bidi_set_line_id(BidiMaps *b, index_type render_row, uint64_t id) {
     if (b->line_id && render_row < b->rows) b->line_id[render_row] = id;
 }
 
-// Marks line y dirty when its active bit or levels differ from those it had
-// last frame, wherever it was on screen then: a split or join can change the
-// levels of a line whose text did not change, and its shaping depends on them.
+// Marks line y dirty when its active bit or levels differ from those it had in
+// the last live frame, wherever it was on screen then: a split or join can
+// change the levels of a line whose text did not change, and its shaping
+// depends on them. A line with no state from that frame is marked if it has
+// levels now, as its glyphs may have been shaped at others.
 static void
 note_line_state(BidiMaps *b, BidiCellSource src, void *ctx, int y, index_type r) {
-    if (!src.line_id_at || !src.mark_dirty) return;
-    const uint64_t id = src.line_id_at(ctx, y);
-    if (!id) return;
+    if (!src.mark_dirty) return;
+    const uint64_t id = src.line_id_at ? src.line_id_at(ctx, y) : 0;
+    // Paused frames do not replace the last live frame's ids
+    const uint64_t *prev_ids = b->hold ? b->line_id : b->prev_line_id;
     index_type p = r;
-    if (b->prev_line_id[p] != id) {
+    if (id && prev_ids[p] != id) {
         p = b->id_hint + 1;
-        if (p >= b->rows || b->prev_line_id[p] != id) {
-            for (p = 0; p < b->rows && b->prev_line_id[p] != id; p++);
-            if (p >= b->rows) return;
+        if (p >= b->rows || prev_ids[p] != id) {
+            for (p = 0; p < b->rows && prev_ids[p] != id; p++);
         }
+    }
+    if (!id || p >= b->rows) {
+        if (b->active[r]) src.mark_dirty(ctx, y);
+        return;
     }
     b->id_hint = p;
     // Before any change this frame, the live maps are still last frame's

@@ -4237,7 +4237,6 @@ screen_bidi_resolve_row(Screen *self, LineBuf *paused, unsigned render_row, int 
     BidiMaps *b = &self->bidi;
     if (b->para.valid && b->para.first <= range_y && range_y <= b->para.last) {
         // The first on-screen row of the paragraph set the maps of all its rows
-        if (b->para.dirty_any) linep->attrs.has_dirty_text = true;
         if (b->para.has_bidi && b->v2l && render_row < b->rows)
             return b->active[render_row] ? b->levels + (size_t)render_row * b->cols : NULL;
         return NULL;
@@ -4261,7 +4260,6 @@ screen_bidi_resolve_row(Screen *self, LineBuf *paused, unsigned render_row, int 
     b->para.last = last;
     b->para.valid = true;
     b->para.has_bidi = false;
-    b->para.dirty_any = false;
 
     // Off-screen history rows are not counted: they stay dirty until first rendered
     const int render_lines = (int)render_lines_for_screen(self);
@@ -4280,16 +4278,8 @@ screen_bidi_resolve_row(Screen *self, LineBuf *paused, unsigned render_row, int 
         return b->active[render_row] ? b->levels + (size_t)render_row * b->cols : NULL;
     }
 
-    // A change on any row can change the levels of the others, so a dirty row
-    // redraws the rows not yet rendered this frame
+    // The level compare (bidi.c note_line_state) redraws the rows whose levels change
     const bool needs = bidi_paragraph_needs_reordering(&src, first, last);
-    b->para.dirty_any = needs && dirty;
-    if (b->para.dirty_any) {
-        const int last_on_screen = MIN(last, render_lines - 1 - y_to_render_row);
-        for (int y = range_y; y <= last_on_screen; y++) bidi_source_mark_dirty(&src, y);
-        // linep->attrs is a copy taken before the row was marked dirty above
-        linep->attrs.has_dirty_text = true;
-    }
     // The level compare marks lines dirty, this one through linep
     src.current = linep;
     src.current_y = range_y;
