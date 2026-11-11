@@ -39,8 +39,9 @@ typedef struct BidiCellSource {
 typedef struct BidiFrameKey {
     const void *linebuf, *historybuf;
     uint64_t linebuf_generation, historybuf_generation;
+    uint64_t historybuf_push_generation; // not compared by keys_equal
     index_type rows, cols, scrolled_by;
-    index_type historybuf_count; // not compared by keys_equal
+    index_type historybuf_count, historybuf_start, historybuf_ynum; // not compared by keys_equal
     int row_offset;
     bool valid;
 } BidiFrameKey;
@@ -68,7 +69,7 @@ typedef struct BidiMaps {
     index_type paused_rows, paused_cap;
     struct {
         const void *buf;
-        uint64_t generation;
+        uint64_t generation, push_generation;
         index_type count;
         bool valid;
     } ids_history; // the history when line_id was recorded
@@ -91,9 +92,11 @@ void bidi_set_all_rows_inactive(BidiMaps *b);
 // unchanged and the view did not scroll.
 void bidi_frame_begin(BidiMaps *b, BidiFrameKey now, bool scroll_changed);
 // History line ids are ring slots. When the history may have reused a slot
-// since line_id was recorded (anything but lines appended without wrapping),
-// forgets line_id's history ids, so those lines have no last-frame state.
-void bidi_forget_reused_history_ids(BidiMaps *b, const void *historybuf, uint64_t generation, index_type count);
+// since line_id was recorded, forgets line_id's history ids, so those lines have
+// no last-frame state. If only pushes happened, only the k slots a full ring
+// reused, [start_of_data - k, start_of_data), are forgotten; otherwise all are.
+void bidi_forget_reused_history_ids(BidiMaps *b, const void *historybuf, uint64_t generation, uint64_t push_generation,
+        index_type count, index_type start_of_data, index_type ynum);
 // Starts a paused frame, which reads a snapshot: no stamp is trusted (the
 // snapshot rows are not range rows), and the line state of the last live frame
 // is kept for the level compare of paused frames and of the next live one.

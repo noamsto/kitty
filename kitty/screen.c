@@ -3929,7 +3929,8 @@ screen_pause_rendering(Screen *self, bool pause, int for_in_ms) {
     Line line = {.text_cache = self->text_cache};
     uint64_t *bidi_ids = bidi_paused_line_ids(&self->bidi, bidi_enabled() ? num_rows : 0);
     // Paused frames compare with the last live frame's ids
-    if (bidi_ids) bidi_forget_reused_history_ids(&self->bidi, self->historybuf, self->historybuf->bidi_generation, self->historybuf->count);
+    if (bidi_ids) bidi_forget_reused_history_ids(&self->bidi, self->historybuf, self->historybuf->bidi_generation,
+        self->historybuf->bidi_push_generation, self->historybuf->count, self->historybuf->start_of_data, self->historybuf->ynum);
     for (index_type y = 0; y < num_rows; y++) {
         index_type lnum;
         bool is_history;
@@ -4363,7 +4364,10 @@ screen_bidi_start_frame(Screen *self, bool scroll_changed) {
         .historybuf = self->historybuf,
         .linebuf_generation = self->linebuf->bidi_generation,
         .historybuf_generation = self->historybuf->bidi_generation,
+        .historybuf_push_generation = self->historybuf->bidi_push_generation,
         .historybuf_count = self->historybuf->count,
+        .historybuf_start = self->historybuf->start_of_data,
+        .historybuf_ynum = self->historybuf->ynum,
         .rows = render_lines,
         .cols = self->columns,
         .scrolled_by = self->scrolled_by,

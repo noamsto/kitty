@@ -133,13 +133,24 @@ keys_equal(const BidiFrameKey *a, const BidiFrameKey *k) {
 }
 
 void
-bidi_forget_reused_history_ids(BidiMaps *b, const void *historybuf, uint64_t generation, index_type count) {
+bidi_forget_reused_history_ids(BidiMaps *b, const void *historybuf, uint64_t generation, uint64_t push_generation,
+        index_type count, index_type start_of_data, index_type ynum) {
     if (!b->line_id) return;
-    const bool appended = b->ids_history.valid && b->ids_history.buf == historybuf &&
-        (int64_t)(generation - b->ids_history.generation) == (int64_t)count - (int64_t)b->ids_history.count;
-    if (appended) return;
-    for (index_type r = 0; r < b->rows; r++)
-        if ((b->line_id[r] >> 32) == BIDI_HISTORY_LINE_ID_KIND) b->line_id[r] = 0;
+    const uint64_t pushes = push_generation - b->ids_history.push_generation;
+    uint64_t k = ynum; // slots reused by full-ring pushes; ynum or more means all
+    if (b->ids_history.valid && b->ids_history.buf == historybuf && count >= b->ids_history.count &&
+            generation - b->ids_history.generation == pushes) {
+        // pushes only: each one that did not grow count reused the oldest slot
+        k = pushes - (count - b->ids_history.count);
+        if (k == 0) return;
+    }
+    for (index_type r = 0; r < b->rows; r++) {
+        if ((b->line_id[r] >> 32) != BIDI_HISTORY_LINE_ID_KIND) continue;
+        // forgotten slots are [start_of_data - k, start_of_data) mod ynum. Adding
+        // ynum before subtracting keeps the unsigned offset from underflowing, as k < ynum
+        const index_type slot = (index_type)(b->line_id[r] & 0xffffffffu);
+        if (k >= ynum || (slot + ynum - (start_of_data + ynum - (index_type)k) % ynum) % ynum < k) b->line_id[r] = 0;
+    }
 }
 
 void
@@ -151,7 +162,8 @@ bidi_frame_begin(BidiMaps *b, BidiFrameKey now, bool scroll_changed) {
     b->snapshot_taken = b->hold;
     b->hold = false;
     if (!b->v2l) return;
-    bidi_forget_reused_history_ids(b, now.historybuf, now.historybuf_generation, now.historybuf_count);
+    bidi_forget_reused_history_ids(b, now.historybuf, now.historybuf_generation, now.historybuf_push_generation,
+        now.historybuf_count, now.historybuf_start, now.historybuf_ynum);
     if (b->moved) memset(b->stamp_valid, 0, b->rows * sizeof(b->stamp_valid[0]));
     uint64_t *ids = b->prev_line_id;
     b->prev_line_id = b->line_id;
@@ -159,6 +171,7 @@ bidi_frame_begin(BidiMaps *b, BidiFrameKey now, bool scroll_changed) {
     memset(b->line_id, 0, b->rows * sizeof(b->line_id[0]));
     b->ids_history.buf = now.historybuf;
     b->ids_history.generation = now.historybuf_generation;
+    b->ids_history.push_generation = now.historybuf_push_generation;
     b->ids_history.count = now.historybuf_count;
     b->ids_history.valid = true;
 }

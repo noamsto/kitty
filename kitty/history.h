@@ -35,6 +35,7 @@ typedef struct {
     TextCache *text_cache;
     index_type start_of_data, count;
     uint64_t bidi_generation; // bumped when rows move or are cleared without being marked dirty
+    uint64_t bidi_push_generation; // bumped by historybuf_push only
 } HistoryBuf;
 
 

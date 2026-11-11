@@ -624,6 +624,53 @@ class TestBidi(BaseTest):
             self.assertTrue(any(c.sprite_idx for c in fresh))
             self.ae([c.sprite_idx for c in gpu_row(s, buf, 3)], [c.sprite_idx for c in fresh])
 
+    def test_full_ring_push_reshapes_only_reused_slots(self):
+        # History line ids are ring slots and a push into a full ring reuses
+        # only the oldest slot. The history lines whose slots were not reused
+        # keep their ids and levels, so they are not redrawn.
+        def fill():
+            s = self.screen(cols=5, lines=4, scrollback=0, pixel_scroll=False)
+            for i in range(8):
+                s.draw('אב 12')
+                if i < 7:
+                    parse_bytes(s, b'\r\n')
+            self.ae(s.historybuf.count, 4)
+            return s
+
+        with setup_for_testing():
+            # the reused slot (the oldest line) is off screen
+            s = fill()
+            s.scroll(2, True)
+            test_screen_update_cell_data(s)
+            test_screen_update_cell_data(s)
+            self.ae(s.historybuf.dirty_lines(), [])
+            self.ae(s.test_bidi_levels(0), (1, 1, 1, 2, 2))
+            s.cursor_position(4, 1)
+            parse_bytes(s, b'\n')
+            s.test_bidi_refresh()
+            # scrolled_by is unchanged here, so the pushed line is at history
+            # row 0 and is the only dirty line; row 1 keeps its id and levels
+            self.ae(s.historybuf.dirty_lines(), [0])
+
+            # the reused slot (the oldest line) is on screen at the top
+            s = fill()
+            s.scroll(10, True)
+            self.ae(s.scrolled_by, 4)
+            test_screen_update_cell_data(s)
+            test_screen_update_cell_data(s)
+            self.ae(s.historybuf.dirty_lines(), [])
+            s.cursor_position(4, 1)
+            parse_bytes(s, b'\n')
+            s.test_bidi_refresh()
+            # only the pushed line, in the reused slot, is dirty
+            self.ae(s.historybuf.dirty_lines(), [0])
+            buf = test_screen_update_cell_data(s)
+            f = self.screen(cols=5, lines=4, pixel_scroll=False)
+            f.draw('אב 12')
+            fresh = gpu_row(f, test_screen_update_cell_data(f), 0)
+            self.assertTrue(any(c.sprite_idx for c in fresh))
+            self.ae([c.sprite_idx for c in gpu_row(s, buf, 0)], [c.sprite_idx for c in fresh])
+
     def test_history_slot_reuse_reshapes_line_in_paused_frame(self):
         # A history slot is reused between the last live frame and the pause,
         # and paused frames compare levels with the last live frame's ids. P is

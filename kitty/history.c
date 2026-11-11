@@ -336,6 +336,7 @@ pagerhist_push(HistoryBuf *self, ANSIBuf *as_ansi_buf) {
 static index_type
 historybuf_push(HistoryBuf *self, ANSIBuf *as_ansi_buf, bool *needs_clear) {
     self->bidi_generation++;
+    self->bidi_push_generation++;
     index_type idx = (self->start_of_data + self->count) % self->ynum;
     if (self->count == self->ynum) {
         pagerhist_push(self, as_ansi_buf);
