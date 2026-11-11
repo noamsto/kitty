@@ -484,6 +484,7 @@ class TestBidi(BaseTest):
             self.ae(s.linebuf.dirty_lines(), [2])
             s.test_bidi_refresh()
             self.ae(s.linebuf.dirty_lines(), [1, 2])
+            self.ae(s.historybuf.dirty_lines(), [])
             self.ae(s.test_bidi_resolve_count() - count, 1)
             self.ae(s.test_bidi_levels(1), (2, 2, 1, 2, 1))
             buf = test_screen_update_cell_data(s)
@@ -507,19 +508,23 @@ class TestBidi(BaseTest):
         # cell of אבגדה splits it from (12ב: row 1 gets other levels, rows 2 and
         # 3 keep theirs. A paused frame compares with the last live frame, so
         # only rows 0 (written) and 1 (levels) are redrawn.
-        with setup_for_testing():
-            s = self.screen(cols=5, lines=5, pixel_scroll=False)
-            s.draw('אבגדה')
-            s.draw('(12ב')
-            parse_bytes(s, '\r\nאב\r\nגד'.encode())
-            test_screen_update_cell_data(s)
-            for y in (1, 2, 3):
-                self.assertIsNotNone(s.test_bidi_levels(y))
-            s.cursor_position(1, 5)
-            s.draw('ו')
-            s.pause_rendering(True, 1000)
-            s.test_bidi_refresh()
-            self.ae(s.test_bidi_paused_dirty_lines(), [0, 1])
+        # With pixel scroll on the paused snapshot has a leading history row, so
+        # the dirty indices are shifted by one.
+        for pixel_scroll in (False, True):
+            with self.subTest(pixel_scroll=pixel_scroll), setup_for_testing():
+                ps = int(pixel_scroll)
+                s = self.screen(cols=5, lines=5, pixel_scroll=pixel_scroll)
+                s.draw('אבגדה')
+                s.draw('(12ב')
+                parse_bytes(s, '\r\nאב\r\nגד'.encode())
+                test_screen_update_cell_data(s)
+                for y in (1, 2, 3):
+                    self.assertIsNotNone(s.test_bidi_levels(y))
+                s.cursor_position(1, 5)
+                s.draw('ו')
+                s.pause_rendering(True, 1000)
+                s.test_bidi_refresh()
+                self.ae(s.test_bidi_paused_dirty_lines(), [y + ps for y in (0, 1)])
 
     def test_line_scrolled_into_view_reshaped_after_split(self):
         # linebuf rows y, אבגדה and (12ב, with x in history. In (12ב, searching
@@ -593,7 +598,9 @@ class TestBidi(BaseTest):
         # re-resolves the paragraph and redraws the on-screen rows whose levels
         # change. As in test_dirty_row_redraws_only_rows_whose_levels_change, row
         # 1 (12 3!) goes from (2, 2, 1, 2, 0) to (2, 2, 1, 2, 1) when ב is
-        # written over the first cell of the next row; the row above is unchanged.
+        # written over the first cell of the next row. Linebuf row 1 (screen row 2)
+        # changes; the two rows above it (linebuf row 0 and the history row of the
+        # same paragraph) keep their levels and are not redrawn.
         with setup_for_testing():
             s = self.screen(cols=5, lines=3, scrollback=10)
             s.draw('אבגדה')
@@ -614,6 +621,7 @@ class TestBidi(BaseTest):
             self.ae(s.linebuf.dirty_lines(), [2])
             s.test_bidi_refresh()
             self.ae(s.linebuf.dirty_lines(), [1, 2])
+            self.ae(s.historybuf.dirty_lines(), [])
             self.ae(s.test_bidi_resolve_count() - count, 1)
             self.ae(s.test_bidi_levels(2), (2, 2, 1, 2, 1))
 
