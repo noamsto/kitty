@@ -1662,6 +1662,98 @@ class TestBidi(BaseTest):
                     self.assertIs(s.test_bidi_paragraph_rtl(0), auto)
                     self.warm(s)
 
+    def test_rtl_paragraph_cache_triggers(self):
+        # Every trigger of the cache tests, on RTL paragraphs (auto direction on):
+        # each re-resolves and equals a fresh screen, a quiet frame resolves 0.
+        # The expected maps are the right-aligned ones, worked out by hand:
+        # 'אבג' and ten or fewer letters reverse fully (L1 gives the trailing
+        # blanks level 1), 'אבג abc' has abc at level 2: (9, 8, 7, 4, 5, 6, 3, 2, 1, 0).
+        # A blank continuation row of an RTL paragraph is all level 1: reversed.
+        rev = ID10[::-1]
+        mix = (9, 8, 7, 4, 5, 6, 3, 2, 1, 0)
+        rev5 = (4, 3, 2, 1, 0)
+        long = 'אבגדהוזחטיכלמ'
+        para = 'אבגדהוזחטיכלמנ'
+        base = (rev, mix, rev, rev, None)
+
+        def basic():
+            # two rows, then a Hebrew-first paragraph soft-wrapped onto rows 2-3,
+            # whose first row ends in a blank (L1 keeps it at level 1: map start)
+            s = self.screen(bidi_auto_direction=True)
+            parse_bytes(s, 'אבג\r\nאבג abc\r\nאבגדהוזחט אבג'.encode())
+            self.assertTrue(s.linebuf.is_continued(3))
+            s.cursor_position(1, 1)
+            return s
+
+        def alt():
+            s = self.screen(bidi_auto_direction=True)
+            parse_bytes(s, b'\x1b[?1049h')
+            self.fill(s, ['אבג', 'אבג abc'])
+            s.cursor_position(4, 1)
+            s.draw(long)
+            s.cursor_position(1, 1)
+            return s
+
+        def edge_bottom():
+            s = self.screen(cols=5, lines=5, scrollback=10, bidi_auto_direction=True)
+            parse_bytes(s, b'x0\r\nx1\r\nx2\r\n')
+            s.draw(para)
+            self.prerender(s)
+            self.ae(s.historybuf.count, 1)
+            return s
+
+        def edge_top():
+            s = self.screen(cols=5, lines=5, scrollback=10, pixel_scroll=False, bidi_auto_direction=True)
+            s.draw(para)
+            parse_bytes(s, b'\r\nx1\r\nx2\r\nx3\r\nx4\r\n')
+            self.prerender(s)
+            self.ae(s.historybuf.count, 3)
+            s.scroll(3, True)
+            return s
+
+        def resized():
+            s = self.screen(bidi_auto_direction=True)
+            s.draw(long)
+            return s
+
+        def paused(s):
+            s.pause_rendering(True, 1000)
+            self.frame(s)
+            s.pause_rendering(False)
+
+        def dirty(s):
+            s.cursor_position(4, 4)
+            s.draw('ד')
+
+        cases = (
+            ('dirty row', basic, dirty, base),
+            ('index', basic, lambda s: parse_bytes(s, b'\x1b[5;1H\x1bD'), (mix, rev, rev, None, None)),
+            ('reverse index', basic, lambda s: parse_bytes(s, b'\x1b[1;1H\x1bM'), (None, rev, mix, rev, rev)),
+            ('insert then delete line', alt, lambda s: parse_bytes(s, b'\x1b[L\x1b[M'), (rev, mix, None, rev, rev)),
+            ('view scroll, bottom edge', edge_bottom, lambda s: s.scroll(1, True), (None, None, None, rev5, rev5)),
+            ('view scroll, top edge', edge_top, lambda s: s.scroll(1, False), (rev5, rev5, None, None, None)),
+            ('resize with rewrap', resized, lambda s: s.resize(5, 13), (tuple(range(12, -1, -1)), None, None, None, None)),
+            ('pause', basic, paused, base),
+        )
+        with setup_for_testing():
+            for name, build, trigger, expect in cases:
+                with self.subTest(name):
+                    built = []
+
+                    def tracked():
+                        built.append(build())
+                        return built[-1]
+
+                    self.trigger_case(tracked, trigger, expect, fresh=not name.startswith('view'))
+                    for s in built:
+                        self.assertTrue(any(s.test_bidi_paragraph_rtl(y) for y in range(s.lines)), 'no RTL row')
+            s = basic()
+            self.frame(s)
+            self.warm(s)
+            self.ae(self.frame(s), 0)
+            self.ae(self.maps(s), base)
+            self.assertTrue(all(s.test_bidi_paragraph_rtl(y) for y in range(4)))
+
     def test_rtl_paragraph_selection_and_mouse(self):
         # אבג, auto: v2l 9..0 (test_rtl_paragraph_right_aligned)
         s = self.screen(bidi_auto_direction=True)
