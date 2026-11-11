@@ -61,7 +61,7 @@ typedef struct BidiMaps {
     } para; // current-frame paragraph cache, range-y addressed
     int *stamp_first, *stamp_last; // range-y bounds of the paragraph that last wrote the row
     bool *stamp_valid;
-    bool *rtl; // resolved base direction of the paragraph that last settled the row; true only for an RTL paragraph
+    bool *rtl; // rows: the paragraph that last settled the row resolved RTL
     // The FriBidi class and bracket type of the character starting in each cell
     // (class 0: none starts there), as fed to the cacheable resolve that wrote
     // the row's current map; sig_valid is cleared by every other map or stamp write
