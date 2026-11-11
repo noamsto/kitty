@@ -1277,6 +1277,31 @@ class TestBidi(BaseTest):
                 self.ae(self.maps(s), self.maps(f))
                 self.ae(self.levels(s), self.levels(f))
 
+            with self.subTest('v explicit embedding then a blank'):
+                # ב/, an OSC 66 cell holding RLO, then EM SPACE (WS, not a blank,
+                # so not trimmed). A blank for EM SPACE keeps class WS, so the
+                # shortcut keeps the maps: they must be those of a resolve over
+                # the final text, so the trim must not drop the blank.
+                def rlo(s, last):
+                    s.draw('ב/')
+                    parse_bytes(s, '\x1b]66;w=1;\u202e\x07'.encode())
+                    s.draw(last)
+                    self.ae(str(s.linebuf.line(0))[2], '\u202e')
+
+                s = self.screen(cols=4, lines=1, scrollback=0)
+                rlo(s, '\u2003')
+                self.frame(s)
+                self.warm(s)
+                s.cursor_position(1, 4)
+                s.draw(' ')
+                self.frame(s)
+                f = self.screen(cols=4, lines=1, scrollback=0)
+                rlo(f, ' ')
+                self.frame(f)
+                self.ae((s.test_bidi_levels(0), s.test_bidi_v2l(0)), ((1, 1, 0, 0), (1, 0, 2, 3)))
+                self.ae(self.maps(s), self.maps(f))
+                self.ae(self.levels(s), self.levels(f))
+
     def test_cache_bypass_between_resolves(self):
         # Frame A resolves MIXED. Frame B draws a scale-2 multicell over rows
         # 0-1, cols 0-1: the bypass makes the paragraph inactive under valid
@@ -1330,6 +1355,14 @@ class TestBidi(BaseTest):
             s.erase_characters(1)
             self.assertTrue(s.linebuf.is_continued(1))
 
+        def rlo_cell(s):
+            # draw drops a zero-width Cf, an OSC 66 cell keeps it. Untrimmed, the
+            # blanks after the RLO sit at its level and set the eos of the run
+            # before them (X10), so trimming would change the maps.
+            s.draw('ב/')
+            parse_bytes(s, '\x1b]66;w=1;\u202e\x07'.encode())
+            self.ae(str(s.linebuf.line(0))[2], '\u202e')
+
         cases = {
             'neutral then blanks': lambda s: s.draw('אבג!'),
             'brackets': lambda s: s.draw('אבג (x)'),
@@ -1340,6 +1373,7 @@ class TestBidi(BaseTest):
             'blank last row': wrapped_blank,
             'wide char': lambda s: s.draw('אב中'),
             'LTR start': lambda s: s.draw('abc אב'),
+            'RLO cell': rlo_cell,
         }
         with setup_for_testing():
             for name, build in cases.items():

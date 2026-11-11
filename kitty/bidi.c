@@ -419,17 +419,23 @@ bidi_resolve_paragraph(BidiMaps *b, BidiCellSource src, void *ctx, int first_y, 
     }
     b->row_start[num_rows] = n;
 
+    fribidi_get_bidi_types(b->text, (FriBidiStrIndex)n, b->types);
+    fribidi_get_bracket_types(b->text, (FriBidiStrIndex)n, b->types, b->brackets);
+
     // Blanks at the paragraph's end resolve to level 0 by L1 whatever precedes them, and
     // as the last characters no W or N rule sees them as a neighbour. Only at the end: interior removal can change W4.
+    // Not with an explicit embedding: the blanks' level then sets the eos of the run before them (X10).
     uint32_t n_trim = n;
     if (!b->no_trim) {
         const uint32_t last_row_start = b->row_start[num_rows - 1];
         while (n_trim > last_row_start && b->text[n_trim - 1] == ' ') n_trim--;
+        // the trimmed characters are all U+0020, so scanning the rest covers every type
+        for (uint32_t i = 0; i < n_trim; i++) {
+            if (FRIBIDI_IS_EXPLICIT(b->types[i])) { n_trim = n; break; }
+        }
     }
     if (!n_trim) goto no_bidi;
 
-    fribidi_get_bidi_types(b->text, (FriBidiStrIndex)n, b->types);
-    fribidi_get_bracket_types(b->text, (FriBidiStrIndex)n, b->types, b->brackets);
     FriBidiParType base_dir = FRIBIDI_PAR_LTR;
     b->resolve_count++;
     // Returns the highest level plus one, or 0 on failure
