@@ -1631,6 +1631,37 @@ class TestBidi(BaseTest):
             self.ae((self.maps(s), self.levels(s)), (self.maps(f), self.levels(f)))
             self.assert_same_upload(s, buf, f, fbuf, (0, 1))
 
+    def test_rtl_option_toggle_reresolves(self):
+        # Toggling bidi_auto_direction changes every paragraph's direction
+        # without dirtying a row, so the frame must re-resolve and reshape
+        with setup_for_testing():
+            expect = {}
+            for auto in (False, True):
+                f = self.screen(bidi_auto_direction=auto)
+                f.draw(A)
+                fbuf = test_screen_update_cell_data(f)
+                expect[auto] = (self.maps(f), [c.sprite_idx for c in gpu_row(f, fbuf, 0)])
+            self.assertNotEqual(expect[False][0], expect[True][0])
+            s = self.screen(bidi_auto_direction=True)
+            s.draw(A)
+            self.ae(self.frame(s), 1)
+            self.warm(s)
+            self.ae(self.maps(s), expect[True][0])
+            self.assertIs(s.test_bidi_paragraph_rtl(0), True)
+            for auto in (False, True):
+                with self.subTest(auto=auto):
+                    self.set_options({'bidi_reorder': True, 'bidi_auto_direction': auto})
+                    self.ae(s.linebuf.dirty_lines(), [])
+                    count = s.test_bidi_resolve_count()
+                    s.test_bidi_refresh()
+                    self.assertGreater(s.test_bidi_resolve_count() - count, 0)
+                    self.ae(s.linebuf.dirty_lines(), [0])
+                    buf = test_screen_update_cell_data(s)
+                    self.ae(self.maps(s), expect[auto][0])
+                    self.ae([c.sprite_idx for c in gpu_row(s, buf, 0)], expect[auto][1])
+                    self.assertIs(s.test_bidi_paragraph_rtl(0), auto)
+                    self.warm(s)
+
     def test_rtl_paragraph_selection_and_mouse(self):
         # אבג, auto: v2l 9..0 (test_rtl_paragraph_right_aligned)
         s = self.screen(bidi_auto_direction=True)

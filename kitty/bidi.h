@@ -44,6 +44,7 @@ typedef struct BidiFrameKey {
     index_type rows, cols, scrolled_by;
     index_type historybuf_count, historybuf_start, historybuf_ynum; // not compared by keys_equal
     int row_offset;
+    bool auto_direction; // the mode, not the direction: that derives from the text, whose changes dirty rows
     bool valid;
 } BidiFrameKey;
 

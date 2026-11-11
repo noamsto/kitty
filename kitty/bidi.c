@@ -145,7 +145,8 @@ static bool
 keys_equal(const BidiFrameKey *a, const BidiFrameKey *k) {
     return a->linebuf == k->linebuf && a->historybuf == k->historybuf && a->linebuf_generation == k->linebuf_generation &&
            a->historybuf_generation == k->historybuf_generation && a->rows == k->rows && a->cols == k->cols &&
-           a->scrolled_by == k->scrolled_by && a->row_offset == k->row_offset;
+           a->scrolled_by == k->scrolled_by && a->row_offset == k->row_offset &&
+           a->auto_direction == k->auto_direction;
 }
 
 void

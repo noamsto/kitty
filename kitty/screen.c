@@ -4390,6 +4390,7 @@ screen_bidi_start_frame(Screen *self, bool scroll_changed) {
         .cols = self->columns,
         .scrolled_by = self->scrolled_by,
         .row_offset = pixel_scroll_enabled(self),
+        .auto_direction = OPT(bidi_auto_direction),
         .valid = true};
     bidi_frame_begin(&self->bidi, key, scroll_changed);
 }
