@@ -1453,3 +1453,188 @@ class TestBidi(BaseTest):
                         self.ae(screens[0].test_bidi_levels(y), screens[1].test_bidi_levels(y), f'levels row {y}')
                     if name == 'ES next to EN':
                         self.ae(counts, [1, 1])
+
+    # Right-to-left paragraphs (bidi_auto_direction). Creating a screen resets
+    # the global options, so every screen sets the mode, and each is read before
+    # a screen of the other mode is created.
+    def direction_maps(self, text, auto, cols=10):
+        # the maps, levels and paragraph direction of each row of a screen
+        # given text, in one frame
+        s = self.screen(cols=cols, bidi_auto_direction=auto)
+        s.draw(text)
+        s.test_bidi_refresh()
+        return self.maps(s), self.levels(s), tuple(s.test_bidi_paragraph_rtl(y) for y in range(s.lines))
+
+    def test_rtl_paragraph_right_aligned(self):
+        with setup_for_testing():
+            # אבג, auto: the first strong character is R (P2-P3), so the
+            # paragraph level is 1. R at an odd level stays 1 (I2), and the
+            # trailing blanks take the paragraph level (L1). All level 1, so
+            # L2 reverses the whole row and the word is right-aligned.
+            s = self.screen(bidi_auto_direction=True)
+            fgs = draw_coloured(s, A)
+            row = gpu_row(s, test_screen_update_cell_data(s), 0)
+            self.ae(s.test_bidi_levels(0), (1,) * 10)
+            self.ae(s.test_bidi_v2l(0), ID10[::-1])
+            self.assertIs(s.test_bidi_paragraph_rtl(0), True)
+            self.ae([c.fg for c in row[7:]], fgs[::-1])
+            self.assertTrue(all(c.sprite_idx for c in row[7:]))
+            self.ae([c.sprite_idx for c in row[:7]], [0] * 7)
+            # the cursor, after the text, is on logical 3: visual 9 - 3
+            self.ae(s.cursor.x, 3)
+            self.ae(s.test_bidi_visual_x(3, 0), 6)
+            # auto off: paragraph level 0, the letters 1, the blanks 0 (L1)
+            f = self.screen(bidi_auto_direction=False)
+            draw_coloured(f, A)
+            frow = gpu_row(f, test_screen_update_cell_data(f), 0)
+            self.ae(f.test_bidi_levels(0), (1, 1, 1) + (0,) * 7)
+            self.ae(f.test_bidi_v2l(0), (2, 1, 0) + ID10[3:])
+            self.assertIs(f.test_bidi_paragraph_rtl(0), False)
+            self.ae(row[9].sprite_idx, frow[2].sprite_idx)
+        # שלום!, auto: the ! lies between R and eos, which is R at paragraph
+        # level 1, so N1 makes it R: all level 1, the ! (logical 4) at visual 5,
+        # left of the word
+        maps, levels, rtl = self.direction_maps('שלום!', True)
+        self.ae((levels[0], maps[0], rtl[0]), ((1,) * 10, ID10[::-1], True))
+        # auto off: eos is L at level 0, so N2 gives the ! level 0, right of the word
+        maps, levels, rtl = self.direction_maps('שלום!', False)
+        self.ae((levels[0], maps[0], rtl[0]), ((1, 1, 1, 1) + (0,) * 6, (3, 2, 1, 0) + ID10[4:], False))
+
+    def test_rtl_paragraph_direction_from_first_strong(self):
+        # אבג abc: R first, paragraph level 1. The space between R and L takes
+        # the embedding direction, R (N2): 1. L at an odd level is 2 (I2), the
+        # blanks 1 (L1). L2 reverses cols 4-6, then the whole row.
+        maps, levels, rtl = self.direction_maps('אבג abc', True)
+        self.ae(levels[0], (1, 1, 1, 1, 2, 2, 2, 1, 1, 1))
+        self.ae(maps[0], (9, 8, 7, 4, 5, 6, 3, 2, 1, 0))
+        self.assertIs(rtl[0], True)
+        # abc אבג: L first, LTR, so the same as auto off. The space between L
+        # and R takes the embedding direction, L (N2): 0. Only cols 4-6 reverse.
+        on = self.direction_maps('abc אבג', True)
+        off = self.direction_maps('abc אבג', False)
+        self.ae(on[:2], off[:2])
+        self.ae((on[1][0], on[0][0]), ((0, 0, 0, 0, 1, 1, 1, 0, 0, 0), (0, 1, 2, 3, 6, 5, 4, 7, 8, 9)))
+        self.assertIs(on[2][0], False)
+        # 12 אב ab: EN is weak, so R is the first strong, level 1. W2 and W7
+        # keep EN (sos is R). The first space lies between EN (R for N1) and R:
+        # 1. The second between R and L: e, 1 (N2). EN and L at an odd level
+        # are 2 (I2), the blanks 1 (L1). L2 reverses cols 0-1 and 6-7, then
+        # the whole row: 1 0 2 3 4 5 7 6 8 9 reversed.
+        maps, levels, rtl = self.direction_maps('12 אב ab', True)
+        self.ae(levels[0], (2, 2, 1, 1, 1, 1, 2, 2, 1, 1))
+        self.ae(maps[0], (9, 8, 6, 7, 5, 4, 3, 2, 0, 1))
+        self.assertIs(rtl[0], True)
+        # (12 a soft-wrapped into אבגדה on 5 columns: the first strong is the
+        # a on row 0, so LTR. W7 makes 12 L (sos L), ( and the space lie
+        # between Ls (N1): row 0 is all 0, inactive. Row 1 is R at level 1.
+        on = self.direction_maps('(12 aאבגדה', True, cols=5)
+        off = self.direction_maps('(12 aאבגדה', False, cols=5)
+        self.ae((on[0][:2], on[1][:2]), ((None, (4, 3, 2, 1, 0)), (None, (1,) * 5)))
+        self.ae((on[0][:2], on[1][:2]), (off[0][:2], off[1][:2]))
+        self.ae(on[2][:2], (False, False))
+        # אבגדה soft-wrapped into abcde on 5 columns: RTL. Row 0 is R at level
+        # 1. Row 1 is L at an odd level, 2 (I2), with no blank: active, and L2
+        # reverses it twice, so its map is the identity.
+        maps, levels, rtl = self.direction_maps('אבגדהabcde', True, cols=5)
+        self.ae(levels[:2], ((1,) * 5, (2,) * 5))
+        self.ae(maps[:2], ((4, 3, 2, 1, 0), (0, 1, 2, 3, 4)))
+        self.ae(rtl[:2], (True, True))
+
+    def test_rtl_weak_only_paragraph_stays_ltr(self):
+        # Guard. ١٢٣ 45! has no strong character (AN, WS, EN, ON): FriBidi
+        # leaves the direction ON, which is LTR at level 0. W7 makes 45 L
+        # (sos L), the space lies between AN (R for N1) and L, so e, 0 (N2),
+        # the ! between L and eos (N1): 0. AN at an even level is 2 (I1). L2
+        # reverses cols 0-2 twice: the identity, on an active row.
+        text = '١٢٣ 45!'
+        on = self.direction_maps(text, True)
+        off = self.direction_maps(text, False)
+        self.ae(on[:2], off[:2])
+        self.ae((on[1][0], on[0][0]), ((2, 2, 2) + (0,) * 7, ID10))
+        self.assertIs(on[2][0], False)
+
+    # אבגדה soft-wrapped into ab 1 on 5 columns, auto: R first, paragraph level
+    # 1. Row 0 is R at level 1. Row 1: W7 makes the 1 L (the last strong is
+    # the b), the space lies between Ls (N1), and L at an odd level is 2 (I2);
+    # the blank in col 4 is 1 (L1). L2 reverses cols 0-3, then 0-4: 4 0 1 2 3.
+    RTL_WRAPPED_V2L = ((4, 3, 2, 1, 0), (4, 0, 1, 2, 3), None, None)
+    RTL_WRAPPED_LEVELS = ((1,) * 5, (2, 2, 2, 2, 1), None, None)
+    # x for the א: L first, paragraph level 0. Row 0: R at an even level is 1
+    # (I1), cols 1-4 reverse. Row 1 resolves as above, all L: level 0, inactive.
+    LTR_WRAPPED_V2L = ((0, 4, 3, 2, 1), None, None, None)
+    LTR_WRAPPED_LEVELS = ((0, 1, 1, 1, 1), None, None, None)
+
+    def wrapped_rtl_screen(self, first='א'):
+        s = self.screen(cols=5, lines=4, scrollback=0, bidi_auto_direction=True)
+        s.draw(first + 'בגדה')
+        s.draw('ab 1')
+        return s
+
+    def assert_same_upload(self, s, buf, f, fbuf, rows):
+        for y in rows:
+            fresh = gpu_row(f, fbuf, y)
+            self.assertTrue(any(c.sprite_idx for c in fresh))
+            self.ae([c.sprite_idx for c in gpu_row(s, buf, y)], [c.sprite_idx for c in fresh], f'row {y}')
+
+    def test_rtl_first_strong_edit_flips_direction(self):
+        # Writing the first strong character, R to L and back, flips the whole
+        # paragraph. Row 1 is not written, but its levels change, so it must be
+        # reshaped.
+        with setup_for_testing():
+            s = self.wrapped_rtl_screen()
+            self.ae(self.frame(s), 1)
+            self.warm(s)
+            self.ae((self.maps(s), self.levels(s)), (self.RTL_WRAPPED_V2L, self.RTL_WRAPPED_LEVELS))
+            self.ae([s.test_bidi_paragraph_rtl(y) for y in (0, 1)], [True, True])
+            steps = (('x', False, self.LTR_WRAPPED_V2L, self.LTR_WRAPPED_LEVELS), ('א', True, self.RTL_WRAPPED_V2L, self.RTL_WRAPPED_LEVELS))
+            for ch, rtl, v2l, levels in steps:
+                with self.subTest(ch):
+                    s.cursor_position(1, 1)
+                    s.draw(ch)
+                    count = s.test_bidi_resolve_count()
+                    s.test_bidi_refresh()
+                    self.ae(s.test_bidi_resolve_count() - count, 1)
+                    self.ae([s.test_bidi_paragraph_rtl(y) for y in (0, 1)], [rtl, rtl])
+                    self.ae(s.linebuf.dirty_lines(), [0, 1])
+                    buf = test_screen_update_cell_data(s)
+                    self.ae((self.maps(s), self.levels(s)), (v2l, levels))
+                    f = self.wrapped_rtl_screen(ch)
+                    fbuf = test_screen_update_cell_data(f)
+                    self.ae((self.maps(s), self.levels(s)), (self.maps(f), self.levels(f)))
+                    self.assert_same_upload(s, buf, f, fbuf, (0, 1))
+
+    def test_rtl_first_strong_same_class_edit_skips_resolve(self):
+        # Guard. ב over the first strong א: R for R, no bracket, same cell. The
+        # direction is a function of the classes alone (P2-P3), so the
+        # signatures match, the shortcut keeps the maps, and they stay RTL.
+        with setup_for_testing():
+            s = self.wrapped_rtl_screen()
+            self.frame(s)
+            self.warm(s)
+            count = s.test_bidi_resolve_count()
+            s.cursor_position(1, 1)
+            s.draw('ב')
+            s.test_bidi_refresh()
+            self.ae(s.test_bidi_resolve_count() - count, 0)
+            self.ae(s.linebuf.dirty_lines(), [0])
+            buf = test_screen_update_cell_data(s)
+            self.ae(s.test_bidi_resolve_count() - count, 0)
+            self.ae((self.maps(s), self.levels(s)), (self.RTL_WRAPPED_V2L, self.RTL_WRAPPED_LEVELS))
+            self.ae([s.test_bidi_paragraph_rtl(y) for y in (0, 1)], [True, True])
+            f = self.wrapped_rtl_screen('ב')
+            fbuf = test_screen_update_cell_data(f)
+            self.ae((self.maps(s), self.levels(s)), (self.maps(f), self.levels(f)))
+            self.assert_same_upload(s, buf, f, fbuf, (0, 1))
+
+    def test_rtl_paragraph_selection_and_mouse(self):
+        # אבג, auto: v2l 9..0 (test_rtl_paragraph_right_aligned)
+        s = self.screen(bidi_auto_direction=True)
+        s.draw(A)
+        self.ae(self.selected_columns(s, 0, 2), [7, 8, 9])
+        self.assertIs(s.test_bidi_paragraph_rtl(0), True)
+        # a click at visual 0, left of the text, is on logical 9, a trailing
+        # blank at the paragraph level, 1: the half is flipped
+        self.ae(s.test_bidi_logical_x(0, 0), 9)
+        self.assertIs(s.test_bidi_is_rtl(9, 0), True)
+        # a click at visual 9 lands on logical 0, before the first character
+        self.ae(s.test_bidi_logical_x(9, 0), 0)

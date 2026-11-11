@@ -5,6 +5,7 @@
  */
 
 #include "bidi.h"
+#include "state.h"
 
 #define row_of(arr) (b->arr + (size_t)render_row * b->cols)
 
@@ -425,8 +426,8 @@ bidi_resolve_paragraph(BidiMaps *b, BidiCellSource src, void *ctx, int first_y, 
     fribidi_get_bidi_types(b->text, (FriBidiStrIndex)n, b->types);
     fribidi_get_bracket_types(b->text, (FriBidiStrIndex)n, b->types, b->brackets);
 
-    // Blanks at the paragraph's end resolve to level 0 by L1 whatever precedes them, and
-    // as the last characters no W or N rule sees them as a neighbour. Only at the end: interior removal can change W4.
+    // Blanks at the paragraph's end take the paragraph level by L1 whatever precedes them, as
+    // the last characters no W or N rule sees them as a neighbour, and P2-P3 skip them. Only at the end: interior removal can change W4.
     // Not with an explicit embedding: the blanks' level then sets the eos of the run before them (X10).
     uint32_t n_trim = n;
     if (!b->no_trim) {
@@ -439,11 +440,14 @@ bidi_resolve_paragraph(BidiMaps *b, BidiCellSource src, void *ctx, int first_y, 
     }
     if (!n_trim) goto no_bidi;
 
-    FriBidiParType base_dir = FRIBIDI_PAR_LTR;
+    // ON takes the direction of the first strong character (P2-P3) and stays ON when there is none
+    FriBidiParType base_dir = OPT(bidi_auto_direction) ? FRIBIDI_PAR_ON : FRIBIDI_PAR_LTR;
     b->resolve_count++;
     // Returns the highest level plus one, or 0 on failure
     max_level = fribidi_get_par_embedding_levels_ex(b->types, b->brackets, (FriBidiStrIndex)n_trim, &base_dir, b->para_levels);
-    for (uint32_t i = n_trim; i < n; i++) b->para_levels[i] = 0;
+    const bool rtl = base_dir == FRIBIDI_PAR_RTL;
+    const FriBidiParType line_dir = rtl ? FRIBIDI_PAR_RTL : FRIBIDI_PAR_LTR;
+    for (uint32_t i = n_trim; i < n; i++) b->para_levels[i] = rtl ? 1 : 0;
     if (!max_level) cacheable = false;
     if (max_level <= 1) goto no_bidi;
 
@@ -454,14 +458,23 @@ bidi_resolve_paragraph(BidiMaps *b, BidiCellSource src, void *ctx, int first_y, 
         if (render_row < (int)first_render_row || render_row >= (int)b->rows) continue;
         const uint32_t row_first = b->row_start[r], row_end = b->row_start[r + 1];
         const uint32_t reorder_end = r == num_rows - 1 ? n_trim : row_end;
-        const FriBidiLevel ret = reorder_end <= row_first ? 0 : fribidi_reorder_line(
-            0, b->types, (FriBidiStrIndex)(reorder_end - row_first), (FriBidiStrIndex)row_first, FRIBIDI_PAR_LTR, b->para_levels, NULL, b->map);
+        FriBidiLevel ret = reorder_end <= row_first ? 0 : fribidi_reorder_line(
+            0, b->types, (FriBidiStrIndex)(reorder_end - row_first), (FriBidiStrIndex)row_first, line_dir, b->para_levels, NULL, b->map);
+        if (rtl && reorder_end < row_end) {
+            // The trimmed blanks are at level 1 and after every other character, so only L2's
+            // final, level 1 reversal moves them: reversed, to the left of FriBidi's order of the rest
+            const uint32_t k = row_end - reorder_end;
+            memmove(b->map + row_first + k, b->map + row_first, (reorder_end - row_first) * sizeof(b->map[0]));
+            for (uint32_t j = 0; j < k; j++) b->map[row_first + j] = (FriBidiStrIndex)(row_end - 1 - j);
+            // Every level is at least 1, so an all blank row is reordered too
+            if (reorder_end == row_first) ret = 2;
+        }
         if (ret <= 1) row_inactive(b, (index_type)render_row);
         else {
             write_row(b, (index_type)render_row, row_first, row_end);
             any_active = true;
         }
-        settle_row(b, src, ctx, first_y + r, (index_type)render_row, first_y, last_y, cacheable, false);
+        settle_row(b, src, ctx, first_y + r, (index_type)render_row, first_y, last_y, cacheable, rtl);
         if (cacheable) write_signature(b, (index_type)render_row, row_first, row_end);
     }
     return any_active;
