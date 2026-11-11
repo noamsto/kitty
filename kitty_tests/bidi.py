@@ -1544,6 +1544,15 @@ class TestBidi(BaseTest):
         self.ae(levels[:2], ((1,) * 5, (2,) * 5))
         self.ae(maps[:2], ((4, 3, 2, 1, 0), (0, 1, 2, 3, 4)))
         self.ae(rtl[:2], (True, True))
+        # مرحبا! (Arabic letters): AL is a strong R-type character, so P2 finds
+        # it first and the paragraph level is 1. W3 turns AL to R, so the word
+        # is R like Hebrew. The ! (ON) lies between R and the blanks (eos at
+        # level 1, R): N1 gives it R, 1. The blanks are 1 (L1): all level 1,
+        # L2 reverses the whole row, the ! lands at visual 4, left of the word.
+        maps, levels, rtl = self.direction_maps('مرحبا!', True)
+        self.ae(levels[0], (1,) * 10)
+        self.ae(maps[0], tuple(range(9, -1, -1)))
+        self.assertIs(rtl[0], True)
 
     def test_rtl_weak_only_paragraph_stays_ltr(self):
         # Guard. ١٢٣ 45! has no strong character (AN, WS, EN, ON): FriBidi
@@ -1663,8 +1672,11 @@ class TestBidi(BaseTest):
                     self.warm(s)
 
     def test_rtl_paragraph_cache_triggers(self):
-        # Every trigger of the cache tests, on RTL paragraphs (auto direction on):
-        # each re-resolves and equals a fresh screen, a quiet frame resolves 0.
+        # Cache triggers on RTL paragraphs (auto direction on): a dirty row,
+        # index, reverse index, insert then delete line, view scroll at both
+        # edges, resize with rewrap and a paused frame (the paragraph split has
+        # its own test). Each re-resolves and equals a fresh screen, a quiet
+        # frame resolves 0.
         # The expected maps are the right-aligned ones, worked out by hand:
         # 'אבג' and ten or fewer letters reverse fully (L1 gives the trailing
         # blanks level 1), 'אבג abc' has abc at level 2: (9, 8, 7, 4, 5, 6, 3, 2, 1, 0).
@@ -1754,6 +1766,84 @@ class TestBidi(BaseTest):
             self.ae(self.maps(s), base)
             self.assertTrue(all(s.test_bidi_paragraph_rtl(y) for y in range(4)))
 
+    def test_rtl_paragraph_split_changes_direction(self):
+        # Overwriting the last cell of row 0 clears its soft wrap, so row 1
+        # becomes its own paragraph with its own first strong character. Row 1
+        # is not written, but its direction changes, so it must be reshaped.
+        rev5 = (4, 3, 2, 1, 0)
+        cases = (
+            # abcde + אבג: one LTR paragraph, row 1 is R at level 1 (L1: the
+            # blanks 0). After the split row 1 starts with R: RTL, all level 1
+            ('abcde', 'אבג', True, rev5),
+            # אבגדה + abc: one RTL paragraph, row 1 is L at level 2. After the
+            # split row 1 starts with L: LTR, all level 0, so no map
+            ('אבגדה', 'abc', False, None),
+        )
+        with setup_for_testing():
+            for first, second, rtl_after, map_after in cases:
+                with self.subTest(first):
+
+                    def build():
+                        s = self.screen(cols=5, lines=5, bidi_auto_direction=True)
+                        s.draw(first)
+                        s.draw(second)
+                        self.assertTrue(s.linebuf.is_continued(1))
+                        return s
+
+                    def split(s):
+                        s.cursor_position(1, 5)
+                        s.draw('x')
+                        self.assertFalse(s.linebuf.is_continued(1))
+
+                    s = build()
+                    self.frame(s)
+                    self.warm(s)
+                    before = s.test_bidi_paragraph_rtl(1)
+                    self.assertIs(before, not rtl_after)
+                    split(s)
+                    count = s.test_bidi_resolve_count()
+                    s.test_bidi_refresh()
+                    self.assertGreater(s.test_bidi_resolve_count() - count, 0)
+                    self.assertIn(1, s.linebuf.dirty_lines())
+                    buf = test_screen_update_cell_data(s)
+                    self.ae(s.test_bidi_v2l(1), map_after)
+                    self.assertIs(bool(s.test_bidi_paragraph_rtl(1)), rtl_after)
+                    f = build()
+                    split(f)
+                    fbuf = test_screen_update_cell_data(f)
+                    self.ae(self.maps(s), self.maps(f))
+                    self.ae(self.levels(s), self.levels(f))
+                    self.assert_same_upload(s, buf, f, fbuf, (1,))
+                    self.warm(s)
+                    self.ae(self.frame(s), 0)
+
+    def test_rtl_paragraph_reorder_option_toggle(self):
+        # Trigger: bidi_reorder off then on, force_ltr on then off, with auto
+        # direction on. Either change drops the maps, undoing it must resolve
+        # again and give the right-aligned RTL maps.
+        on = {'bidi_reorder': True, 'force_ltr': False, 'bidi_auto_direction': True}
+        offs = ({'bidi_reorder': False, 'bidi_auto_direction': True}, {'bidi_reorder': True, 'force_ltr': True, 'bidi_auto_direction': True})
+        want = tuple(range(9, -1, -1))
+        with setup_for_testing():
+            try:
+                for off in offs:
+                    with self.subTest(off=off):
+                        s = self.screen(bidi_auto_direction=True)
+                        s.draw(A)
+                        self.frame(s)
+                        self.warm(s)
+                        self.ae(s.test_bidi_v2l(0), want)
+                        self.set_options(off)
+                        self.frame(s)
+                        self.assertIsNone(s.test_bidi_v2l(0), off)
+                        self.set_options(on)
+                        self.assertGreater(self.frame(s), 0, off)
+                        self.ae(s.test_bidi_v2l(0), want, off)
+                        self.assertIs(s.test_bidi_paragraph_rtl(0), True)
+                        self.ae(self.frame(s), 0)
+            finally:
+                self.set_options(on)
+
     def test_rtl_paragraph_selection_and_mouse(self):
         # אבג, auto: v2l 9..0 (test_rtl_paragraph_right_aligned)
         s = self.screen(bidi_auto_direction=True)
@@ -1764,5 +1854,6 @@ class TestBidi(BaseTest):
         # blank at the paragraph level, 1: the half is flipped
         self.ae(s.test_bidi_logical_x(0, 0), 9)
         self.assertIs(s.test_bidi_is_rtl(9, 0), True)
-        # a click at visual 9 lands on logical 0, before the first character
+        # a click at visual 9, right of the text, lands on logical 0, the first
+        # character (א): the half is flipped, so it is the start of that character
         self.ae(s.test_bidi_logical_x(9, 0), 0)
