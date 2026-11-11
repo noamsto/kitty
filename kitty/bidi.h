@@ -17,6 +17,9 @@ typedef enum { BIDI_DIR_GUESS = 0, BIDI_DIR_LTR = 1, BIDI_DIR_RTL = 2 } BidiDire
 
 #define BIDI_MAX_PARAGRAPH_ROWS 256
 
+// Line ids are (kind << 32) | slot; kind 1 and 2 are the main and alt linebuf
+#define BIDI_HISTORY_LINE_ID_KIND 3ull
+
 // True for codepoints in blocks that contain right-to-left or Arabic
 // letters/digits, i.e. text that may need reordering.
 static inline bool
@@ -37,6 +40,7 @@ typedef struct BidiFrameKey {
     const void *linebuf, *historybuf;
     uint64_t linebuf_generation, historybuf_generation;
     index_type rows, cols, scrolled_by;
+    index_type historybuf_count; // not compared by keys_equal
     int row_offset;
     bool valid;
 } BidiFrameKey;
@@ -62,6 +66,12 @@ typedef struct BidiMaps {
     index_type id_hint;
     uint64_t *paused_line_id; // line ids of the paused snapshot rows, not freed with the row maps
     index_type paused_rows, paused_cap;
+    struct {
+        const void *buf;
+        uint64_t generation;
+        index_type count;
+        bool valid;
+    } ids_history; // the history when line_id was recorded
     BidiFrameKey key;
     unsigned long long resolve_count;
     FriBidiChar *text;
@@ -80,6 +90,10 @@ void bidi_set_all_rows_inactive(BidiMaps *b);
 // Starts a frame: the stamps of the last frame stay valid only if the key is
 // unchanged and the view did not scroll.
 void bidi_frame_begin(BidiMaps *b, BidiFrameKey now, bool scroll_changed);
+// History line ids are ring slots. When the history may have reused a slot
+// since line_id was recorded (anything but lines appended without wrapping),
+// forgets line_id's history ids, so those lines have no last-frame state.
+void bidi_forget_reused_history_ids(BidiMaps *b, const void *historybuf, uint64_t generation, index_type count);
 // Starts a paused frame, which reads a snapshot: no stamp is trusted (the
 // snapshot rows are not range rows), and the line state of the last live frame
 // is kept for the level compare of paused frames and of the next live one.

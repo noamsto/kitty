@@ -593,6 +593,37 @@ class TestBidi(BaseTest):
             fresh = gpu_row(g, test_screen_update_cell_data(g), 1)
             self.ae([c.sprite_idx for c in gpu_row(s, buf, 0)], [c.sprite_idx for c in fresh])
 
+    def test_history_slot_reuse_reshapes_line(self):
+        # History line ids are ring slots. X (א2 3( soft-wrapped into W) is
+        # pushed into the slot of O, the oldest history line, which the last
+        # frame showed at row 0 with levels (1, 2, 1, 2, 1). X's new levels are
+        # equal to those, so comparing them as if X were O would skip reshaping
+        # X although its glyphs were shaped at other levels.
+        with setup_for_testing():
+            s = self.screen(cols=5, lines=4, scrollback=0, pixel_scroll=False)
+            s.draw('א2 3ב')  # O
+            parse_bytes(s, b'\r\nh\r\ni\r\nj\r\n')
+            s.draw('א2 3(')  # X
+            s.draw('abcde')  # W
+            parse_bytes(s, b'\r\na\r\nb')
+            test_screen_update_cell_data(s)
+            self.ae(s.test_bidi_levels(0), (1, 2, 1, 2, 0))
+            s.scroll(10, True)
+            test_screen_update_cell_data(s)
+            self.ae(s.test_bidi_levels(0), (1, 2, 1, 2, 1))
+            s.cursor_position(2, 1)
+            s.draw('ב')  # W: the ( of X becomes level 1
+            s.cursor_position(4, 1)
+            parse_bytes(s, b'\n')  # X into the slot of O
+            buf = test_screen_update_cell_data(s)
+            self.ae(s.test_bidi_levels(3), (1, 2, 1, 2, 1))
+            f = self.screen(cols=5, lines=4, pixel_scroll=False)
+            f.draw('א2 3(')
+            f.draw('בbcde')
+            fresh = gpu_row(f, test_screen_update_cell_data(f), 0)
+            self.assertTrue(any(c.sprite_idx for c in fresh))
+            self.ae([c.sprite_idx for c in gpu_row(s, buf, 3)], [c.sprite_idx for c in fresh])
+
     def test_dirty_row_below_view_redraws_paragraph(self):
         # scrolled up, a dirty linebuf row of the paragraph below the view
         # re-resolves the paragraph and redraws the on-screen rows whose levels

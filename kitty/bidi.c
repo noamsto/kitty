@@ -36,6 +36,7 @@ free_row_maps(BidiMaps *b) {
     b->prev_levels = NULL;
     b->snapshot_taken = false;
     b->hold = false;
+    b->ids_history.valid = false;
     b->rows = 0;
     b->cols = 0;
 }
@@ -132,6 +133,16 @@ keys_equal(const BidiFrameKey *a, const BidiFrameKey *k) {
 }
 
 void
+bidi_forget_reused_history_ids(BidiMaps *b, const void *historybuf, uint64_t generation, index_type count) {
+    if (!b->line_id) return;
+    const bool appended = b->ids_history.valid && b->ids_history.buf == historybuf &&
+        (int64_t)(generation - b->ids_history.generation) == (int64_t)count - (int64_t)b->ids_history.count;
+    if (appended) return;
+    for (index_type r = 0; r < b->rows; r++)
+        if ((b->line_id[r] >> 32) == BIDI_HISTORY_LINE_ID_KIND) b->line_id[r] = 0;
+}
+
+void
 bidi_frame_begin(BidiMaps *b, BidiFrameKey now, bool scroll_changed) {
     b->moved = !(b->key.valid && keys_equal(&b->key, &now) && !scroll_changed);
     b->key = now;
@@ -140,11 +151,16 @@ bidi_frame_begin(BidiMaps *b, BidiFrameKey now, bool scroll_changed) {
     b->snapshot_taken = b->hold;
     b->hold = false;
     if (!b->v2l) return;
+    bidi_forget_reused_history_ids(b, now.historybuf, now.historybuf_generation, now.historybuf_count);
     if (b->moved) memset(b->stamp_valid, 0, b->rows * sizeof(b->stamp_valid[0]));
     uint64_t *ids = b->prev_line_id;
     b->prev_line_id = b->line_id;
     b->line_id = ids;
     memset(b->line_id, 0, b->rows * sizeof(b->line_id[0]));
+    b->ids_history.buf = now.historybuf;
+    b->ids_history.generation = now.historybuf_generation;
+    b->ids_history.count = now.historybuf_count;
+    b->ids_history.valid = true;
 }
 
 void

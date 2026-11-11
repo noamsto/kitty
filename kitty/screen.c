@@ -3928,6 +3928,8 @@ screen_pause_rendering(Screen *self, bool pause, int for_in_ms) {
     }
     Line line = {.text_cache = self->text_cache};
     uint64_t *bidi_ids = bidi_paused_line_ids(&self->bidi, bidi_enabled() ? num_rows : 0);
+    // Paused frames compare with the last live frame's ids
+    if (bidi_ids) bidi_forget_reused_history_ids(&self->bidi, self->historybuf, self->historybuf->bidi_generation, self->historybuf->count);
     for (index_type y = 0; y < num_rows; y++) {
         index_type lnum;
         bool is_history;
@@ -4210,7 +4212,7 @@ bidi_source_mark_dirty_cb(void *ctx, int y) {
 
 static uint64_t
 bidi_live_line_id(Screen *self, int y) {
-    if (y < 0) return (3ull << 32) | historybuf_ring_index(self->historybuf, (index_type)(-(y + 1)));
+    if (y < 0) return (BIDI_HISTORY_LINE_ID_KIND << 32) | historybuf_ring_index(self->historybuf, (index_type)(-(y + 1)));
     return ((self->linebuf == self->main_linebuf ? 1ull : 2ull) << 32) | self->linebuf->line_map[y];
 }
 
@@ -4361,6 +4363,7 @@ screen_bidi_start_frame(Screen *self, bool scroll_changed) {
         .historybuf = self->historybuf,
         .linebuf_generation = self->linebuf->bidi_generation,
         .historybuf_generation = self->historybuf->bidi_generation,
+        .historybuf_count = self->historybuf->count,
         .rows = render_lines,
         .cols = self->columns,
         .scrolled_by = self->scrolled_by,
