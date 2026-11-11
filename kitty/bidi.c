@@ -336,6 +336,7 @@ bidi_resolve_paragraph(BidiMaps *b, BidiCellSource src, void *ctx, int first_y, 
     index_type first_render_row, bool cacheable) {
     const int num_rows = last_y - first_y + 1;
     const index_type cols = b->cols;
+    FriBidiLevel max_level = 0;
     // A failed resolve leaves the rows unmapped for this frame only
     if (num_rows < 1 || num_rows > BIDI_MAX_PARAGRAPH_ROWS || !ensure_scratch(b, (size_t)num_rows * cols)) {
         cacheable = false;
@@ -356,13 +357,22 @@ bidi_resolve_paragraph(BidiMaps *b, BidiCellSource src, void *ctx, int first_y, 
     }
     b->row_start[num_rows] = n;
 
+    // Blanks at the paragraph's end resolve to level 0 by L1 whatever precedes them, and
+    // as the last characters no W or N rule sees them as a neighbour. Only at the end: interior removal can change W4.
+    uint32_t n_trim = n;
+    if (!b->no_trim) {
+        const uint32_t last_row_start = b->row_start[num_rows - 1];
+        while (n_trim > last_row_start && b->text[n_trim - 1] == ' ') n_trim--;
+    }
+    if (!n_trim) goto no_bidi;
+
     fribidi_get_bidi_types(b->text, (FriBidiStrIndex)n, b->types);
     fribidi_get_bracket_types(b->text, (FriBidiStrIndex)n, b->types, b->brackets);
     FriBidiParType base_dir = FRIBIDI_PAR_LTR;
     b->resolve_count++;
     // Returns the highest level plus one, or 0 on failure
-    const FriBidiLevel max_level =
-        fribidi_get_par_embedding_levels_ex(b->types, b->brackets, (FriBidiStrIndex)n, &base_dir, b->para_levels);
+    max_level = fribidi_get_par_embedding_levels_ex(b->types, b->brackets, (FriBidiStrIndex)n_trim, &base_dir, b->para_levels);
+    for (uint32_t i = n_trim; i < n; i++) b->para_levels[i] = 0;
     if (!max_level) cacheable = false;
     if (max_level <= 1) goto no_bidi;
 
@@ -372,8 +382,9 @@ bidi_resolve_paragraph(BidiMaps *b, BidiCellSource src, void *ctx, int first_y, 
         const int render_row = first_y + r + y_to_render_row;
         if (render_row < (int)first_render_row || render_row >= (int)b->rows) continue;
         const uint32_t row_first = b->row_start[r], row_end = b->row_start[r + 1];
-        const FriBidiLevel ret = fribidi_reorder_line(
-            0, b->types, (FriBidiStrIndex)(row_end - row_first), (FriBidiStrIndex)row_first, FRIBIDI_PAR_LTR, b->para_levels, NULL, b->map);
+        const uint32_t reorder_end = r == num_rows - 1 ? n_trim : row_end;
+        const FriBidiLevel ret = reorder_end <= row_first ? 0 : fribidi_reorder_line(
+            0, b->types, (FriBidiStrIndex)(reorder_end - row_first), (FriBidiStrIndex)row_first, FRIBIDI_PAR_LTR, b->para_levels, NULL, b->map);
         if (ret <= 1) row_inactive(b, (index_type)render_row);
         else {
             write_row(b, (index_type)render_row, row_first, row_end);

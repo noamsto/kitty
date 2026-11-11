@@ -7554,6 +7554,13 @@ test_bidi_resolve_count(Screen *self, PyObject *a UNUSED) {
 }
 
 static PyObject *
+test_bidi_trim(Screen *self, PyObject *flag) {
+    self->bidi.no_trim = !PyObject_IsTrue(flag);
+    bidi_cache_invalidate(&self->bidi);
+    Py_RETURN_NONE;
+}
+
+static PyObject *
 test_bidi_line_flag(Screen *self, PyObject *args) {
     unsigned y;
     if (!PyArg_ParseTuple(args, "I", &y)) return NULL;
@@ -7786,6 +7793,7 @@ static PyMethodDef methods[] = {
     METHODB(test_bidi_line_flag, METH_VARARGS),
     METHODB(test_bidi_paused_dirty_lines, METH_NOARGS),
     METHODB(test_bidi_resolve_count, METH_NOARGS),
+    METHODB(test_bidi_trim, METH_O),
     METHODB(restore_scrollback, METH_O),
     METHODB(cursor_prompt_line, METH_NOARGS),
     MND(overlay_line_start, METH_NOARGS) MND(line_edge_colors, METH_NOARGS) MND(ime_text_around_cursor, METH_NOARGS) MND(line, METH_O)

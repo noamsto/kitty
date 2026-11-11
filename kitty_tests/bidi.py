@@ -1154,3 +1154,42 @@ class TestBidi(BaseTest):
             groups = shape_string(text, path=path, rtl=True)
         self.ae(len(groups), 4, groups)
         self.ae([g[0] for g in groups], [1, 1, 1, 1], groups)
+
+    def test_trailing_blank_trim_keeps_maps(self):
+        # Dropping the blanks at a paragraph's end before resolving must not
+        # change any row's maps (L1 resets them to the paragraph level)
+        def wrapped_blank(s):
+            s.draw('א' * 10)
+            s.draw('ב')
+            s.cursor_position(2, 1)
+            s.erase_characters(1)
+            self.assertTrue(s.linebuf.is_continued(1))
+
+        cases = {
+            'neutral then blanks': lambda s: s.draw('אבג!'),
+            'brackets': lambda s: s.draw('אבג (x)'),
+            'ES next to EN': lambda s: s.draw('אב 1+'),
+            'ET after EN': lambda s: s.draw('אב 12-'),
+            'ET': lambda s: s.draw('אב $'),
+            'spaces after R': lambda s: s.draw('אבג   '),
+            'blank last row': wrapped_blank,
+            'wide char': lambda s: s.draw('אב中'),
+            'LTR start': lambda s: s.draw('abc אב'),
+        }
+        with setup_for_testing():
+            for name, build in cases.items():
+                with self.subTest(name):
+                    screens = []
+                    for trim in (True, False):
+                        s = self.screen()
+                        s.test_bidi_trim(trim)
+                        build(s)
+                        screens.append(s)
+                    counts = [self.frame(s) for s in screens]
+                    for s in screens:
+                        self.warm(s)
+                    for y in range(5):
+                        self.ae(screens[0].test_bidi_v2l(y), screens[1].test_bidi_v2l(y), f'v2l row {y}')
+                        self.ae(screens[0].test_bidi_levels(y), screens[1].test_bidi_levels(y), f'levels row {y}')
+                    if name == 'ES next to EN':
+                        self.ae(counts, [1, 1])

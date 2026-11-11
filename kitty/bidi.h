@@ -75,6 +75,7 @@ typedef struct BidiMaps {
     } ids_history; // the history when line_id was recorded
     BidiFrameKey key;
     unsigned long long resolve_count;
+    bool no_trim; // test only: do not drop the blanks at a paragraph's end
     FriBidiChar *text;
     FriBidiCharType *types;
     FriBidiBracketType *brackets;
