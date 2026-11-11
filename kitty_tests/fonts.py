@@ -704,15 +704,20 @@ class Rendering(FontBaseTest):
         # carrying vowel and dagesh marks
         lm = 'LiberationMono-Regular.ttf'
         for units in (
-            ('\u05e9', '\u05dc', '\u05d5', '\u05dd'),  # \u05e9\u05dc\u05d5\u05dd
-            ('\u05e9\u05b8\u05c1', '\u05dc', '\u05d5\u05b9', '\u05dd'),  # \u05e9\u05b8\u05c1\u05dc\u05d5\u05b9\u05dd
+            ('\u05e9', '\u05dc', '\u05d5', '\u05dd'),  # unpointed
+            ('\u05e9\u05b8\u05c1', '\u05dc', '\u05d5\u05b9', '\u05dd'),  # pointed
         ):
             word = ''.join(units)
             shaped = ss(word, lm)
             self.ae([g[0] for g in shaped], [1, 1, 1, 1], f'cells per group for: {word!r}')
             self.ae([g[3] for g in shaped], [ss(u, lm)[0][3] for u in reversed(units)], f'glyphs per group for: {word!r}')
         # LTR text inside an RTL buffer
-        self.ae([g[0] for g in ss('שָׁלוֹם ab', lm)], [1] * 7)
+        units = ('\u05e9\u05b8\u05c1', '\u05dc', '\u05d5\u05b9', '\u05dd', ' ', 'a', 'b')
+        shaped = ss(''.join(units), lm)
+        self.ae([g[0] for g in shaped], [1] * 7)
+        self.ae([g[3] for g in shaped], [ss(u, lm)[0][3] for u in reversed(units)])
+        # the iosevka grouping has its own RTL path, glyphs missing from the font still carry clusters
+        self.ae([g[:2] for g in ss('\u05e9\u05b8\u05c1\u05dc\u05d5\u05b9\u05dd', 'iosevka-regular.ttf')], [(1, 1), (1, 2), (1, 1), (1, 3)])
 
     def test_shaped_run_cache(self):
         # test_shape() already checks that a cached run matches the HarfBuzz
