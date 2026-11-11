@@ -168,9 +168,10 @@ class TestBidi(BaseTest):
         # codepoint, so one stale flag cannot hide another.
         # U+08FF, U+0900, U+FE00 and U+11000 are zero-width marks: draw_text_loop returns
         # before the flag test for them, so they are replaced by the nearest
-        # drawable codepoint on the same side (U+08C9, U+0904, U+FE10, U+11005).
+        # drawable codepoint on the same side (U+08C9, U+0904, U+FE10, U+11003).
+        # U+FE6F, the codepoint below the flagged U+FE70, is unassigned and draws.
         flagged = (0x590, 0x8C9, 0xFB1D, 0xFDFF, 0xFE70, 0xFEFC, 0x10800, 0x10FFF, 0x1E800, 0x1EFFF)
-        unflagged = (0x58F, 0x904, 0xFB1C, 0xFE10, 0xFEFD, 0x107FF, 0x11005, 0x1E7FF, 0x1F000)
+        unflagged = (0x58F, 0x904, 0xFB1C, 0xFE10, 0xFE6F, 0xFEFD, 0x107FF, 0x11003, 0x1E7FF, 0x1F000)
         for cp, want in [(cp, True) for cp in flagged] + [(cp, False) for cp in unflagged]:
             with self.subTest(hex(cp)):
                 s = self.screen()
@@ -648,6 +649,13 @@ class TestBidi(BaseTest):
         # History line ids are ring slots and a push into a full ring reuses
         # only the oldest slot. The history lines whose slots were not reused
         # keep their ids and levels, so they are not redrawn.
+        #
+        # The history ring holds 4 lines. Eight lines fill slots 0-3 oldest
+        # first, so the push below reuses slot 0, and the pushed line, history
+        # line 0, is in slot 0. dirty_lines() lists ring slots, so [0] means
+        # the pushed line only. test_bidi_refresh deliberately skips the
+        # scrolled_by bump screen_update_cell_data makes, so the view keeps
+        # the history line numbers of the last frame.
         def fill():
             s = self.screen(cols=5, lines=4, scrollback=0, pixel_scroll=False)
             for i in range(8):
@@ -655,41 +663,56 @@ class TestBidi(BaseTest):
                 if i < 7:
                     parse_bytes(s, b'\r\n')
             self.ae(s.historybuf.count, 4)
+            # apply the history count, then draw every line once so none is
+            # dirty for want of a frame
+            test_screen_update_cell_data(s)
+            self.prerender(s)
+            self.ae(s.scrolled_by, 0)
             return s
 
         with setup_for_testing():
-            # the reused slot (the oldest line) is off screen
+            # the reused slot (the oldest line) is off screen: rows 0-1 show
+            # history lines 1 (slot 2) and 0 (slot 3)
             s = fill()
             s.scroll(2, True)
             test_screen_update_cell_data(s)
             test_screen_update_cell_data(s)
+            self.ae(s.scrolled_by, 2)
             self.ae(s.historybuf.dirty_lines(), [])
             self.ae(s.test_bidi_levels(0), (1, 1, 1, 2, 2))
             s.cursor_position(4, 1)
             parse_bytes(s, b'\n')
             s.test_bidi_refresh()
-            # scrolled_by is unchanged here, so the pushed line is at history
-            # row 0 and is the only dirty line; row 1 keeps its id and levels
+            # row 0 now shows slot 3, which keeps its id and levels; row 1
+            # shows the pushed line, new in slot 0
             self.ae(s.historybuf.dirty_lines(), [0])
 
-            # the reused slot (the oldest line) is on screen at the top
+            # the reused slot (the oldest line) is on screen at the top: rows
+            # 0-3 show slots 0-3. The pushed line has the levels of the line
+            # it replaces and fill() drew it, so its text is clean and only forgetting
+            # the slot's id marks it dirty: compared with the old line, it would
+            # look unchanged
             s = fill()
             s.scroll(10, True)
+            test_screen_update_cell_data(s)
+            test_screen_update_cell_data(s)
             self.ae(s.scrolled_by, 4)
-            test_screen_update_cell_data(s)
-            test_screen_update_cell_data(s)
             self.ae(s.historybuf.dirty_lines(), [])
+            self.ae(s.test_bidi_levels(0), (1, 1, 1, 2, 2))
             s.cursor_position(4, 1)
             parse_bytes(s, b'\n')
             s.test_bidi_refresh()
-            # only the pushed line, in the reused slot, is dirty
+            # rows 0-3 show slots 1, 2, 3, 0: only the pushed line, at row 3
+            # in the reused slot, is dirty
             self.ae(s.historybuf.dirty_lines(), [0])
             buf = test_screen_update_cell_data(s)
+            self.ae(s.scrolled_by, 4)
             f = self.screen(cols=5, lines=4, pixel_scroll=False)
             f.draw('אב 12')
             fresh = gpu_row(f, test_screen_update_cell_data(f), 0)
             self.assertTrue(any(c.sprite_idx for c in fresh))
-            self.ae([c.sprite_idx for c in gpu_row(s, buf, 0)], [c.sprite_idx for c in fresh])
+            for y in range(4):
+                self.ae([c.sprite_idx for c in gpu_row(s, buf, y)], [c.sprite_idx for c in fresh], f'row {y}')
 
     def test_history_slot_reuse_reshapes_line_in_paused_frame(self):
         # A history slot is reused between the last live frame and the pause,
@@ -1302,6 +1325,35 @@ class TestBidi(BaseTest):
                 self.ae(self.maps(s), self.maps(f))
                 self.ae(self.levels(s), self.levels(f))
 
+            # A wide character over a cell whose class it keeps: the fed classes
+            # match at every cell a character starts in, only a cell that used
+            # to start one is now a continuation. (vi) אa!ב, 😀 over !a: the
+            # fed R ON R match R ON . R at cols 0, 1, 3; the old a at col 2 is
+            # now a continuation. 😀 lies between R and R (N1, 1). (vii) אבג!ד
+            # on 5 cols, 😀 over !ד: the old ד at col 4, past the last fed
+            # character, is now a continuation. 😀 lies between R and eos (N2, 0).
+            continuation_cases = (
+                ('vi interior continuation', 10, 'א!aב', 2, 'א😀ב', (1, 0, 0, 1) + (0,) * 6, (1, 1, 1, 1) + (0,) * 6),
+                ('vii trailing continuation', 5, 'אבג!ד', 4, 'אבג😀', (1, 1, 1, 1, 1), (1, 1, 1, 0, 0)),
+            )
+            for name, cols, text, col, final, levels0, levels1 in continuation_cases:
+                with self.subTest(name):
+                    s = self.screen(cols=cols, lines=1, scrollback=0)
+                    s.draw(text)
+                    self.frame(s)
+                    self.warm(s)
+                    self.ae(s.test_bidi_levels(0), levels0)
+                    s.cursor_position(1, col)
+                    s.draw('😀')
+                    self.ae(str(s.linebuf.line(0)), final)
+                    self.ae(self.frame(s), 1)
+                    self.ae(s.test_bidi_levels(0), levels1)
+                    f = self.screen(cols=cols, lines=1, scrollback=0)
+                    f.draw(final)
+                    self.frame(f)
+                    self.ae(self.maps(s), self.maps(f))
+                    self.ae(self.levels(s), self.levels(f))
+
     def test_cache_bypass_between_resolves(self):
         # Frame A resolves MIXED. Frame B draws a scale-2 multicell over rows
         # 0-1, cols 0-1: the bypass makes the paragraph inactive under valid
@@ -1367,7 +1419,7 @@ class TestBidi(BaseTest):
             'neutral then blanks': lambda s: s.draw('אבג!'),
             'brackets': lambda s: s.draw('אבג (x)'),
             'ES next to EN': lambda s: s.draw('אב 1+'),
-            'ET after EN': lambda s: s.draw('אב 12-'),
+            'ET after EN': lambda s: s.draw('אב 12%'),
             'ET': lambda s: s.draw('אב $'),
             'spaces after R': lambda s: s.draw('אבג   '),
             'blank last row': wrapped_blank,
