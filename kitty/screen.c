@@ -4305,7 +4305,7 @@ screen_bidi_resolve_row(Screen *self, LineBuf *paused, unsigned render_row, int 
         .text_cache = self->text_cache};
     // Undirtied rows are unchanged, and dirty on-screen rows that feed FriBidi the
     // same classes, brackets and cells as when their maps were written give it the
-    // same inputs, so the same maps (spec R1c). The dirty rows are reshaped anyway.
+    // same inputs, so the same maps. The dirty rows are reshaped anyway.
     if (needs && cacheable && dirty && !dirty_outside && bidi_paragraph_cached(b, first, last, y_to_render_row, render_row)) {
         bool same = true;
         for (int y = first; y <= last && same; y++) {

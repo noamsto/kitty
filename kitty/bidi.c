@@ -304,8 +304,7 @@ ensure_scratch(BidiMaps *b, size_t cap) {
 }
 
 // Appends to b->text the characters row r of a paragraph feeds FriBidi, one per
-// cell a character starts in, a blank as U+0020. Returns the new length. Shared
-// by the resolve and the signature check, so the two cannot diverge.
+// cell a character starts in, a blank as U+0020. Returns the new length.
 static uint32_t
 feed_row(BidiMaps *b, const CPUCell *cells, const TextCache *text_cache, uint32_t r, uint32_t n) {
     for (index_type col = 0; col < b->cols; col++) {
@@ -383,7 +382,6 @@ write_row(BidiMaps *b, index_type render_row, uint32_t row_first_char, uint32_t 
         const index_type col = b->cell_of_char[logical] & 0xffff;
         const index_type next = logical + 1 < row_end_char ? (b->cell_of_char[logical + 1] & 0xffff) : cols;
         const uint8_t level = (uint8_t)b->para_levels[logical];
-        if (next <= col) continue;
         levels[col] = level;
         if (next == col + 1) { candidate[v++] = (uint16_t)col; continue; }
         for (index_type c = col + 1; c < next; c++) levels[c] = level;
