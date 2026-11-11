@@ -834,7 +834,7 @@ dealloc(Screen *self) {
 // Draw text {{{
 typedef struct text_loop_state {
     bool image_placeholder_marked;
-    bool bidi_marked;
+    bool bidi_check;
     const CPUCell cc;
     const GPUCell g;
     CPUCell *cp;
@@ -923,7 +923,7 @@ init_text_loop_line(Screen *self, text_loop_state *s) {
     clear_intersecting_selections(self, self->cursor->y);
     linebuf_mark_line_dirty(self->linebuf, self->cursor->y);
     s->image_placeholder_marked = false;
-    s->bidi_marked = false;
+    s->bidi_check = OPT(bidi_reorder);
     init_segmentation_state(self, s);
 }
 
@@ -1491,9 +1491,9 @@ draw_text_loop(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_
             linebuf_set_line_has_image_placeholders(self->linebuf, self->cursor->y, true);
             s->image_placeholder_marked = true;
         }
-        if (UNLIKELY(OPT(bidi_reorder) && !s->bidi_marked && bidi_codepoint_may_reorder(ch))) {
+        if (UNLIKELY(ch >= 0x590 && s->bidi_check && bidi_codepoint_may_reorder(ch))) {
             linebuf_set_line_has_bidi(self->linebuf, self->cursor->y, true);
-            s->bidi_marked = true;
+            s->bidi_check = false;
         }
         CPUCell *fc = s->cp + self->cursor->x;
         if (char_width == 2) {

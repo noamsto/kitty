@@ -162,6 +162,26 @@ class TestBidi(BaseTest):
         # with the text gone the stale flag gives no map: all cells are level 0
         self.assertIsNone(self.refresh(s, 0))
 
+    def test_flag_range_boundaries(self):
+        # (S5) the classifier's ranges, each boundary on both sides. The set is
+        # the one bidi_codepoint_may_reorder has always had. A fresh screen per
+        # codepoint, so one stale flag cannot hide another.
+        # U+08FF, U+0900, U+FE00 and U+11000 are zero-width marks: draw_text_loop returns
+        # before the flag test for them, so they are replaced by the nearest
+        # drawable codepoint on the same side (U+08C9, U+0904, U+FE10, U+11005).
+        flagged = (0x590, 0x8c9, 0xfb1d, 0xfdff, 0xfe70, 0xfefc, 0x10800, 0x10fff, 0x1e800, 0x1efff)
+        unflagged = (0x58f, 0x904, 0xfb1c, 0xfe10, 0xfefd, 0x107ff, 0x11005, 0x1e7ff, 0x1f000)
+        for cp, want in [(cp, True) for cp in flagged] + [(cp, False) for cp in unflagged]:
+            with self.subTest(hex(cp)):
+                s = self.screen()
+                s.draw(chr(cp))
+                self.assertGreater(s.cursor.x, 0, 'codepoint did not draw')
+                self.assertIs(s.test_bidi_line_flag(0), want)
+        # option off: Hebrew sets no flag
+        s = self.screen(bidi_reorder=False)
+        s.draw('א')
+        self.assertFalse(s.test_bidi_line_flag(0))
+
     def test_history(self):
         # (h) 2 visible rows, 4 rows of one paragraph. Rows 0 and 1 are pushed to
         # the scrollback. Visible row 0 is five R letters, level 1: (4,3,2,1,0).
