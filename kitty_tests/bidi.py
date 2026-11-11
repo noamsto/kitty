@@ -624,6 +624,43 @@ class TestBidi(BaseTest):
             self.assertTrue(any(c.sprite_idx for c in fresh))
             self.ae([c.sprite_idx for c in gpu_row(s, buf, 3)], [c.sprite_idx for c in fresh])
 
+    def test_history_slot_reuse_reshapes_line_in_paused_frame(self):
+        # A history slot is reused between the last live frame and the pause,
+        # and paused frames compare levels with the last live frame's ids. P is
+        # pushed into the slot of O and X, its continuation, into the slot of H,
+        # which the last frame showed at levels (0, 0, 0, 1, 0). The pause must
+        # forget those ids, otherwise X is compared as if it were H.
+        with setup_for_testing():
+            s = self.screen(cols=5, lines=4, scrollback=0, pixel_scroll=False)
+            parse_bytes(s, b'o\r\n')
+            s.draw('(12ב')  # H
+            parse_bytes(s, b'\r\ni\r\nj\r\n')
+            s.draw('אבגדה')  # P
+            s.draw('(12ב')  # X, continuation of P
+            parse_bytes(s, b'\r\na\r\nb')
+            self.ae(s.historybuf.count, 4)
+            test_screen_update_cell_data(s)
+            self.ae(s.test_bidi_levels(1), (1, 2, 2, 1, 0))
+            s.scroll(10, True)
+            test_screen_update_cell_data(s)
+            self.ae(s.scrolled_by, 4)
+            self.ae(s.test_bidi_levels(1), (0, 0, 0, 1, 0))
+            s.cursor_position(1, 5)
+            s.draw('ו')  # split P from X
+            self.assertFalse(s.linebuf.is_continued(1))
+            s.cursor_position(4, 1)
+            parse_bytes(s, b'\n\n')  # P into the slot of O, X into the slot of H
+            f = self.screen(cols=5, lines=4, pixel_scroll=False)
+            f.draw('(12ב')
+            fresh = gpu_row(f, test_screen_update_cell_data(f), 0)
+            self.assertTrue(any(c.sprite_idx for c in fresh))
+            s.pause_rendering(True, 1000)
+            s.test_bidi_refresh()
+            self.ae(s.test_bidi_paused_dirty_lines(), [2, 3])
+            buf = test_screen_update_cell_data(s)
+            self.ae(s.test_bidi_levels(3), (0, 0, 0, 1, 0))
+            self.ae([c.sprite_idx for c in gpu_row(s, buf, 3)], [c.sprite_idx for c in fresh])
+
     def test_dirty_row_below_view_redraws_paragraph(self):
         # scrolled up, a dirty linebuf row of the paragraph below the view
         # re-resolves the paragraph and redraws the on-screen rows whose levels
