@@ -169,8 +169,8 @@ class TestBidi(BaseTest):
         # U+08FF, U+0900, U+FE00 and U+11000 are zero-width marks: draw_text_loop returns
         # before the flag test for them, so they are replaced by the nearest
         # drawable codepoint on the same side (U+08C9, U+0904, U+FE10, U+11005).
-        flagged = (0x590, 0x8c9, 0xfb1d, 0xfdff, 0xfe70, 0xfefc, 0x10800, 0x10fff, 0x1e800, 0x1efff)
-        unflagged = (0x58f, 0x904, 0xfb1c, 0xfe10, 0xfefd, 0x107ff, 0x11005, 0x1e7ff, 0x1f000)
+        flagged = (0x590, 0x8C9, 0xFB1D, 0xFDFF, 0xFE70, 0xFEFC, 0x10800, 0x10FFF, 0x1E800, 0x1EFFF)
+        unflagged = (0x58F, 0x904, 0xFB1C, 0xFE10, 0xFEFD, 0x107FF, 0x11005, 0x1E7FF, 0x1F000)
         for cp, want in [(cp, True) for cp in flagged] + [(cp, False) for cp in unflagged]:
             with self.subTest(hex(cp)):
                 s = self.screen()
