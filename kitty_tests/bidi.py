@@ -1437,22 +1437,27 @@ class TestBidi(BaseTest):
             'RLO cell': rlo_cell,
         }
         with setup_for_testing():
-            for name, build in cases.items():
-                with self.subTest(name):
-                    screens = []
-                    for trim in (True, False):
-                        s = self.screen()
-                        s.test_bidi_trim(trim)
-                        build(s)
-                        screens.append(s)
-                    counts = [self.frame(s) for s in screens]
-                    for s in screens:
-                        self.warm(s)
-                    for y in range(5):
-                        self.ae(screens[0].test_bidi_v2l(y), screens[1].test_bidi_v2l(y), f'v2l row {y}')
-                        self.ae(screens[0].test_bidi_levels(y), screens[1].test_bidi_levels(y), f'levels row {y}')
-                    if name == 'ES next to EN':
-                        self.ae(counts, [1, 1])
+            for auto in (False, True):
+                for name, build in cases.items():
+                    with self.subTest(name, auto=auto):
+                        screens = []
+                        for trim in (True, False):
+                            s = self.screen(bidi_auto_direction=auto)
+                            s.test_bidi_trim(trim)
+                            build(s)
+                            screens.append(s)
+                        counts = [self.frame(s) for s in screens]
+                        for s in screens:
+                            self.warm(s)
+                        # with auto on, only the LTR start gives an LTR paragraph
+                        rtl = auto and name != 'LTR start'
+                        for s in screens:
+                            self.assertIs(s.test_bidi_paragraph_rtl(0), rtl)
+                        for y in range(5):
+                            self.ae(screens[0].test_bidi_v2l(y), screens[1].test_bidi_v2l(y), f'v2l row {y}')
+                            self.ae(screens[0].test_bidi_levels(y), screens[1].test_bidi_levels(y), f'levels row {y}')
+                        if name == 'ES next to EN':
+                            self.ae(counts, [1, 1])
 
     # Right-to-left paragraphs (bidi_auto_direction). Creating a screen resets
     # the global options, so every screen sets the mode, and each is read before
