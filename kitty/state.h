@@ -129,6 +129,7 @@ typedef struct Options {
     DisableLigature disable_ligatures;
     bool force_ltr;
     bool bidi_reorder;
+    bool bidi_auto_direction;
     bool resize_in_steps;
     bool sync_to_monitor;
     bool close_on_child_death;

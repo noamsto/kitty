@@ -56,6 +56,15 @@ class TestBidi(BaseTest):
             self.ae(sorted(v2l), list(range(s.columns)), 'v2l must be a bijection over the columns')
         return v2l
 
+    def test_auto_direction_option_default(self):
+        from kitty.options.parse import parse_conf_item
+        from kitty.options.types import defaults
+
+        self.assertIs(defaults.bidi_auto_direction, False)
+        ans = {}
+        parse_conf_item('bidi_auto_direction', 'yes', ans)
+        self.assertIs(ans['bidi_auto_direction'], True)
+
     def test_basic_run(self):
         # (a) abcאבג: L L L R R R then blanks. Hebrew letters resolve to level 1,
         # everything else level 0. Reordering reverses only the level 1 run

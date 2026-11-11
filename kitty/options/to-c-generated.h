@@ -31,6 +31,19 @@ convert_from_opts_force_ltr(PyObject *py_opts, Options *opts) {
 }
 
 static void
+convert_from_python_bidi_auto_direction(PyObject *val, Options *opts) {
+    opts->bidi_auto_direction = PyObject_IsTrue(val);
+}
+
+static void
+convert_from_opts_bidi_auto_direction(PyObject *py_opts, Options *opts) {
+    PyObject *ret = PyObject_GetAttrString(py_opts, "bidi_auto_direction");
+    if (ret == NULL) return;
+    convert_from_python_bidi_auto_direction(ret, opts);
+    Py_DECREF(ret);
+}
+
+static void
 convert_from_python_bidi_reorder(PyObject *val, Options *opts) {
     opts->bidi_reorder = PyObject_IsTrue(val);
 }
@@ -1610,6 +1623,8 @@ convert_opts_from_python_opts(PyObject *py_opts, Options *opts) {
     convert_from_opts_force_ltr(py_opts, opts);
     if (PyErr_Occurred()) return false;
     convert_from_opts_bidi_reorder(py_opts, opts);
+    if (PyErr_Occurred()) return false;
+    convert_from_opts_bidi_auto_direction(py_opts, opts);
     if (PyErr_Occurred()) return false;
     convert_from_opts_disable_ligatures(py_opts, opts);
     if (PyErr_Occurred()) return false;

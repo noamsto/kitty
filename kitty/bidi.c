@@ -18,6 +18,7 @@ free_row_maps(BidiMaps *b) {
     free(b->stamp_first);
     free(b->stamp_last);
     free(b->stamp_valid);
+    free(b->rtl);
     free(b->sig_type);
     free(b->sig_bracket);
     free(b->sig_valid);
@@ -33,6 +34,7 @@ free_row_maps(BidiMaps *b) {
     b->stamp_first = NULL;
     b->stamp_last = NULL;
     b->stamp_valid = NULL;
+    b->rtl = NULL;
     b->sig_type = NULL;
     b->sig_bracket = NULL;
     b->sig_valid = NULL;
@@ -80,6 +82,7 @@ bidi_maps_ensure(BidiMaps *b, index_type rows, index_type cols) {
     b->stamp_first = calloc(rows, sizeof(b->stamp_first[0]));
     b->stamp_last = calloc(rows, sizeof(b->stamp_last[0]));
     b->stamp_valid = calloc(rows, sizeof(b->stamp_valid[0]));
+    b->rtl = calloc(rows, sizeof(b->rtl[0]));
     b->sig_type = malloc(cells * sizeof(b->sig_type[0]));
     b->sig_bracket = malloc(cells * sizeof(b->sig_bracket[0]));
     b->sig_valid = calloc(rows, sizeof(b->sig_valid[0]));
@@ -88,7 +91,7 @@ bidi_maps_ensure(BidiMaps *b, index_type rows, index_type cols) {
     b->prev_active = calloc(rows, sizeof(b->prev_active[0]));
     b->prev_levels = calloc(cells, sizeof(b->prev_levels[0]));
     if (!b->v2l || !b->l2v || !b->levels || !b->active || !b->row_scratch || !b->stamp_first || !b->stamp_last ||
-        !b->stamp_valid || !b->sig_type || !b->sig_bracket || !b->sig_valid || !b->line_id || !b->prev_line_id ||
+        !b->stamp_valid || !b->rtl || !b->sig_type || !b->sig_bracket || !b->sig_valid || !b->line_id || !b->prev_line_id ||
         !b->prev_active || !b->prev_levels) {
         free_row_maps(b);
         return false;
@@ -125,6 +128,7 @@ void
 bidi_set_row_inactive(BidiMaps *b, index_type render_row) {
     if (!b->v2l || render_row >= b->rows) return;
     b->stamp_valid[render_row] = false;
+    b->rtl[render_row] = false;
     b->sig_valid[render_row] = false;
     row_inactive(b, render_row);
 }
@@ -270,10 +274,11 @@ note_line_state(BidiMaps *b, BidiCellSource src, void *ctx, int y, index_type r)
 }
 
 static void
-settle_row(BidiMaps *b, BidiCellSource src, void *ctx, int y, index_type r, int first_y, int last_y, bool cacheable) {
+settle_row(BidiMaps *b, BidiCellSource src, void *ctx, int y, index_type r, int first_y, int last_y, bool cacheable, bool rtl) {
     b->stamp_first[r] = first_y;
     b->stamp_last[r] = last_y;
     b->stamp_valid[r] = cacheable;
+    b->rtl[r] = rtl;
     // Only bidi_resolve_paragraph sets a signature, after this
     b->sig_valid[r] = false;
     note_line_state(b, src, ctx, y, r);
@@ -363,7 +368,7 @@ bidi_paragraph_inactive(BidiMaps *b, BidiCellSource src, void *ctx, int first_y,
         const int render_row = y + y_to_render_row;
         if (render_row < (int)first_render_row || render_row >= (int)b->rows) continue;
         row_inactive(b, (index_type)render_row);
-        settle_row(b, src, ctx, y, (index_type)render_row, first_y, last_y, cacheable);
+        settle_row(b, src, ctx, y, (index_type)render_row, first_y, last_y, cacheable, false);
     }
 }
 
@@ -456,7 +461,7 @@ bidi_resolve_paragraph(BidiMaps *b, BidiCellSource src, void *ctx, int first_y, 
             write_row(b, (index_type)render_row, row_first, row_end);
             any_active = true;
         }
-        settle_row(b, src, ctx, first_y + r, (index_type)render_row, first_y, last_y, cacheable);
+        settle_row(b, src, ctx, first_y + r, (index_type)render_row, first_y, last_y, cacheable, false);
         if (cacheable) write_signature(b, (index_type)render_row, row_first, row_end);
     }
     return any_active;

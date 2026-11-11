@@ -7579,6 +7579,16 @@ test_bidi_trim(Screen *self, PyObject *flag) {
 }
 
 static PyObject *
+test_bidi_paragraph_rtl(Screen *self, PyObject *args) {
+    unsigned y;
+    if (!PyArg_ParseTuple(args, "I", &y)) return NULL;
+    const BidiMaps *b = &self->bidi;
+    const index_type render_row = y + pixel_scroll_enabled(self);
+    if (!b->v2l || render_row >= b->rows) Py_RETURN_NONE;
+    return PyBool_FromLong(b->rtl[render_row]);
+}
+
+static PyObject *
 test_bidi_line_flag(Screen *self, PyObject *args) {
     unsigned y;
     if (!PyArg_ParseTuple(args, "I", &y)) return NULL;
@@ -7812,6 +7822,7 @@ static PyMethodDef methods[] = {
     METHODB(test_bidi_paused_dirty_lines, METH_NOARGS),
     METHODB(test_bidi_resolve_count, METH_NOARGS),
     METHODB(test_bidi_trim, METH_O),
+    METHODB(test_bidi_paragraph_rtl, METH_VARARGS),
     METHODB(restore_scrollback, METH_O),
     METHODB(cursor_prompt_line, METH_NOARGS),
     MND(overlay_line_start, METH_NOARGS) MND(line_edge_colors, METH_NOARGS) MND(ime_text_around_cursor, METH_NOARGS) MND(line, METH_O)

@@ -113,6 +113,9 @@ class Parser:
     def bell_path(self, val: str, ans: dict[str, typing.Any]) -> None:
         ans['bell_path'] = config_or_absolute_path(val)
 
+    def bidi_auto_direction(self, val: str, ans: dict[str, typing.Any]) -> None:
+        ans['bidi_auto_direction'] = to_bool(val)
+
     def bidi_reorder(self, val: str, ans: dict[str, typing.Any]) -> None:
         ans['bidi_reorder'] = to_bool(val)
 
