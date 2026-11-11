@@ -50,6 +50,7 @@ bidi_maps_free(BidiMaps *b) {
     free(b->map);
     free(b->cell_of_char);
     free(b->row_start);
+    free(b->paused_line_id);
     zero_at_ptr(b);
 }
 
@@ -176,6 +177,20 @@ bidi_paragraph_cached(const BidiMaps *b, int first, int last, int y_to_render_ro
 void
 bidi_set_line_id(BidiMaps *b, index_type render_row, uint64_t id) {
     if (b->line_id && render_row < b->rows) b->line_id[render_row] = id;
+}
+
+uint64_t *
+bidi_paused_line_ids(BidiMaps *b, index_type rows) {
+    b->paused_rows = 0;
+    if (!rows) return NULL;
+    if (rows > b->paused_cap) {
+        free(b->paused_line_id);
+        b->paused_line_id = malloc(rows * sizeof(b->paused_line_id[0]));
+        b->paused_cap = b->paused_line_id ? rows : 0;
+        if (!b->paused_line_id) return NULL;
+    }
+    b->paused_rows = rows;
+    return b->paused_line_id;
 }
 
 // Marks line y dirty when its active bit or levels differ from those it had in

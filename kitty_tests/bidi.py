@@ -475,8 +475,6 @@ class TestBidi(BaseTest):
             s = self.screen(cols=5, lines=6)
             for line in text:
                 s.draw(line)
-            # the first frame allocates the maps, so lines have no state until the second
-            test_screen_update_cell_data(s)
             test_screen_update_cell_data(s)
             self.ae(s.test_bidi_levels(1), (2, 2, 1, 2, 0))
             self.ae(s.linebuf.dirty_lines(), [])
@@ -503,6 +501,25 @@ class TestBidi(BaseTest):
             s.draw('z')
             s.test_bidi_refresh()
             self.ae(s.linebuf.dirty_lines(), [3])
+
+    def test_paused_frame_redraws_only_rows_whose_levels_change(self):
+        # Rows 2 and 3 are one-row paragraphs with levels. Overwriting the last
+        # cell of אבגדה splits it from (12ב: row 1 gets other levels, rows 2 and
+        # 3 keep theirs. A paused frame compares with the last live frame, so
+        # only rows 0 (written) and 1 (levels) are redrawn.
+        with setup_for_testing():
+            s = self.screen(cols=5, lines=5, pixel_scroll=False)
+            s.draw('אבגדה')
+            s.draw('(12ב')
+            parse_bytes(s, '\r\nאב\r\nגד'.encode())
+            test_screen_update_cell_data(s)
+            for y in (1, 2, 3):
+                self.assertIsNotNone(s.test_bidi_levels(y))
+            s.cursor_position(1, 5)
+            s.draw('ו')
+            s.pause_rendering(True, 1000)
+            s.test_bidi_refresh()
+            self.ae(s.test_bidi_paused_dirty_lines(), [0, 1])
 
     def test_line_scrolled_into_view_reshaped_after_split(self):
         # linebuf rows y, אבגדה and (12ב, with x in history. In (12ב, searching

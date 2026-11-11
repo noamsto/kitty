@@ -3882,6 +3882,7 @@ copy_selections(Selections *dest, const Selections *src) {
 }
 
 static Line *render_line_for_virtual_y(Screen *self, int y, Line *line, index_type *lnum, bool *is_history);
+static uint64_t bidi_live_line_id(Screen *self, int y);
 
 bool
 screen_pause_rendering(Screen *self, bool pause, int for_in_ms) {
@@ -3926,10 +3927,13 @@ screen_pause_rendering(Screen *self, bool pause, int for_in_ms) {
         }
     }
     Line line = {.text_cache = self->text_cache};
+    uint64_t *bidi_ids = bidi_paused_line_ids(&self->bidi, bidi_enabled() ? num_rows : 0);
     for (index_type y = 0; y < num_rows; y++) {
         index_type lnum;
         bool is_history;
         Line *src = render_line_for_virtual_y(self, (int)y - (int)row_offset, &line, &lnum, &is_history);
+        // For the level compare of paused frames, which read the snapshot
+        if (bidi_ids) bidi_ids[y] = src ? bidi_live_line_id(self, (int)y - (int)row_offset - (int)self->scrolled_by) : 0;
         if (src) {
             linebuf_init_line(self->paused_rendering.linebuf, y);
             copy_line(src, self->paused_rendering.linebuf->line);
@@ -4205,12 +4209,19 @@ bidi_source_mark_dirty_cb(void *ctx, int y) {
 }
 
 static uint64_t
-bidi_source_line_id(void *ctx, int y) {
-    const BidiParaSource *s = ctx;
-    if (s->paused) return 0;
-    Screen *self = s->self;
+bidi_live_line_id(Screen *self, int y) {
     if (y < 0) return (3ull << 32) | historybuf_ring_index(self->historybuf, (index_type)(-(y + 1)));
     return ((self->linebuf == self->main_linebuf ? 1ull : 2ull) << 32) | self->linebuf->line_map[y];
+}
+
+static uint64_t
+bidi_source_line_id(void *ctx, int y) {
+    const BidiParaSource *s = ctx;
+    if (s->paused) {
+        const BidiMaps *b = &s->self->bidi;
+        return y >= 0 && (index_type)y < b->paused_rows ? b->paused_line_id[y] : 0;
+    }
+    return bidi_live_line_id(s->self, y);
 }
 
 static bool
@@ -4305,12 +4316,10 @@ screen_bidi_resolve_row(Screen *self, LineBuf *paused, unsigned render_row, int 
 // ascending order, so that the first on-screen row of a paragraph resolves it.
 static const uint8_t *
 screen_bidi_prepare_row(Screen *self, LineBuf *paused, unsigned render_row, int range_y, Line *linep) {
-    // Paused frames keep the line identities of the last live frame
-    if (!paused) {
-        BidiParaSource id_src = {.self = self};
-        bidi_set_line_id(&self->bidi, render_row, bidi_source_line_id(&id_src, range_y));
-    }
     const uint8_t *levels = screen_bidi_resolve_row(self, paused, render_row, range_y, linep);
+    // Paused frames keep the line identities of the last live frame. Written
+    // after the resolve, which allocates the maps on the first frame
+    if (!paused) bidi_set_line_id(&self->bidi, render_row, bidi_live_line_id(self, range_y));
     // Cells shaped with levels keep their RTL glyphs until shaped again, and a
     // row can stop being reordered without being written to, e.g. when its
     // paragraph is split above it
@@ -4392,8 +4401,8 @@ void
 screen_update_cell_data(Screen *self, void *address, FONTS_DATA_HANDLE fonts_data, bool cursor_has_moved) {
     const bool bidi = bidi_enabled();
     if (self->paused_rendering.expires_at) {
-        // The snapshot has no line identities: no paused frame is cached, nor
-        // the next live one, which compares levels with the last live frame
+        // No paused frame is cached, nor the next live one; paused frames
+        // compare levels with the last live frame through the snapshot's line ids
         screen_bidi_start_paused_frame(self);
         if (!self->paused_rendering.cell_data_updated) {
             LineBuf *linebuf = self->paused_rendering.linebuf;
@@ -7549,6 +7558,22 @@ test_bidi_line_flag(Screen *self, PyObject *args) {
 }
 
 static PyObject *
+test_bidi_paused_dirty_lines(Screen *self, PyObject *a UNUSED) {
+    RAII_PyObject(ans, PyList_New(0));
+    if (!ans) return NULL;
+    LineBuf *lb = self->paused_rendering.expires_at ? self->paused_rendering.linebuf : NULL;
+    if (lb) {
+        for (index_type y = 0; y < lb->ynum; y++) {
+            if (!lb->line_attrs[y].has_dirty_text) continue;
+            RAII_PyObject(n, PyLong_FromUnsignedLong(y));
+            if (!n || PyList_Append(ans, n) != 0) return NULL;
+        }
+    }
+    Py_INCREF(ans);
+    return ans;
+}
+
+static PyObject *
 overlay_line_start(Screen *self, PyObject *a UNUSED) {
     return PyLong_FromUnsignedLong(screen_overlay_line_start(self));
 }
@@ -7752,6 +7777,7 @@ static PyMethodDef methods[] = {
     METHODB(test_bidi_logical_x, METH_VARARGS),
     METHODB(test_bidi_is_rtl, METH_VARARGS),
     METHODB(test_bidi_line_flag, METH_VARARGS),
+    METHODB(test_bidi_paused_dirty_lines, METH_NOARGS),
     METHODB(test_bidi_resolve_count, METH_NOARGS),
     METHODB(restore_scrollback, METH_O),
     METHODB(cursor_prompt_line, METH_NOARGS),

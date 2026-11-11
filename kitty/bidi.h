@@ -60,6 +60,8 @@ typedef struct BidiMaps {
     bool snapshot_taken, moved;
     bool hold; // paused frames since the last live one: the snapshot and line_id are that frame's
     index_type id_hint;
+    uint64_t *paused_line_id; // line ids of the paused snapshot rows, not freed with the row maps
+    index_type paused_rows, paused_cap;
     BidiFrameKey key;
     unsigned long long resolve_count;
     FriBidiChar *text;
@@ -78,15 +80,19 @@ void bidi_set_all_rows_inactive(BidiMaps *b);
 // Starts a frame: the stamps of the last frame stay valid only if the key is
 // unchanged and the view did not scroll.
 void bidi_frame_begin(BidiMaps *b, BidiFrameKey now, bool scroll_changed);
-// Starts a paused frame, which reads a snapshot without line identities: no
-// stamp is trusted, and the line state of the last live frame is kept for the
-// level compare of the next live one.
+// Starts a paused frame, which reads a snapshot: no stamp is trusted (the
+// snapshot rows are not range rows), and the line state of the last live frame
+// is kept for the level compare of paused frames and of the next live one.
 void bidi_frame_begin_paused(BidiMaps *b);
 void bidi_cache_invalidate(BidiMaps *b);
 // True when every on-screen row of the paragraph on [first, last], from
 // first_render_row down, still holds the maps of that same paragraph.
 bool bidi_paragraph_cached(const BidiMaps *b, int first, int last, int y_to_render_row, index_type first_render_row);
 void bidi_set_line_id(BidiMaps *b, index_type render_row, uint64_t id);
+// Returns room for the line ids of a new paused snapshot of rows rows, or
+// NULL for none (rows == 0 or no memory). The ids of an earlier snapshot are
+// dropped either way; the caller fills every row.
+uint64_t *bidi_paused_line_ids(BidiMaps *b, index_type rows);
 // Resolves the paragraph on rows [first_y, last_y] and writes the maps of those
 // of its rows whose render row, y + y_to_render_row, is on screen and not below
 // first_render_row (rows already uploaded this frame keep their maps). Returns
