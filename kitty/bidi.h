@@ -59,6 +59,11 @@ typedef struct BidiMaps {
     } para; // current-frame paragraph cache, range-y addressed
     int *stamp_first, *stamp_last; // range-y bounds of the paragraph that last wrote the row
     bool *stamp_valid;
+    // The FriBidi class and bracket type of the character starting in each cell
+    // (class 0: none starts there), as fed to the cacheable resolve that wrote
+    // the row's current map; sig_valid is cleared by every other map or stamp write
+    uint32_t *sig_type, *sig_bracket; // rows*cols, row-major by render row
+    bool *sig_valid;                  // rows
     uint64_t *line_id, *prev_line_id; // this frame / last frame, swapped at frame start
     bool *prev_active;                 // snapshot, rows
     uint8_t *prev_levels;              // snapshot, rows*cols
@@ -117,6 +122,10 @@ uint64_t *bidi_paused_line_ids(BidiMaps *b, index_type rows);
 // true when at least one of those rows got a map.
 bool bidi_resolve_paragraph(BidiMaps *b, BidiCellSource src, void *ctx, int first_y, int last_y, int y_to_render_row,
     index_type first_render_row, bool cacheable);
+// True when line y, at render_row, still feeds FriBidi the classes and bracket
+// types, in the same cells, as when its current map was written by a cacheable
+// resolve. Resolves nothing.
+bool bidi_row_signature_matches(BidiMaps *b, BidiCellSource src, void *ctx, int y, index_type render_row);
 // Sets the same rows as bidi_resolve_paragraph inactive, for a paragraph with
 // nothing to reorder.
 void bidi_paragraph_inactive(BidiMaps *b, BidiCellSource src, void *ctx, int first_y, int last_y, int y_to_render_row,

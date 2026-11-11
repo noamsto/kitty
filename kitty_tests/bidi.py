@@ -1142,6 +1142,151 @@ class TestBidi(BaseTest):
             self.assertGreater(self.frame(s), 0)
             self.ae(s.test_bidi_v2l(0), want)
 
+    # Cache shortcut: a paragraph whose dirty rows still feed FriBidi the same
+    # class, bracket and cell layout keeps its maps without resolving; any other
+    # edit resolves. One paragraph over rows 0-2 of a 10x4 screen at paragraph
+    # level 0: 'alpha שלום' / ' beta עולם' / ' (12) gamm'. A space between L and
+    # R takes level 0 (N2). The brackets enclose EN (R for N0) and the strong
+    # type before them is R (עולם), so N0 makes them R; the space before ( then
+    # lies between R and R (N1, level 1). W2/W7 keep 12 as EN (last strong is R),
+    # level 2 by I1. L2 reverses each run at level 1 or more, highest first.
+    MIXED = 'alpha שלום beta עולם (12) gamma'[:30]
+    MIXED_LEVELS = ((0,) * 6 + (1,) * 4,) * 2 + ((1, 1, 2, 2, 1, 0, 0, 0, 0, 0), None)
+    MIXED_V2L = ((0, 1, 2, 3, 4, 5, 9, 8, 7, 6),) * 2 + ((4, 2, 3, 1, 0, 5, 6, 7, 8, 9), None)
+
+    def levels(self, s):
+        return tuple(s.test_bidi_levels(y) for y in range(s.lines))
+
+    def test_cache_same_class_edit_skips_resolve(self):
+        # x over the a at row 0 col 0: L for L, no bracket, same cell. Every
+        # FriBidi input is unchanged, so the maps stay MIXED's and only the
+        # written row is reshaped.
+        with setup_for_testing():
+            s = self.screen(lines=4, scrollback=0)
+            s.draw(self.MIXED)
+            self.ae(self.frame(s), 1)
+            self.ae(self.frame(s), 0)
+            self.ae(self.maps(s), self.MIXED_V2L)
+            self.ae(self.levels(s), self.MIXED_LEVELS)
+            self.ae(s.linebuf.dirty_lines(), [])
+            count = s.test_bidi_resolve_count()
+            s.cursor_position(1, 1)
+            s.draw('x')
+            s.test_bidi_refresh()
+            self.ae(s.test_bidi_resolve_count() - count, 0)
+            self.ae(s.linebuf.dirty_lines(), [0])
+            buf = test_screen_update_cell_data(s)
+            self.ae(s.test_bidi_resolve_count() - count, 0)
+            self.ae(self.maps(s), self.MIXED_V2L)
+            self.ae(self.levels(s), self.MIXED_LEVELS)
+            f = self.screen(lines=4, scrollback=0)
+            f.draw('x' + self.MIXED[1:])
+            fbuf = test_screen_update_cell_data(f)
+            self.ae(self.maps(s), self.maps(f))
+            self.ae(self.levels(s), self.levels(f))
+            for y in range(3):
+                fresh = gpu_row(f, fbuf, y)
+                self.assertTrue(any(c.sprite_idx for c in fresh))
+                self.ae([c.sprite_idx for c in gpu_row(s, buf, y)], [c.sprite_idx for c in fresh], f'row {y}')
+
+    def test_cache_level_changing_edits_resolve(self):
+        # An edit that changes a class, a bracket or the layout must resolve
+        # again and give a fresh screen's maps. Row 0, paragraph level 0.
+        cases = (
+            # (i) א(ב)c: ( and ) pair and enclose R with R before them, N0 makes
+            # both R: levels 1 1 1 1 0. [ for ( keeps class ON but ends the pair:
+            # [ lies between R and R (N1, 1), ) between R and L (N2, 0).
+            ('i bracket', 10, 'א(ב)c', 2, '[', (1, 1, 1, 1, 0) + (0,) * 5, (3, 2, 1, 0) + ID10[4:], (1, 1, 1, 0, 0) + (0,) * 5, (2, 1, 0) + ID10[3:]),
+            # (ii) אa!ב: ! between L and R (N2, 0), each R alone, so v2l is the
+            # identity. ג for a: ! between R and R (N1, 1), cols 0-3 reverse.
+            ('ii class', 10, 'אa!ב', 2, 'ג', (1, 0, 0, 1) + (0,) * 6, ID10, (1, 1, 1, 1) + (0,) * 6, (3, 2, 1, 0) + ID10[4:]),
+            # (iii) 中בגd (cells 0-1, 2, 3, 4) to aבג中 (0, 1, 2, 3-4): the fed
+            # classes are L R R L both times, only the cells they start in move.
+            # The R pair reverses in place: v2l 0 1 3 2 4, then 0 2 1 3 4.
+            ('iii layout', 5, '中בגd', 1, 'aבג中', (0, 0, 1, 1, 0), (0, 1, 3, 2, 4), (0, 1, 1, 0, 0), (0, 2, 1, 3, 4)),
+        )
+        with setup_for_testing():
+            for name, cols, text, col, new, levels0, v2l0, levels1, v2l1 in cases:
+                with self.subTest(name):
+                    s = self.screen(cols=cols)
+                    s.draw(text)
+                    self.frame(s)
+                    self.warm(s)
+                    self.ae((s.test_bidi_levels(0), s.test_bidi_v2l(0)), (levels0, v2l0))
+                    s.cursor_position(1, col)
+                    s.draw(new)
+                    self.ae(self.frame(s), 1)
+                    self.ae((s.test_bidi_levels(0), s.test_bidi_v2l(0)), (levels1, v2l1))
+                    f = self.screen(cols=cols)
+                    f.draw(text[: col - 1] + new + text[col - 1 + len(new) :])
+                    self.frame(f)
+                    self.ae(self.maps(s), self.maps(f))
+                    self.ae(self.levels(s), self.levels(f))
+            with self.subTest('iv dirty row below the view'):
+                # As in test_dirty_row_below_view_redraws_paragraph: one paragraph
+                # over a history row and linebuf rows 0-2, scrolled up by one, so
+                # linebuf row 2 is below the view. z for b there keeps class L and
+                # no bracket, but a row that is not on screen never skips the
+                # resolve. Screen row 2 (12 3!) stays (2, 2, 1, 2, 0): ! lies
+                # between 3 (EN, R for N1) and a (L), N2.
+                def build():
+                    s = self.screen(cols=5, lines=3, scrollback=10)
+                    for line in ('אבגדה', 'אבגדה', '12 3!', 'abcde'):
+                        s.draw(line)
+                    self.ae(s.historybuf.count, 1)
+                    return s
+
+                s = build()
+                self.frame(s)
+                s.scroll(1, True)
+                self.frame(s)
+                self.warm(s)
+                self.ae(s.scrolled_by, 1)
+                s.cursor_position(3, 2)
+                s.draw('z')
+                self.ae(s.scrolled_by, 1)
+                self.ae(s.linebuf.dirty_lines(), [2])
+                self.ae(self.frame(s), 1)
+                self.ae(s.test_bidi_levels(2), (2, 2, 1, 2, 0))
+                s.scroll(1, False)
+                self.frame(s)
+                f = self.screen(cols=5, lines=3, scrollback=10)
+                for line in ('אבגדה', 'אבגדה', '12 3!', 'azcde'):
+                    f.draw(line)
+                self.frame(f)
+                self.ae(self.maps(s), self.maps(f))
+                self.ae(self.levels(s), self.levels(f))
+
+    def test_cache_bypass_between_resolves(self):
+        # Frame A resolves MIXED. Frame B draws a scale-2 multicell over rows
+        # 0-1, cols 0-1: the bypass makes the paragraph inactive under valid
+        # stamps. Frame C restores the four cells; the rows feed FriBidi what
+        # they fed in frame A, but the maps are frame B's inactive ones, so C
+        # must resolve and give MIXED's maps. The paragraph keeps its bounds in
+        # every frame, so only the signatures can tell B's maps from A's.
+        with setup_for_testing():
+            s = self.screen(lines=4, scrollback=0)
+            s.draw(self.MIXED)
+            cont = [s.linebuf.is_continued(y) for y in range(4)]
+            self.ae(cont, [False, True, True, False])
+            self.ae(self.frame(s), 1)
+            self.warm(s)
+            self.ae(self.maps(s), self.MIXED_V2L)
+            s.cursor_position(1, 1)
+            draw_multicell(s, 'x', scale=2)
+            self.ae([s.linebuf.is_continued(y) for y in range(4)], cont)
+            self.frame(s)
+            self.ae(self.maps(s), (None,) * 4)
+            s.cursor_position(1, 1)
+            s.draw(self.MIXED[:2])
+            s.cursor_position(2, 1)
+            s.draw(self.MIXED[10:12])
+            self.ae([s.linebuf.is_continued(y) for y in range(4)], cont)
+            self.ae(str(s.linebuf.line(0)) + str(s.linebuf.line(1)), self.MIXED[:20])
+            self.ae(self.frame(s), 1)
+            self.ae(self.maps(s), self.MIXED_V2L)
+            self.ae(self.levels(s), self.MIXED_LEVELS)
+
     def test_pointed_hebrew_shaping(self):
         # (n) shin + qamats + shin dot, lamed, vav + holam, final mem: 4 cells
         # (marks join their base cell). Shaped RTL with the test font, every

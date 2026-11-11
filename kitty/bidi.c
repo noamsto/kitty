@@ -18,6 +18,9 @@ free_row_maps(BidiMaps *b) {
     free(b->stamp_first);
     free(b->stamp_last);
     free(b->stamp_valid);
+    free(b->sig_type);
+    free(b->sig_bracket);
+    free(b->sig_valid);
     free(b->line_id);
     free(b->prev_line_id);
     free(b->prev_active);
@@ -30,6 +33,9 @@ free_row_maps(BidiMaps *b) {
     b->stamp_first = NULL;
     b->stamp_last = NULL;
     b->stamp_valid = NULL;
+    b->sig_type = NULL;
+    b->sig_bracket = NULL;
+    b->sig_valid = NULL;
     b->line_id = NULL;
     b->prev_line_id = NULL;
     b->prev_active = NULL;
@@ -74,12 +80,16 @@ bidi_maps_ensure(BidiMaps *b, index_type rows, index_type cols) {
     b->stamp_first = calloc(rows, sizeof(b->stamp_first[0]));
     b->stamp_last = calloc(rows, sizeof(b->stamp_last[0]));
     b->stamp_valid = calloc(rows, sizeof(b->stamp_valid[0]));
+    b->sig_type = malloc(cells * sizeof(b->sig_type[0]));
+    b->sig_bracket = malloc(cells * sizeof(b->sig_bracket[0]));
+    b->sig_valid = calloc(rows, sizeof(b->sig_valid[0]));
     b->line_id = calloc(rows, sizeof(b->line_id[0]));
     b->prev_line_id = calloc(rows, sizeof(b->prev_line_id[0]));
     b->prev_active = calloc(rows, sizeof(b->prev_active[0]));
     b->prev_levels = calloc(cells, sizeof(b->prev_levels[0]));
     if (!b->v2l || !b->l2v || !b->levels || !b->active || !b->row_scratch || !b->stamp_first || !b->stamp_last ||
-        !b->stamp_valid || !b->line_id || !b->prev_line_id || !b->prev_active || !b->prev_levels) {
+        !b->stamp_valid || !b->sig_type || !b->sig_bracket || !b->sig_valid || !b->line_id || !b->prev_line_id ||
+        !b->prev_active || !b->prev_levels) {
         free_row_maps(b);
         return false;
     }
@@ -115,6 +125,7 @@ void
 bidi_set_row_inactive(BidiMaps *b, index_type render_row) {
     if (!b->v2l || render_row >= b->rows) return;
     b->stamp_valid[render_row] = false;
+    b->sig_valid[render_row] = false;
     row_inactive(b, render_row);
 }
 
@@ -164,7 +175,10 @@ bidi_frame_begin(BidiMaps *b, BidiFrameKey now, bool scroll_changed) {
     if (!b->v2l) return;
     bidi_forget_reused_history_ids(b, now.historybuf, now.historybuf_generation, now.historybuf_push_generation,
         now.historybuf_count, now.historybuf_start, now.historybuf_ynum);
-    if (b->moved) memset(b->stamp_valid, 0, b->rows * sizeof(b->stamp_valid[0]));
+    if (b->moved) {
+        memset(b->stamp_valid, 0, b->rows * sizeof(b->stamp_valid[0]));
+        memset(b->sig_valid, 0, b->rows * sizeof(b->sig_valid[0]));
+    }
     uint64_t *ids = b->prev_line_id;
     b->prev_line_id = b->line_id;
     b->line_id = ids;
@@ -190,6 +204,7 @@ void
 bidi_cache_invalidate(BidiMaps *b) {
     b->key.valid = false;
     if (b->stamp_valid) memset(b->stamp_valid, 0, b->rows * sizeof(b->stamp_valid[0]));
+    if (b->sig_valid) memset(b->sig_valid, 0, b->rows * sizeof(b->sig_valid[0]));
 }
 
 bool
@@ -259,6 +274,8 @@ settle_row(BidiMaps *b, BidiCellSource src, void *ctx, int y, index_type r, int 
     b->stamp_first[r] = first_y;
     b->stamp_last[r] = last_y;
     b->stamp_valid[r] = cacheable;
+    // Only bidi_resolve_paragraph sets a signature, after this
+    b->sig_valid[r] = false;
     note_line_state(b, src, ctx, y, r);
 }
 
@@ -283,6 +300,59 @@ ensure_scratch(BidiMaps *b, size_t cap) {
     grow(cell_of_char);
 #undef grow
     b->cap = cap;
+    return true;
+}
+
+// Appends to b->text the characters row r of a paragraph feeds FriBidi, one per
+// cell a character starts in, a blank as U+0020. Returns the new length. Shared
+// by the resolve and the signature check, so the two cannot diverge.
+static uint32_t
+feed_row(BidiMaps *b, const CPUCell *cells, const TextCache *text_cache, uint32_t r, uint32_t n) {
+    for (index_type col = 0; col < b->cols; col++) {
+        const CPUCell *c = cells + col;
+        if (col && c->is_multicell && c->x) continue;
+        const char_type ch = cell_first_char(c, text_cache);
+        b->text[n] = ch ? ch : ' ';
+        b->cell_of_char[n] = (r << 16) | col;
+        n++;
+    }
+    return n;
+}
+
+// Stores the classes and bracket types of characters [row_first, row_end) at the
+// cells they start in, after the row's settle_row
+static void
+write_signature(BidiMaps *b, index_type render_row, uint32_t row_first, uint32_t row_end) {
+    uint32_t *types = row_of(sig_type), *brackets = row_of(sig_bracket);
+    memset(types, 0, b->cols * sizeof(types[0]));
+    memset(brackets, 0, b->cols * sizeof(brackets[0]));
+    for (uint32_t i = row_first; i < row_end; i++) {
+        const index_type col = b->cell_of_char[i] & 0xffff;
+        types[col] = b->types[i];
+        brackets[col] = b->brackets[i];
+    }
+    b->sig_valid[render_row] = true;
+}
+
+bool
+bidi_row_signature_matches(BidiMaps *b, BidiCellSource src, void *ctx, int y, index_type render_row) {
+    if (!b->v2l || render_row >= b->rows || !b->sig_valid[render_row] || !ensure_scratch(b, b->cols)) return false;
+    const uint32_t n = feed_row(b, src.cells_at(ctx, y), src.text_cache, 0, 0);
+    fribidi_get_bidi_types(b->text, (FriBidiStrIndex)n, b->types);
+    fribidi_get_bracket_types(b->text, (FriBidiStrIndex)n, b->types, b->brackets);
+    const uint32_t *types = row_of(sig_type), *brackets = row_of(sig_bracket);
+    index_type col = 0;
+    for (uint32_t i = 0; i < n; i++, col++) {
+        // No class is 0, so a character starting in a cell that used to be a
+        // continuation, or the reverse, never matches
+        for (const index_type start = b->cell_of_char[i] & 0xffff; col < start; col++) {
+            if (types[col]) return false;
+        }
+        if (types[col] != b->types[i] || brackets[col] != b->brackets[i]) return false;
+    }
+    for (; col < b->cols; col++) {
+        if (types[col]) return false;
+    }
     return true;
 }
 
@@ -345,15 +415,7 @@ bidi_resolve_paragraph(BidiMaps *b, BidiCellSource src, void *ctx, int first_y, 
     uint32_t n = 0;
     for (int r = 0; r < num_rows; r++) {
         b->row_start[r] = n;
-        const CPUCell *cells = src.cells_at(ctx, first_y + r);
-        for (index_type col = 0; col < cols; col++) {
-            const CPUCell *c = cells + col;
-            if (col && c->is_multicell && c->x) continue;
-            const char_type ch = cell_first_char(c, src.text_cache);
-            b->text[n] = ch ? ch : ' ';
-            b->cell_of_char[n] = ((uint32_t)r << 16) | col;
-            n++;
-        }
+        n = feed_row(b, src.cells_at(ctx, first_y + r), src.text_cache, (uint32_t)r, n);
     }
     b->row_start[num_rows] = n;
 
@@ -391,11 +453,20 @@ bidi_resolve_paragraph(BidiMaps *b, BidiCellSource src, void *ctx, int first_y, 
             any_active = true;
         }
         settle_row(b, src, ctx, first_y + r, (index_type)render_row, first_y, last_y, cacheable);
+        if (cacheable) write_signature(b, (index_type)render_row, row_first, row_end);
     }
     return any_active;
 
 no_bidi:
     bidi_paragraph_inactive(b, src, ctx, first_y, last_y, y_to_render_row, first_render_row, cacheable);
+    // FriBidi ran and found nothing to reorder: these inputs give inactive rows
+    if (cacheable && max_level > 0) {
+        for (int r = 0; r < num_rows; r++) {
+            const int render_row = first_y + r + y_to_render_row;
+            if (render_row < (int)first_render_row || render_row >= (int)b->rows) continue;
+            write_signature(b, (index_type)render_row, b->row_start[r], b->row_start[r + 1]);
+        }
+    }
     return false;
 }
 

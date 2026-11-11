@@ -4278,13 +4278,15 @@ screen_bidi_resolve_row(Screen *self, LineBuf *paused, unsigned render_row, int 
     // Off-screen history rows are not counted: they stay dirty until first rendered
     const int render_lines = (int)render_lines_for_screen(self);
     const int y_to_render_row = (int)render_row - range_y;
-    bool dirty = false;
+    bool dirty = false, dirty_outside = false;
     Line l = {0};
-    for (int y = first; y <= last && !dirty; y++) {
+    for (int y = first; y <= last && !dirty_outside; y++) {
         const int r = y + y_to_render_row;
         if (y < 0 && (r < 0 || r >= render_lines)) continue;
         bidi_source_line(&src, y, &l);
-        dirty = l.attrs.has_dirty_text;
+        if (!l.attrs.has_dirty_text) continue;
+        dirty = true;
+        dirty_outside = r < (int)render_row || r >= render_lines;
     }
     // Same text in the same place: last frame's maps of every row still hold
     if (cacheable && !dirty && bidi_paragraph_cached(b, first, last, y_to_render_row, render_row)) {
@@ -4301,6 +4303,22 @@ screen_bidi_resolve_row(Screen *self, LineBuf *paused, unsigned render_row, int 
         .line_id_at = bidi_source_line_id,
         .mark_dirty = bidi_source_mark_dirty_cb,
         .text_cache = self->text_cache};
+    // Undirtied rows are unchanged, and dirty on-screen rows that feed FriBidi the
+    // same classes, brackets and cells as when their maps were written give it the
+    // same inputs, so the same maps (spec R1c). The dirty rows are reshaped anyway.
+    if (needs && cacheable && dirty && !dirty_outside && bidi_paragraph_cached(b, first, last, y_to_render_row, render_row)) {
+        bool same = true;
+        for (int y = first; y <= last && same; y++) {
+            const int r = y + y_to_render_row;
+            if (y < 0 && (r < 0 || r >= render_lines)) continue;
+            bidi_source_line(&src, y, &l);
+            if (l.attrs.has_dirty_text) same = bidi_row_signature_matches(b, cell_source, &src, y, (index_type)r);
+        }
+        if (same) {
+            b->para.has_bidi = true;
+            return b->active[render_row] ? b->levels + (size_t)render_row * b->cols : NULL;
+        }
+    }
     if (!needs || !bidi_maps_ensure(b, (index_type)render_lines, self->columns)) {
         bidi_paragraph_inactive(b, cell_source, &src, first, last, y_to_render_row, render_row, cacheable);
         b->para.has_bidi = false;
