@@ -7684,6 +7684,20 @@ test_bidi_base(Screen *self, PyObject *a UNUSED) {
 }
 
 static PyObject *
+test_bidi_flag_misses(Screen *self UNUSED, PyObject *a UNUSED) {
+    uint32_t buf[64];
+    RAII_PyObject(ans, PyList_New(0));
+    if (!ans) return NULL;
+    const size_t n = bidi_flag_misses(buf, arraysz(buf));
+    for (size_t i = 0; i < MIN(n, arraysz(buf)); i++) {
+        RAII_PyObject(v, PyLong_FromUnsignedLong(buf[i]));
+        if (!v || PyList_Append(ans, v) != 0) return NULL;
+    }
+    Py_INCREF(ans);
+    return ans;
+}
+
+static PyObject *
 test_cursor_visual(Screen *self, PyObject *args) {
     unsigned x, y, shape;
     if (!PyArg_ParseTuple(args, "III", &x, &y, &shape)) return NULL;
@@ -7947,6 +7961,7 @@ static PyMethodDef methods[] = {
     METHODB(test_bidi_line_flag, METH_VARARGS),
     METHODB(test_bidi_paused_dirty_lines, METH_NOARGS),
     METHODB(test_bidi_base, METH_NOARGS),
+    METHODB(test_bidi_flag_misses, METH_NOARGS),
     METHODB(test_cursor_visual, METH_VARARGS),
     METHODB(test_cursor_render_x, METH_VARARGS),
     METHODB(test_ime_anchor_x, METH_NOARGS),

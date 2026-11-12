@@ -521,3 +521,16 @@ bidi_permute_row_bytes(BidiMaps *b, index_type render_row, uint8_t *row) {
     const uint16_t *v2l = row_of(v2l);
     for (index_type v = 0; v < b->cols; v++) row[v] = b->row_scratch[v2l[v]];
 }
+
+size_t
+bidi_flag_misses(uint32_t *out, size_t cap) {
+    size_t n = 0;
+    for (char_type c = 0; c <= 0x10FFFF; c++) {
+        const FriBidiCharType t = fribidi_get_bidi_type(c);
+        if ((t == FRIBIDI_TYPE_RTL || t == FRIBIDI_TYPE_AL) && !bidi_codepoint_may_reorder(c)) {
+            if (n < cap) out[n] = c;
+            n++;
+        }
+    }
+    return n;
+}

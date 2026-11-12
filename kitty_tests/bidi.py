@@ -179,8 +179,9 @@ class TestBidi(BaseTest):
         # before the flag test for them, so they are replaced by the nearest
         # drawable codepoint on the same side (U+08C9, U+0904, U+FE10, U+11003).
         # U+FE6F, the codepoint below the flagged U+FE70, is unassigned and draws.
-        flagged = (0x590, 0x8C9, 0xFB1D, 0xFDFF, 0xFE70, 0xFEFC, 0x10800, 0x10FFF, 0x1E800, 0x1EFFF)
-        unflagged = (0x58F, 0x904, 0xFB1C, 0xFE10, 0xFE6F, 0xFEFD, 0x107FF, 0x11003, 0x1E7FF, 0x1F000)
+        # U+FEFF is zero-width, so the unflagged side above U+FEFE is U+FF01.
+        flagged = (0x590, 0x8C9, 0xFB1D, 0xFDFF, 0xFE70, 0xFEFE, 0x10800, 0x10FFF, 0x1E800, 0x1EFFF)
+        unflagged = (0x58F, 0x904, 0xFB1C, 0xFE10, 0xFE6F, 0xFF01, 0x107FF, 0x11003, 0x1E7FF, 0x1F000)
         for cp, want in [(cp, True) for cp in flagged] + [(cp, False) for cp in unflagged]:
             with self.subTest(hex(cp)):
                 s = self.screen()
@@ -191,6 +192,22 @@ class TestBidi(BaseTest):
         s = self.screen(bidi_reorder=False)
         s.draw('א')
         self.assertFalse(s.test_bidi_line_flag(0))
+
+    def test_flag_covers_fribidi_rtl(self):
+        # RLM is zero-width so it never reaches the draw loop's flag check; the leading-mark path handles it.
+        self.ae(self.screen().test_bidi_flag_misses(), [0x200F])
+
+    def test_flag_named_scripts(self):
+        # coverage only: these blocks were already flagged in round 1; FriBidi 14
+        # shows no assigned R/AL letter outside the flag
+        for cp in (0x0710, 0x0784, 0x07CA, 0x0800, 0x0840, 0x08A0, 0x0870, 0xFB2A, 0xFB50, 0xFE8D, 0x10A10, 0x1E900, 0x1EE00):
+            with self.subTest(hex(cp)):
+                s = self.screen()
+                s.draw('ab ' + chr(cp) + chr(cp))
+                self.assertTrue(s.test_bidi_line_flag(0), f'U+{cp:04X} did not set the flag')
+                v2l = self.refresh(s, 0)
+                self.assertIsNotNone(v2l, f'U+{cp:04X} produced no map')
+                self.assertNotEqual(v2l, ID10, f'U+{cp:04X} was not reordered')
 
     def test_history(self):
         # (h) 2 visible rows, 4 rows of one paragraph. Rows 0 and 1 are pushed to

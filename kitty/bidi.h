@@ -28,7 +28,7 @@ bidi_codepoint_may_reorder(char_type ch) {
     if (ch < 0x590) return false;
     if (ch <= 0x8ff) return true;
     if (ch < 0xfb1d) return false;
-    return ch <= 0xfdff || (0xfe70 <= ch && ch <= 0xfefc) || (0x10800 <= ch && ch <= 0x10fff) || (0x1e800 <= ch && ch <= 0x1efff);
+    return ch <= 0xfdff || (0xfe70 <= ch && ch <= 0xfefe) || (0x10800 <= ch && ch <= 0x10fff) || (0x1e800 <= ch && ch <= 0x1efff);
 }
 
 typedef struct BidiCellSource {
@@ -138,3 +138,6 @@ index_type bidi_visual_left_x(const BidiMaps *b, index_type render_row, index_ty
 index_type bidi_logical_x(const BidiMaps *b, index_type render_row, index_type visual_x);
 bool bidi_cell_is_rtl(const BidiMaps *b, index_type render_row, index_type x);
 void bidi_permute_row_bytes(BidiMaps *b, index_type render_row, uint8_t *row);
+// Writes the codepoints that FriBidi classes RTL or AL but bidi_codepoint_may_reorder
+// does not flag into out, up to cap of them. Returns their total.
+size_t bidi_flag_misses(uint32_t *out, size_t cap);
