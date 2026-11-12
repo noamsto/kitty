@@ -2288,11 +2288,15 @@ class TestBidi(BaseTest):
             self.ae(s.test_bidi_leading_mark(0), 3)
 
     def test_leading_mark_erase_in_line(self):
-        # EL 1 and EL 2 erase the start of the line, taking the mark with it; EL 0
-        # at column 0 erases only cells, and the mark sits before cell 0
+        # EL 1 and EL 2 erase the start of the line, taking the mark with it, as
+        # does EL 0 from column 0 when it erases text. ED 0 erases the cursor
+        # row as EL 0 does.
         with setup_for_testing():
-            for seq, at_start, kept in ((b'\x1b[2K', False, False), (b'\x1b[1K', False, False), (b'\x1b[0K', True, True)):
-                with self.subTest(seq=seq):
+            for seq, at_start, kept in (
+                (b'\x1b[2K', False, False), (b'\x1b[1K', False, False), (b'\x1b[0K', True, False), (b'\x1b[0J', True, False),
+                (b'\x1b[0K', False, True),
+            ):
+                with self.subTest(seq=seq, at_start=at_start):
                     s = self.screen(bidi_auto_direction=True)
                     parse_bytes(s, f'{self.RLM}abc def'.encode())
                     self.ae(self.refresh(s, 0), self.RTL_PLAIN)
@@ -2303,6 +2307,11 @@ class TestBidi(BaseTest):
                     self.ae(s.test_bidi_leading_mark(0), 2 if kept else 0)
                     s.test_bidi_refresh()
                     self.assertIs(s.test_bidi_paragraph_rtl(0), kept)
+            # with cell 0 blank EL 0 keeps the mark: RLM, clear the line, then the text
+            s = self.screen(bidi_auto_direction=True)
+            parse_bytes(s, f'{self.RLM}\x1b[Kabc def'.encode())
+            self.ae(s.test_bidi_leading_mark(0), 2)
+            self.ae(self.refresh(s, 0), self.RTL_PLAIN)
 
     def test_leading_mark_history_and_reflow(self):
         with setup_for_testing():
