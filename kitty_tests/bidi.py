@@ -2648,6 +2648,27 @@ class TestBidi(BaseTest):
             self.ae(row[:1] + row[3:], row0[:1] + row0[3:])
             self.ae(row[1:3], preedit_ref[1:3])
 
+    def test_preedit_leading_mark_leaves_row(self):
+        # The overlay is drawn into the real row and its cells are put back
+        # after; a pre-edit starting with RLM at column 0 must not leave the
+        # mark, or the has_bidi flag, on the row once it is cancelled
+        with setup_for_testing():
+            s = self.screen(bidi_auto_direction=True)
+            s.draw('abc def')
+            s.cursor_position(1, 1)
+            test_screen_update_cell_data(s)
+            s.test_update_overlay_text(f'{self.RLM}xy')
+            test_screen_update_cell_data(s)
+            s.test_update_overlay_text('')
+            test_screen_update_cell_data(s)
+            self.ae(s.test_bidi_leading_mark(0), 0)
+            self.assertFalse(s.test_bidi_line_flag(0))
+            got = self.maps(s)
+            f = self.screen(bidi_auto_direction=True)
+            f.draw('abc def')
+            test_screen_update_cell_data(f)
+            self.ae(got, self.maps(f))
+
     def test_preedit_unmapped_row_unchanged(self):
         # A Latin row has no map: the pre-edit row is uploaded as before, the
         # overlay cells as drawn, byte for byte what a bidi-off screen uploads.

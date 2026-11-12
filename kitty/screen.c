@@ -5730,12 +5730,19 @@ render_overlay_line(Screen *self, Line *line, FONTS_DATA_HANDLE fonts_data) {
     // Rendering without levels clears the attribute, but the cells shaped with
     // levels are put back, and the caller persists the attribute
     const bool rendered_with_bidi = line->attrs.rendered_with_bidi;
+    // Drawing the pre-edit can store a leading mark and set has_bidi on the
+    // real row, and only the cells are put back
+    LineAttrs *row_attrs = self->linebuf->line_attrs + ol.ynum;
+    const unsigned leading_mark = row_attrs->leading_mark;
+    const bool has_bidi = row_attrs->has_bidi;
     line_save_cells(line, 0, line->xnum, ol.original_line.gpu_cells, ol.original_line.cpu_cells);
     screen_draw_overlay_line(self);
     render_line(fonts_data, line, ol.ynum, self->cursor, self->disable_ligatures, self->lc, NULL);
     line_save_cells(line, 0, line->xnum, ol.gpu_cells, ol.cpu_cells);
     line_reset_cells(line, 0, line->xnum, ol.original_line.gpu_cells, ol.original_line.cpu_cells);
     line->attrs.rendered_with_bidi = rendered_with_bidi;
+    row_attrs->leading_mark = leading_mark;
+    row_attrs->has_bidi = has_bidi;
     ol.is_dirty = false;
     const index_type x = screen_ime_anchor_x(self), y = MIN(ol.ynum + self->scrolled_by, self->lines - 1);
     // The IME is anchored at the start of the pre-edit text, see prepare_ime_position_update_event()
