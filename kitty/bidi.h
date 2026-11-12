@@ -35,6 +35,7 @@ typedef struct BidiCellSource {
     const CPUCell *(*cells_at)(void *ctx, int y);
     uint64_t (*line_id_at)(void *ctx, int y); // 0 = untracked
     void (*mark_dirty)(void *ctx, int y);      // the line must be reshaped this frame
+    uint8_t (*leading_mark_at)(void *ctx, int y); // LineAttrs.leading_mark of line y
     const TextCache *text_cache;
 } BidiCellSource;
 
@@ -67,6 +68,7 @@ typedef struct BidiMaps {
     // (class 0: none starts there), as fed to the cacheable resolve that wrote
     // the row's current map; sig_valid is cleared by every other map or stamp write
     uint32_t *sig_type, *sig_bracket; // rows*cols, row-major by render row
+    uint8_t *sig_mark;                // rows: the leading mark fed in front of the row, 0 unless it starts its paragraph
     bool *sig_valid;                  // rows
     uint64_t *line_id, *prev_line_id; // this frame / last frame, swapped at frame start
     bool *prev_active;                 // snapshot, rows
@@ -123,13 +125,15 @@ uint64_t *bidi_paused_line_ids(BidiMaps *b, index_type rows);
 // Resolves the paragraph on rows [first_y, last_y] and writes the maps of those
 // of its rows whose render row, y + y_to_render_row, is on screen and not below
 // first_render_row (rows already uploaded this frame keep their maps). Returns
-// true when at least one of those rows got a map.
+// true when at least one of those rows got a map. para_start: first_y starts
+// its paragraph, so its leading mark, if any, is fed in front of the text.
 bool bidi_resolve_paragraph(BidiMaps *b, BidiCellSource src, void *ctx, int first_y, int last_y, int y_to_render_row,
-    index_type first_render_row, bool cacheable, BidiBase base);
+    index_type first_render_row, bool cacheable, BidiBase base, bool para_start);
 // True when line y, at render_row, still feeds FriBidi the classes and bracket
 // types, in the same cells, as when its current map was written by a cacheable
-// resolve. Resolves nothing.
-bool bidi_row_signature_matches(BidiMaps *b, BidiCellSource src, void *ctx, int y, index_type render_row);
+// resolve. mark is the line's leading mark if it starts its paragraph, else 0.
+// Resolves nothing.
+bool bidi_row_signature_matches(BidiMaps *b, BidiCellSource src, void *ctx, int y, index_type render_row, uint8_t mark);
 // Sets the same rows as bidi_resolve_paragraph inactive, for a paragraph with
 // nothing to reorder.
 void bidi_paragraph_inactive(BidiMaps *b, BidiCellSource src, void *ctx, int first_y, int last_y, int y_to_render_row,

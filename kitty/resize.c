@@ -95,15 +95,17 @@ init_src_line(Rewrap *r) {
     return newline_needed;
 }
 
-#define set_dest_line_attrs(dest_y)                     \
-    r->dest.lb->line_attrs[dest_y] = r->src.line.attrs; \
-    r->src.line.attrs.prompt_kind = UNKNOWN_PROMPT_KIND;
+#define set_dest_line_attrs(dest_y)                      \
+    r->dest.lb->line_attrs[dest_y] = r->src.line.attrs;  \
+    r->src.line.attrs.prompt_kind = UNKNOWN_PROMPT_KIND; \
+    r->src.line.attrs.leading_mark = 0;
 
 static void
 first_dest_line(Rewrap *r) {
     if (r->src.hb_count) {
         historybuf_next_dest_line(r->dest.hb, r->as_ansi_buf, &r->src.line, 0, &r->dest.line, false);
         r->src.line.attrs.prompt_kind = UNKNOWN_PROMPT_KIND;
+        r->src.line.attrs.leading_mark = 0;
     } else {
         r->dest_line_from_linebuf = true;
         linebuf_init_line_at(r->dest.lb, 0, &r->dest.line);
@@ -150,6 +152,7 @@ next_dest_line(Rewrap *r, bool continued) {
     } else {
         r->dest.y = historybuf_next_dest_line(r->dest.hb, r->as_ansi_buf, &r->src.line, r->dest.y, &r->dest.line, continued);
         r->src.line.attrs.prompt_kind = UNKNOWN_PROMPT_KIND;
+        r->src.line.attrs.leading_mark = 0;
     }
     if (r->sb->line_attrs[0].has_dirty_text) {
         CPUCell *cpu_cells;

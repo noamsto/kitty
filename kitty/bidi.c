@@ -21,6 +21,7 @@ free_row_maps(BidiMaps *b) {
     free(b->rtl);
     free(b->sig_type);
     free(b->sig_bracket);
+    free(b->sig_mark);
     free(b->sig_valid);
     free(b->line_id);
     free(b->prev_line_id);
@@ -37,6 +38,7 @@ free_row_maps(BidiMaps *b) {
     b->rtl = NULL;
     b->sig_type = NULL;
     b->sig_bracket = NULL;
+    b->sig_mark = NULL;
     b->sig_valid = NULL;
     b->line_id = NULL;
     b->prev_line_id = NULL;
@@ -85,14 +87,15 @@ bidi_maps_ensure(BidiMaps *b, index_type rows, index_type cols) {
     b->rtl = calloc(rows, sizeof(b->rtl[0]));
     b->sig_type = malloc(cells * sizeof(b->sig_type[0]));
     b->sig_bracket = malloc(cells * sizeof(b->sig_bracket[0]));
+    b->sig_mark = calloc(rows, sizeof(b->sig_mark[0]));
     b->sig_valid = calloc(rows, sizeof(b->sig_valid[0]));
     b->line_id = calloc(rows, sizeof(b->line_id[0]));
     b->prev_line_id = calloc(rows, sizeof(b->prev_line_id[0]));
     b->prev_active = calloc(rows, sizeof(b->prev_active[0]));
     b->prev_levels = calloc(cells, sizeof(b->prev_levels[0]));
     if (!b->v2l || !b->l2v || !b->levels || !b->active || !b->row_scratch || !b->stamp_first || !b->stamp_last ||
-        !b->stamp_valid || !b->rtl || !b->sig_type || !b->sig_bracket || !b->sig_valid || !b->line_id || !b->prev_line_id ||
-        !b->prev_active || !b->prev_levels) {
+        !b->stamp_valid || !b->rtl || !b->sig_type || !b->sig_bracket || !b->sig_mark || !b->sig_valid || !b->line_id ||
+        !b->prev_line_id || !b->prev_active || !b->prev_levels) {
         free_row_maps(b);
         return false;
     }
@@ -325,9 +328,10 @@ feed_row(BidiMaps *b, const CPUCell *cells, const TextCache *text_cache, uint32_
 }
 
 // Stores the classes and bracket types of characters [row_first, row_end) at the
-// cells they start in, after the row's settle_row
+// cells they start in, after the row's settle_row. mark is the leading mark fed
+// in front of the row, or 0.
 static void
-write_signature(BidiMaps *b, index_type render_row, uint32_t row_first, uint32_t row_end) {
+write_signature(BidiMaps *b, index_type render_row, uint32_t row_first, uint32_t row_end, uint8_t mark) {
     uint32_t *types = row_of(sig_type), *brackets = row_of(sig_bracket);
     memset(types, 0, b->cols * sizeof(types[0]));
     memset(brackets, 0, b->cols * sizeof(brackets[0]));
@@ -336,12 +340,14 @@ write_signature(BidiMaps *b, index_type render_row, uint32_t row_first, uint32_t
         types[col] = b->types[i];
         brackets[col] = b->brackets[i];
     }
+    b->sig_mark[render_row] = mark;
     b->sig_valid[render_row] = true;
 }
 
 bool
-bidi_row_signature_matches(BidiMaps *b, BidiCellSource src, void *ctx, int y, index_type render_row) {
-    if (!b->v2l || render_row >= b->rows || !b->sig_valid[render_row] || !ensure_scratch(b, b->cols)) return false;
+bidi_row_signature_matches(BidiMaps *b, BidiCellSource src, void *ctx, int y, index_type render_row, uint8_t mark) {
+    if (!b->v2l || render_row >= b->rows || !b->sig_valid[render_row] || b->sig_mark[render_row] != mark ||
+        !ensure_scratch(b, b->cols)) return false;
     const uint32_t n = feed_row(b, src.cells_at(ctx, y), src.text_cache, 0, 0);
     fribidi_get_bidi_types(b->text, (FriBidiStrIndex)n, b->types);
     fribidi_get_bracket_types(b->text, (FriBidiStrIndex)n, b->types, b->brackets);
@@ -407,16 +413,22 @@ write_row(BidiMaps *b, index_type render_row, uint32_t row_first_char, uint32_t 
 
 bool
 bidi_resolve_paragraph(BidiMaps *b, BidiCellSource src, void *ctx, int first_y, int last_y, int y_to_render_row,
-    index_type first_render_row, bool cacheable, BidiBase base) {
+    index_type first_render_row, bool cacheable, BidiBase base, bool para_start) {
     const int num_rows = last_y - first_y + 1;
     const index_type cols = b->cols;
     FriBidiLevel max_level = 0;
+    uint8_t mark = 0;
     // A failed resolve leaves the rows unmapped for this frame only
-    if (num_rows < 1 || num_rows > BIDI_MAX_PARAGRAPH_ROWS || !ensure_scratch(b, (size_t)num_rows * cols)) {
+    if (num_rows < 1 || num_rows > BIDI_MAX_PARAGRAPH_ROWS || !ensure_scratch(b, (size_t)num_rows * cols + 1)) {
         cacheable = false;
         goto no_bidi;
     }
     uint32_t n = 0;
+    // The mark is character 0, in no row: the rows start after it
+    if (para_start && (mark = src.leading_mark_at(ctx, first_y))) {
+        b->text[n++] = mark == 1 ? 0x200E : mark == 2 ? 0x200F : 0x061C;
+        b->cell_of_char[0] = 0;
+    }
     for (int r = 0; r < num_rows; r++) {
         b->row_start[r] = n;
         n = feed_row(b, src.cells_at(ctx, first_y + r), src.text_cache, (uint32_t)r, n);
@@ -479,7 +491,7 @@ bidi_resolve_paragraph(BidiMaps *b, BidiCellSource src, void *ctx, int first_y, 
             any_active = true;
         }
         settle_row(b, src, ctx, first_y + r, (index_type)render_row, first_y, last_y, cacheable, rtl);
-        if (cacheable) write_signature(b, (index_type)render_row, row_first, row_end);
+        if (cacheable) write_signature(b, (index_type)render_row, row_first, row_end, r ? 0 : mark);
     }
     return any_active;
 
@@ -490,7 +502,7 @@ no_bidi:
         for (int r = 0; r < num_rows; r++) {
             const int render_row = first_y + r + y_to_render_row;
             if (render_row < (int)first_render_row || render_row >= (int)b->rows) continue;
-            write_signature(b, (index_type)render_row, b->row_start[r], b->row_start[r + 1]);
+            write_signature(b, (index_type)render_row, b->row_start[r], b->row_start[r + 1], r ? 0 : mark);
         }
     }
     return false;

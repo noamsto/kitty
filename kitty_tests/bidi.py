@@ -2213,3 +2213,123 @@ class TestBidi(BaseTest):
         self.ae(cols, [border, 5])
         self.assertFalse(any(s.test_bidi_paragraph_rtl(y) for y in range(2)))
         self.ae(leave(s), (LTR, border))
+
+    # Leading marks: an LRM, RLM or ALM at a paragraph's start has no cell to be
+    # stored on, so it is kept on the line and fed to FriBidi in front of the
+    # paragraph's text, mapped to no cell.
+    LRM, RLM, ALM = '‎', '‏', '؜'
+    # abc def at level 2 in an RTL paragraph: in order, right-aligned
+    RTL_PLAIN = (9, 8, 7) + ID10[:7]
+
+    def test_leading_mark_paragraph(self):
+        with setup_for_testing():
+            # RLM is the first strong character (P2-P3): paragraph level 1. L at
+            # an odd level is 2 (I2), the space between two L is L (N1), the
+            # blanks 1 (L1). L2 reverses cols 0-6, then the whole row.
+            s = self.screen(bidi_auto_direction=True)
+            parse_bytes(s, f'{self.RLM}abc def'.encode())
+            self.ae(self.refresh(s, 0), self.RTL_PLAIN)
+            self.ae(s.test_bidi_levels(0), (2,) * 7 + (1,) * 3)
+            self.assertIs(s.test_bidi_paragraph_rtl(0), True)
+            self.ae(s.test_bidi_leading_mark(0), 2)
+            # LRM before Hebrew: LTR paragraph, the letters reversed in place
+            # and the space between R and L at level 0 (N2). Without the mark the
+            # first strong character is R and the paragraph is RTL.
+            s = self.screen(bidi_auto_direction=True)
+            parse_bytes(s, f'{self.LRM}{A} x'.encode())
+            self.ae(self.refresh(s, 0), (2, 1, 0) + ID10[3:])
+            self.assertIs(s.test_bidi_paragraph_rtl(0), False)
+            self.ae(s.test_bidi_leading_mark(0), 1)
+            s = self.screen(bidi_auto_direction=True)
+            parse_bytes(s, f'{A} x'.encode())
+            self.ae(self.refresh(s, 0), ID10[::-1])
+            self.assertIs(s.test_bidi_paragraph_rtl(0), True)
+            self.ae(s.test_bidi_leading_mark(0), 0)
+            # ALM is AL, so the paragraph is RTL and W2 makes the digits after
+            # it AN: AN AN WS AN AN, the space between two AN is R (N1). I1 puts
+            # AN at an odd level on 2: levels 2 2 1 2 2, then the blanks 1. L2
+            # reverses each digit pair, then the whole row.
+            s = self.screen(bidi_auto_direction=True)
+            parse_bytes(s, f'{self.ALM}12 34'.encode())
+            self.ae(self.refresh(s, 0), (9, 8, 7, 6, 5, 3, 4, 2, 0, 1))
+            self.ae(s.test_bidi_levels(0), (2, 2, 1, 2, 2) + (1,) * 5)
+            self.assertIs(s.test_bidi_paragraph_rtl(0), True)
+            self.ae(s.test_bidi_leading_mark(0), 3)
+
+    def test_leading_mark_erase_in_line(self):
+        # EL 1 and EL 2 erase the start of the line, taking the mark with it; EL 0
+        # at column 0 erases only cells, and the mark sits before cell 0
+        with setup_for_testing():
+            for seq, at_start, kept in ((b'\x1b[2K', False, False), (b'\x1b[1K', False, False), (b'\x1b[0K', True, True)):
+                with self.subTest(seq=seq):
+                    s = self.screen(bidi_auto_direction=True)
+                    parse_bytes(s, f'{self.RLM}abc def'.encode())
+                    self.ae(self.refresh(s, 0), self.RTL_PLAIN)
+                    self.ae(s.test_bidi_leading_mark(0), 2)
+                    if at_start:
+                        s.cursor_position(1, 1)
+                    parse_bytes(s, seq)
+                    self.ae(s.test_bidi_leading_mark(0), 2 if kept else 0)
+                    s.test_bidi_refresh()
+                    self.assertIs(s.test_bidi_paragraph_rtl(0), kept)
+
+    def test_leading_mark_history_and_reflow(self):
+        with setup_for_testing():
+            # The mark moves with the line into the history
+            s = self.screen(cols=10, lines=3, scrollback=5, bidi_auto_direction=True)
+            parse_bytes(s, f'{self.RLM}abc def'.encode())
+            s.cursor_position(3, 1)
+            s.index()
+            self.ae(s.historybuf.count, 1)
+            s.scroll(1, True)
+            self.ae(self.refresh(s, 0), self.RTL_PLAIN)
+            self.assertIs(s.test_bidi_paragraph_rtl(0), True)
+            # Narrower: the marked row wraps into two. Only the first keeps the
+            # mark; both rows are of one RTL paragraph. Level 2 for every letter
+            # and the space; the blanks of the last row 1 (L1): row 0 reverses
+            # twice, row 1 puts its blanks, reversed, on the left.
+            s = self.screen(cols=10, lines=3, scrollback=5, bidi_auto_direction=True)
+            parse_bytes(s, f'{self.RLM}abc def'.encode())
+            self.ae(self.refresh(s, 0), self.RTL_PLAIN)
+            s.resize(3, 5)
+            self.ae(s.test_bidi_leading_mark(0), 2)
+            self.ae(s.test_bidi_leading_mark(1), 0)
+            self.ae((self.refresh(s, 0), self.refresh(s, 1)), (ID10[:5], (4, 3, 2, 0, 1)))
+            self.assertTrue(all(s.test_bidi_paragraph_rtl(y) for y in range(2)))
+            # Wider again: one row, the mark kept
+            s.resize(3, 10)
+            self.ae(s.test_bidi_leading_mark(0), 2)
+            self.ae(s.test_bidi_leading_mark(1), 0)
+            self.ae(self.refresh(s, 0), self.RTL_PLAIN)
+            self.assertIs(s.test_bidi_paragraph_rtl(0), True)
+
+    def test_leading_mark_only_change_reresolves(self):
+        # The mark is the only difference between these rows: the classes and
+        # cells FriBidi sees after it are the same, so a signature that ignores
+        # it would keep the old maps
+        text = 'abc def'
+        with setup_for_testing():
+            marked = self.screen(bidi_auto_direction=True)
+            parse_bytes(marked, f'{self.RLM}{text}'.encode())
+            marked.test_bidi_refresh()
+            want_marked = self.maps(marked)
+            self.ae(want_marked[0], self.RTL_PLAIN)
+            plain = self.screen(bidi_auto_direction=True)
+            parse_bytes(plain, text.encode())
+            plain.test_bidi_refresh()
+            want_plain = self.maps(plain)
+            self.assertNotEqual(want_plain, want_marked)
+            s = self.screen(bidi_auto_direction=True)
+            parse_bytes(s, f'{self.RLM}{text}'.encode())
+            self.frame(s)
+            self.warm(s)
+            self.ae(self.maps(s), want_marked)
+            for mark, want in (('', want_plain), (self.RLM, want_marked), ('', want_plain)):
+                with self.subTest(mark=mark):
+                    s.cursor_position(1, 1)
+                    parse_bytes(s, b'\x1b[2K')
+                    parse_bytes(s, f'{mark}{text}'.encode())
+                    self.assertGreater(self.frame(s), 0, 'the mark changed, so the paragraph must resolve again')
+                    self.ae(self.maps(s), want)
+                    self.ae(s.test_bidi_leading_mark(0), 2 if mark else 0)
+                    self.warm(s)

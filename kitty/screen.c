@@ -1253,6 +1253,14 @@ is_emoji_presentation_base(char_type ch) {
 }
 
 static void
+store_leading_mark(Screen *self, char_type ch) {
+    const unsigned mark = ch == 0x200E ? 1 : ch == 0x200F ? 2 : 3;
+    self->linebuf->line_attrs[self->cursor->y].leading_mark = mark;
+    linebuf_mark_line_dirty(self->linebuf, self->cursor->y);
+    if (OPT(bidi_reorder) && mark != 1) linebuf_set_line_has_bidi(self->linebuf, self->cursor->y, true);
+}
+
+static void
 draw_combining_char(Screen *self, text_loop_state *s, char_type ch) {
     CPUCell *cp;
     GPUCell *gp;
@@ -1473,6 +1481,7 @@ draw_text_loop(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_
                     // they were not added to the prev cell by grapheme segmentation.
                     // Zero width chars can only be represented as combining chars.
                     if (s->prev.cc) draw_combining_char(self, s, ch);
+                    else if (ch == 0x200E || ch == 0x200F || ch == 0x061C) store_leading_mark(self, ch);
                     continue;
                 }
                 char_width = 1;
@@ -2943,6 +2952,8 @@ screen_erase_in_line(Screen *self, unsigned int how, bool private) {
         } else {
             line_apply_cursor(self->linebuf->line, self->cursor, s, n, true);
         }
+        // The mark sits before cell 0, so only an erase that includes cell 0 clears it
+        if (how == 1 || how == 2) self->linebuf->line_attrs[self->cursor->y].leading_mark = 0;
         self->is_dirty = true;
         clear_intersecting_selections(self, self->cursor->y);
         linebuf_mark_line_dirty(self->linebuf, self->cursor->y);
@@ -4216,6 +4227,14 @@ bidi_source_cells_at(void *ctx, int y) {
     return s->line.cpu_cells;
 }
 
+static uint8_t
+bidi_source_leading_mark(void *ctx, int y) {
+    BidiParaSource *s = ctx;
+    Line l = {0};
+    bidi_source_line(s, y, &l);
+    return l.attrs.leading_mark;
+}
+
 static bool
 bidi_source_is_continued(const BidiParaSource *s, int y) {
     if (s->paused) return y > 0 && y < (int)s->paused->ynum && linebuf_is_line_continued(s->paused, (index_type)y);
@@ -4299,9 +4318,9 @@ screen_bidi_resolve_row(Screen *self, LineBuf *paused, unsigned render_row, int 
     while (range_y - first < BIDI_MAX_PARAGRAPH_ROWS / 2 && first > lowest && bidi_source_is_continued(&src, first)) first--;
     while (last - first + 1 < BIDI_MAX_PARAGRAPH_ROWS && bidi_source_is_continued(&src, last + 1)) last++;
     while (last - first + 1 < BIDI_MAX_PARAGRAPH_ROWS && first > lowest && bidi_source_is_continued(&src, first)) first--;
+    const bool para_start = !(first > lowest && bidi_source_is_continued(&src, first));
     // A paragraph cut by the cap is not cached: its bounds depend on the row it is entered from
-    const bool cacheable = !paused && !(first > lowest && bidi_source_is_continued(&src, first)) &&
-                           !bidi_source_is_continued(&src, last + 1);
+    const bool cacheable = !paused && para_start && !bidi_source_is_continued(&src, last + 1);
 
     b->para.first = first;
     b->para.last = last;
@@ -4335,6 +4354,7 @@ screen_bidi_resolve_row(Screen *self, LineBuf *paused, unsigned render_row, int 
     const BidiCellSource cell_source = {.cells_at = bidi_source_cells_at,
         .line_id_at = bidi_source_line_id,
         .mark_dirty = bidi_source_mark_dirty_cb,
+        .leading_mark_at = bidi_source_leading_mark,
         .text_cache = self->text_cache};
     // Undirtied rows are unchanged, and dirty on-screen rows that feed FriBidi the
     // same classes, brackets and cells as when their maps were written give it the
@@ -4345,7 +4365,8 @@ screen_bidi_resolve_row(Screen *self, LineBuf *paused, unsigned render_row, int 
             const int r = y + y_to_render_row;
             if (y < 0 && (r < 0 || r >= render_lines)) continue;
             bidi_source_line(&src, y, &l);
-            if (l.attrs.has_dirty_text) same = bidi_row_signature_matches(b, cell_source, &src, y, (index_type)r);
+            if (l.attrs.has_dirty_text)
+                same = bidi_row_signature_matches(b, cell_source, &src, y, (index_type)r, y == first && para_start ? l.attrs.leading_mark : 0);
         }
         if (same) {
             b->para.has_bidi = true;
@@ -4359,7 +4380,8 @@ screen_bidi_resolve_row(Screen *self, LineBuf *paused, unsigned render_row, int 
     }
     // A paragraph longer than the window can start a new window above this row:
     // the rows above were uploaded with the previous window's maps and keep them
-    if (!bidi_resolve_paragraph(b, cell_source, &src, first, last, y_to_render_row, render_row, cacheable, base)) return NULL;
+    if (!bidi_resolve_paragraph(b, cell_source, &src, first, last, y_to_render_row, render_row, cacheable, base, para_start))
+        return NULL;
     b->para.has_bidi = true;
     return b->active[render_row] ? b->levels + (size_t)render_row * b->cols : NULL;
 }
@@ -7730,10 +7752,14 @@ test_ime_anchor_x(Screen *self, PyObject *a UNUSED) {
 }
 
 static PyObject *
-test_bidi_leading_mark(Screen *self UNUSED, PyObject *args) {
+test_bidi_leading_mark(Screen *self, PyObject *args) {
     unsigned y;
     if (!PyArg_ParseTuple(args, "I", &y)) return NULL;
-    return PyLong_FromLong(0);
+    if (y >= self->lines) {
+        PyErr_SetString(PyExc_IndexError, "y out of range");
+        return NULL;
+    }
+    return PyLong_FromLong(self->linebuf->line_attrs[y].leading_mark);
 }
 
 static PyObject *

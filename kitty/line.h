@@ -95,8 +95,9 @@ typedef union LineAttrs {
         uint8_t has_bidi : 1;
         // the cells were last shaped by render_line() with bidi levels
         uint8_t rendered_with_bidi : 1;
-        // named so that initializers zero it, see CPUCell
-        uint8_t padding : 2;
+        // 0 none, 1 LRM, 2 RLM, 3 ALM: a mark that arrived at the paragraph's
+        // start, where there is no cell to store it on
+        uint8_t leading_mark : 2;
     };
     uint8_t val;
 } LineAttrs;
