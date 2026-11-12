@@ -2958,7 +2958,7 @@ screen_erase_in_line(Screen *self, unsigned int how, bool private) {
         } else {
             line_apply_cursor(self->linebuf->line, self->cursor, s, n, true);
         }
-        // The mark sits before cell 0, so only an erase that includes cell 0 clears it
+        // EL 0 keeps the mark even from column 0: a mark sent just before the erase cannot be told from a stale one
         if (how == 1 || how == 2) self->linebuf->line_attrs[self->cursor->y].leading_mark = 0;
         self->is_dirty = true;
         clear_intersecting_selections(self, self->cursor->y);
