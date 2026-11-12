@@ -4531,12 +4531,6 @@ screen_update_cell_data(Screen *self, void *address, FONTS_DATA_HANDLE fonts_dat
             continue;
         }
         const uint8_t *levels = bidi ? screen_bidi_prepare_row(self, NULL, render_row, virtual_y - (int)self->scrolled_by, linep) : NULL;
-        if (levels && is_overlay_active && !is_history && lnum == self->overlay_line.ynum) {
-            // The overlay (IME pre-edit) row gets no bidi
-            levels = NULL;
-            bidi_set_row_inactive(&self->bidi, render_row);
-            if (linep->attrs.rendered_with_bidi) linep->attrs.has_dirty_text = true;
-        }
         if (is_history) {
             // we render line graphics even if the line is not dirty as graphics commands received after
             // the unicode placeholder was first scanned can alter it.
@@ -4564,7 +4558,6 @@ screen_update_cell_data(Screen *self, void *address, FONTS_DATA_HANDLE fonts_dat
             render_overlay_line(self, self->linebuf->line, fonts_data);
         }
         update_overlay_line_data(self, address);
-        if (bidi) bidi_set_row_inactive(&self->bidi, self->overlay_line.ynum + self->scrolled_by + render_row_offset);
     }
 }
 
@@ -5502,14 +5495,13 @@ cursor_cell_span(const CPUCell *cells, index_type x) {
     return cells && cells[x].is_multicell && cells[x].x == 0 ? mcd_x_limit(&cells[x]) : 1;
 }
 
-void
-screen_cursor_visual(Screen *self, index_type x, index_type y, CursorShape shape, index_type *col, bool *mirrored) {
+static void
+cursor_visual_in_row(Screen *self, index_type x, index_type y, index_type render_row, CursorShape shape, index_type *col, bool *mirrored) {
     *col = x;
     *mirrored = false;
     if (!self->bidi.v2l) return;
     LineBuf *lb = self->paused_rendering.expires_at ? self->paused_rendering.linebuf : self->linebuf;
     const CPUCell *cells = y < lb->ynum ? linebuf_cpu_cells_for_line(lb, y) : NULL;
-    const index_type render_row = y + pixel_scroll_enabled(self);
     if (x > 0 && x <= self->columns) {
         // After an RTL character the next RTL character appears at its visual left edge
         index_type p = x - 1;
@@ -5538,10 +5530,45 @@ screen_cursor_visual(Screen *self, index_type x, index_type y, CursorShape shape
     }
 }
 
+void
+screen_cursor_visual(Screen *self, index_type x, index_type y, CursorShape shape, index_type *col, bool *mirrored) {
+    cursor_visual_in_row(self, x, y, y + pixel_scroll_enabled(self), shape, col, mirrored);
+}
+
+static index_type
+overlay_block_cells(const Screen *self) {
+    // screen_draw_overlay_line() keeps at most a row of the pre-edit text
+    return MIN(self->overlay_line.text_len, self->columns);
+}
+
+bool
+screen_overlay_visual_start(Screen *self, index_type *start) {
+    const OverlayLine *ol = &self->overlay_line;
+    // Paused frames do not draw the overlay
+    if (!ol->is_active || !bidi_enabled() || self->paused_rendering.expires_at || !self->bidi.v2l) return false;
+    const index_type render_row = ol->ynum + self->scrolled_by + pixel_scroll_enabled(self);
+    if (render_row >= self->bidi.rows || !self->bidi.active[render_row]) return false;
+    // Not cached: the cursor info and the IME anchor read it before the upload,
+    // from the last frame's maps, and each keystroke replaces the pre-edit
+    const index_type n = overlay_block_cells(self);
+    index_type c;
+    bool m;
+    cursor_visual_in_row(self, ol->xstart, ol->ynum, render_row, CURSOR_BEAM, &c, &m);
+    // A mirrored beam is an RTL insertion point: the block grows leftwards from it
+    *start = m ? c + 1 - MIN(n, c + 1) : MIN(c, self->columns - n);
+    return true;
+}
+
 index_type
 screen_cursor_render_x(Screen *self, CursorShape shape, bool *mirrored) {
     index_type x, y;
     if (screen_is_overlay_active(self)) {
+        index_type start;
+        if (screen_overlay_visual_start(self, &start)) {
+            // The pre-edit block is drawn left to right
+            *mirrored = false;
+            return start + self->overlay_line.cursor_x - screen_overlay_line_start(self);
+        }
         x = self->overlay_line.cursor_x;
         y = self->overlay_line.ynum;
     } else {
@@ -5556,7 +5583,12 @@ screen_cursor_render_x(Screen *self, CursorShape shape, bool *mirrored) {
 
 index_type
 screen_ime_anchor_x(Screen *self) {
-    return screen_is_overlay_active(self) ? screen_overlay_line_start(self) : self->cursor->x;
+    index_type x;
+    if (screen_is_overlay_active(self)) return screen_overlay_visual_start(self, &x) ? x : screen_overlay_line_start(self);
+    bool mirrored;
+    screen_cursor_visual(self, self->cursor->x, self->cursor->y, CURSOR_BEAM, &x, &mirrored);
+    // A mirrored beam is on its cell's right edge, so the insertion point is the next cell
+    return mirrored ? MIN(x + 1, self->columns - 1) : x;
 }
 
 static void
@@ -5682,11 +5714,15 @@ update_overlay_position(Screen *self) {
 static void
 render_overlay_line(Screen *self, Line *line, FONTS_DATA_HANDLE fonts_data) {
 #define ol self->overlay_line
+    // Rendering without levels clears the attribute, but the cells shaped with
+    // levels are put back, and the caller persists the attribute
+    const bool rendered_with_bidi = line->attrs.rendered_with_bidi;
     line_save_cells(line, 0, line->xnum, ol.original_line.gpu_cells, ol.original_line.cpu_cells);
     screen_draw_overlay_line(self);
     render_line(fonts_data, line, ol.ynum, self->cursor, self->disable_ligatures, self->lc, NULL);
     line_save_cells(line, 0, line->xnum, ol.gpu_cells, ol.cpu_cells);
     line_reset_cells(line, 0, line->xnum, ol.original_line.gpu_cells, ol.original_line.cpu_cells);
+    line->attrs.rendered_with_bidi = rendered_with_bidi;
     ol.is_dirty = false;
     const index_type x = screen_ime_anchor_x(self), y = MIN(ol.ynum + self->scrolled_by, self->lines - 1);
     // The IME is anchored at the start of the pre-edit text, see prepare_ime_position_update_event()
@@ -5702,6 +5738,13 @@ static void
 update_overlay_line_data(Screen *self, uint8_t *data) {
     const int render_row_offset = pixel_scroll_enabled(self);
     const size_t base = sizeof(GPUCell) * (self->overlay_line.ynum + self->scrolled_by + render_row_offset) * self->columns;
+    index_type start;
+    if (screen_overlay_visual_start(self, &start)) {
+        // The row was uploaded through its map just before, only the pre-edit block goes over it
+        memcpy(data + base + sizeof(GPUCell) * start, self->overlay_line.gpu_cells + screen_overlay_line_start(self),
+            overlay_block_cells(self) * sizeof(GPUCell));
+        return;
+    }
     memcpy(data + base, self->overlay_line.gpu_cells, self->columns * sizeof(GPUCell));
 }
 

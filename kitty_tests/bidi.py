@@ -324,18 +324,19 @@ class TestBidi(BaseTest):
         # L*5 then R R R at cols 5..7 reversed -> 7 6 5, rest identity
         self.ae(v2l, tuple(range(5)) + (7, 6, 5) + tuple(range(8, 25)))
 
-    def test_overlay_row_unmapped(self):
-        # IME overlay rows are not permuted, observed through the real
-        # update-cell-data path
+    def test_overlay_row_keeps_map(self):
+        # The IME overlay row keeps its map, observed through the real
+        # update-cell-data path. Round 6 replaced round 5's bypass, which
+        # dropped the map of the overlay row.
         with setup_for_testing():
-            s = self.screen()
+            s = self.screen(bidi_auto_direction=False)
             s.draw('abc' + A)
             s.cursor_position(1, 9)  # row 0, so the overlay stays on the Hebrew row
             test_screen_update_cell_data(s)
             self.ae(s.test_bidi_v2l(0), (0, 1, 2, 5, 4, 3, 6, 7, 8, 9))
-            s.test_draw_overlay_line('xy', 8, 0)
+            s.test_update_overlay_text('xy')
             test_screen_update_cell_data(s)
-            self.assertIsNone(s.test_bidi_v2l(0))
+            self.ae(s.test_bidi_v2l(0), (0, 1, 2, 5, 4, 3, 6, 7, 8, 9))
 
     def test_option_off_at_runtime(self):
         # turning bidi off at runtime (config reload) drops the maps on the next
@@ -1178,21 +1179,24 @@ class TestBidi(BaseTest):
             self.ae(self.maps(s), self.maps(f))
 
     def test_cache_overlay_row(self):
-        # Trigger: an overlay line on a Hebrew row, then removed. The row is
-        # unmapped while the overlay shows and mapped again afterwards.
+        # An overlay line on a Hebrew row, then removed. The row keeps its map
+        # while the overlay shows, so the cache holds throughout. Round 6
+        # replaced round 5's bypass, which dropped the map of the overlay row
+        # and so resolved its paragraph again on every frame.
         want = (0, 1, 2, 5, 4, 3, 6, 7, 8, 9)
         with setup_for_testing():
-            s = self.screen()
+            s = self.screen(bidi_auto_direction=False)
             s.draw('abc' + A)
             s.cursor_position(1, 9)
             self.frame(s)
             self.warm(s)
             self.ae(s.test_bidi_v2l(0), want)
-            s.test_draw_overlay_line('xy', 8, 0)
-            self.frame(s)
-            self.assertIsNone(s.test_bidi_v2l(0))
+            s.test_update_overlay_text('xy')
+            for i in range(3):
+                self.ae(self.frame(s), 0)
+                self.ae(s.test_bidi_v2l(0), want)
             s.test_update_overlay_text('')
-            self.assertGreater(self.frame(s), 0)
+            self.ae(self.frame(s), 0)
             self.ae(s.test_bidi_v2l(0), want)
 
     def test_cache_reset(self):
@@ -2499,3 +2503,113 @@ class TestBidi(BaseTest):
         s.draw('abcdefghij')
         self.ae(s.cursor.x, 10)
         self.ae(self.cursor_cells(s, 10), {k: (10, False) for k in ('beam', 'block', 'underline', 'hollow')})
+
+    def preedit_reference(self, text, x, preedit='xy'):
+        # The rows a bidi-off screen uploads for text, each cell coloured to
+        # tell them apart, with the cursor at x, without and with the pre-edit.
+        # Called before the screen under test is made, as making a screen sets
+        # the options.
+        f = self.screen(bidi_reorder=False, bidi_auto_direction=False)
+        draw_coloured(f, text)
+        f.cursor_position(1, x + 1)
+        plain = gpu_row(f, test_screen_update_cell_data(f), 0)
+        self.assertTrue(any(c.sprite_idx for c in plain))
+        f.test_update_overlay_text(preedit)
+        return plain, gpu_row(f, test_screen_update_cell_data(f), 0)
+
+    def test_preedit_rtl_paragraph(self):
+        # RTL paragraph (auto): A + ' ' + A is all level 1 (the space between
+        # two R runs is R by N1, the trailing blanks 1 by L1), so v2l = 9..0.
+        # The cursor, in the blank after the text (x=7), follows an RTL letter:
+        # its beam is on the text's left edge, column 2, mirrored. The pre-edit
+        # block of n=2 cells ends there and extends left, over columns 1 and 2.
+        # It shows the overlay cells drawn at x0 = 7 (screen_overlay_line_start),
+        # left to right, and its caret, after the pre-edit (x0 + 2), is at 1 + 2.
+        text = A + ' ' + A
+        with setup_for_testing():
+            plain_ref, preedit_ref = self.preedit_reference(text, 7)
+            s = self.screen(bidi_auto_direction=True)
+            draw_coloured(s, text)
+            self.ae(s.cursor.x, 7)
+            row0 = gpu_row(s, test_screen_update_cell_data(s), 0)
+            maps0 = self.maps(s)
+            self.ae(maps0[0], ID10[::-1])
+            self.ae(s.test_cursor_visual(7, 0, CURSOR_BEAM), (2, True))
+            self.assertTrue(s.test_bidi_line_rendered_with_bidi(0))
+            # no pre-edit: the IME anchor is the right side of the mirrored beam
+            self.ae(s.test_ime_anchor_x(), 3)
+            self.warm(s)
+            count = s.test_bidi_resolve_count()
+            # before any frame draws the pre-edit: the cursor info is collected
+            # before the upload
+            s.test_update_overlay_text('xy')
+            self.ae(s.test_ime_anchor_x(), 1)
+            self.ae(s.test_cursor_render_x(CURSOR_BEAM), (3, False))
+            # through deactivate_overlay_line: n=3, the block is 0..2, the caret
+            # after it at 0 + 3
+            s.test_update_overlay_text('xyz')
+            self.ae(s.test_ime_anchor_x(), 0)
+            self.ae(s.test_cursor_render_x(CURSOR_BEAM), (3, False))
+            s.test_update_overlay_text('xy')
+            row = gpu_row(s, test_screen_update_cell_data(s), 0)
+            self.ae(s.test_bidi_v2l(0), maps0[0])
+            self.assertTrue(s.test_bidi_line_rendered_with_bidi(0))
+            block = range(1, 3)
+            self.ae([c for v, c in enumerate(row) if v not in block], [c for v, c in enumerate(row0) if v not in block])
+            self.ae(row[1:3], preedit_ref[7:9])
+            # recomputed after the upload, from the same maps
+            self.ae(s.test_cursor_render_x(CURSOR_BEAM), (3, False))
+            self.ae(s.test_ime_anchor_x(), 1)
+            for i in range(3):
+                test_screen_update_cell_data(s)
+            self.ae(s.test_bidi_resolve_count(), count)
+            self.assertTrue(s.test_bidi_line_rendered_with_bidi(0))
+            s.test_update_overlay_text('')
+            after = gpu_row(s, test_screen_update_cell_data(s), 0)
+            self.ae(self.maps(s), maps0)
+            self.ae(after, row0)
+            parse_bytes(s, b'\x1b[8l')
+            row = gpu_row(s, test_screen_update_cell_data(s), 0)
+            self.ae([c.sprite_idx for c in row], [c.sprite_idx for c in plain_ref])
+
+    def test_preedit_ltr_cell(self):
+        # abc + A in an LTR paragraph (auto off): A reversed in place at 3..5.
+        # The cursor on b (x=1) follows a Latin letter, so it is at its own
+        # column, not mirrored: the block starts there and extends right, over
+        # columns 1 and 2. x0 = 1, the caret after the pre-edit at 1 + 2.
+        text = 'abc' + A
+        want = (0, 1, 2, 5, 4, 3) + ID10[6:]
+        with setup_for_testing():
+            _, preedit_ref = self.preedit_reference(text, 1)
+            s = self.screen(bidi_auto_direction=False)
+            draw_coloured(s, text)
+            s.cursor_position(1, 2)
+            row0 = gpu_row(s, test_screen_update_cell_data(s), 0)
+            self.ae(s.test_bidi_v2l(0), want)
+            self.ae(s.test_cursor_visual(1, 0, CURSOR_BEAM), (1, False))
+            s.test_update_overlay_text('xy')
+            self.ae(s.test_ime_anchor_x(), 1)
+            self.ae(s.test_cursor_render_x(CURSOR_BEAM), (3, False))
+            row = gpu_row(s, test_screen_update_cell_data(s), 0)
+            self.ae(s.test_bidi_v2l(0), want)
+            self.ae(row[:1] + row[3:], row0[:1] + row0[3:])
+            self.ae(row[1:3], preedit_ref[1:3])
+
+    def test_preedit_unmapped_row_unchanged(self):
+        # A Latin row has no map: the pre-edit row is uploaded as before, the
+        # overlay cells as drawn, byte for byte what a bidi-off screen uploads.
+        # The reference goes through the same upload, so the pre-edit cells
+        # (with the underline colour the draw gives them) are checked on their own.
+        with setup_for_testing():
+            plain_ref, preedit_ref = self.preedit_reference('abc def', 7)
+            self.ae(preedit_ref[:7] + preedit_ref[9:], plain_ref[:7] + plain_ref[9:])
+            self.assertTrue(all(c.decoration_fg and not p.decoration_fg for c, p in zip(preedit_ref[7:9], plain_ref[7:9])))
+            s = self.screen(bidi_auto_direction=True)
+            draw_coloured(s, 'abc def')
+            test_screen_update_cell_data(s)
+            s.test_update_overlay_text('xy')
+            self.ae(s.test_ime_anchor_x(), 7)
+            self.ae(s.test_cursor_render_x(CURSOR_BEAM), (9, False))
+            row = gpu_row(s, test_screen_update_cell_data(s), 0)
+            self.assertIsNone(s.test_bidi_v2l(0))
+            self.ae(row, preedit_ref)

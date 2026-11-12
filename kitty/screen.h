@@ -375,6 +375,8 @@ void screen_report_size(Screen *, unsigned which, unsigned modifier);
 void screen_manipulate_title_stack(Screen *, unsigned int op, unsigned int which);
 bool screen_is_overlay_active(Screen *self);
 index_type screen_overlay_line_start(const Screen *self);
+// The visual column of the pre-edit block on an overlay row with a bidi map
+bool screen_overlay_visual_start(Screen *self, index_type *start);
 BidiBase screen_bidi_base(Screen *self);
 void screen_set_bidi_direction(Screen *self, unsigned int direction);
 void screen_cursor_visual(Screen *self, index_type x, index_type y, CursorShape shape, index_type *col, bool *mirrored);
