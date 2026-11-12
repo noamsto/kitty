@@ -198,7 +198,7 @@ class TestBidi(BaseTest):
         self.ae(self.screen().test_bidi_flag_misses(), [0x200F])
 
     def test_flag_named_scripts(self):
-        # coverage only: these blocks were already flagged in round 1; FriBidi 14
+        # coverage only: these blocks were flagged before the change; FriBidi 14
         # shows no assigned R/AL letter outside the flag
         for cp in (0x0710, 0x0784, 0x07CA, 0x0800, 0x0840, 0x08A0, 0x0870, 0xFB2A, 0xFB50, 0xFE8D, 0x10A10, 0x1E900, 0x1EE00):
             with self.subTest(hex(cp)):
@@ -210,7 +210,7 @@ class TestBidi(BaseTest):
                 self.assertNotEqual(v2l, ID10, f'U+{cp:04X} was not reordered')
 
     def test_flag_arabic_presentation_forms_b_end(self):
-        # U+FEFD and U+FEFE, unassigned, are AL by default and now flagged
+        # U+FEFD and U+FEFE, unassigned, are AL by default and flagged
         for cp in (0xFEFD, 0xFEFE):
             with self.subTest(hex(cp)):
                 s = self.screen()
@@ -337,8 +337,7 @@ class TestBidi(BaseTest):
 
     def test_overlay_row_keeps_map(self):
         # The IME overlay row keeps its map, observed through the real
-        # update-cell-data path. Round 6 replaced round 5's bypass, which
-        # dropped the map of the overlay row.
+        # update-cell-data path
         with setup_for_testing():
             s = self.screen(bidi_auto_direction=False)
             s.draw('abc' + A)
@@ -1191,9 +1190,7 @@ class TestBidi(BaseTest):
 
     def test_cache_overlay_row(self):
         # An overlay line on a Hebrew row, then removed. The row keeps its map
-        # while the overlay shows, so the cache holds throughout. Round 6
-        # replaced round 5's bypass, which dropped the map of the overlay row
-        # and so resolved its paragraph again on every frame.
+        # while the overlay shows, so the cache holds throughout.
         want = (0, 1, 2, 5, 4, 3, 6, 7, 8, 9)
         with setup_for_testing():
             s = self.screen(bidi_auto_direction=False)
@@ -1958,7 +1955,7 @@ class TestBidi(BaseTest):
         parse_bytes(s, b'\x1b[?2501$p')
         self.ae(c.wtcbuf, b'\x1b[?2501;1$y')
         # bidi_reorder off is the master switch: nothing is reordered, so BDSM
-        # reports reset (explicit) whatever was set, a documented deviation
+        # reports reset (explicit) whatever was set
         s = self.screen(bidi_reorder=False, bidi_auto_direction=False)
         c = s.callbacks
         for seq in (b'\x1b[8$p', b'\x1b[8h\x1b[8$p', b'\x1b[8l\x1b[8$p'):
@@ -2099,7 +2096,7 @@ class TestBidi(BaseTest):
                     s.test_bidi_refresh()
                     self.ae(self.maps(s), want)
 
-    def test_owner_hebrew_first_stays_ltr(self):
+    def test_hebrew_first_stays_ltr(self):
         # A line whose first strong character is Hebrew stays LTR-based when the
         # program asks for it: שלום reversed in place, the line left-aligned.
         # Explicit mode shows it in logical order. The default options case
@@ -2250,7 +2247,7 @@ class TestBidi(BaseTest):
         # LTR: row A's border is between R and L, at the embedding level (N2),
         # 0, so it stays. Row B's is between R and R, so R (N1) in any paragraph
         # direction: columns 0-15 form one level 1 run, reversed in place, and
-        # the border moves to 15 - 10. This is the documented limit of SCP 1.
+        # the border moves to 15 - 10. This is a limit of SCP 1.
         s, cols = run(b'\x1b[1 k')
         self.ae(cols, [border, 5])
         self.assertFalse(any(s.test_bidi_paragraph_rtl(y) for y in range(2)))
@@ -2399,8 +2396,8 @@ class TestBidi(BaseTest):
         # block, underline and hollow never mirror
         self.ae((got['block'], got['underline'], got['hollow']), ((9, False),) * 3)
         # in the RTL paragraph a letter after a Hebrew one is level 2: its beam
-        # is on the Hebrew letter's left edge (rule 1), and a Hebrew letter after
-        # it has an LTR character before it (rule 2)
+        # is on the Hebrew letter's left edge, and a Hebrew letter after it has an
+        # LTR character before it
         s = self.screen(bidi_auto_direction=True)
         s.draw('אaב')
         self.ae(self.refresh(s, 0), ID10[::-1])
@@ -2421,10 +2418,10 @@ class TestBidi(BaseTest):
         # Latin cells: never mirrored
         for x in range(3):
             self.ae(self.cursor_cells(s, x)['beam'], (x, False))
-        # the first Hebrew cell, after a Latin letter: rule 2, mirrored
+        # the first Hebrew cell, after a Latin letter, mirrored
         got = self.cursor_cells(s, 3)
         self.ae((got['beam'], got['block'], got['underline']), ((4, True), (4, False), (4, False)))
-        # the second, after a Hebrew letter: rule 1 puts the beam on the left
+        # the second, after a Hebrew letter: the beam goes on the left
         # edge of the preceding one (visual 4), in the cell left of it
         self.ae(self.cursor_cells(s, 4)['beam'], (3, True))
         # a wide char at level 1: אבג after 😀 in an RTL paragraph, the emoji
@@ -2438,7 +2435,7 @@ class TestBidi(BaseTest):
         self.ae(s.test_bidi_visual_x(0, 0, 2) + 1, 9)
         got = self.cursor_cells(s, 0)
         self.ae((got['beam'], got['block'], got['underline']), ((9, True), (8, False), (8, False)))
-        # a wide preceding character (rule 1): אב then 😀 at cells 2 and 3, all
+        # a wide preceding character: אב then 😀 at cells 2 and 3, all
         # level 1 in the RTL paragraph, so the emoji is at visual 7 and 6 and the
         # blank after it (x=4) is drawn just left of it, at 5
         s = self.screen(bidi_auto_direction=True)
@@ -2450,7 +2447,7 @@ class TestBidi(BaseTest):
         self.ae((got['beam'], got['block'], got['underline'], got['hollow']), ((5, True), (5, False), (5, False), (5, False)))
 
     def test_cursor_after_rtl_char(self):
-        # The owner case: ls שלום in an LTR paragraph (auto off). The Hebrew
+        # ls שלום in an LTR paragraph (auto off). The Hebrew
         # run is level 1 at cols 3..6 and is drawn reversed, v2l 0 1 2 6 5 4 3.
         # The cursor, in the blank at logical 7, is where the next Hebrew letter
         # will appear: left of the run.
@@ -2469,7 +2466,7 @@ class TestBidi(BaseTest):
         s.draw('ls abc')
         self.ae(self.cursor_cells(s, 6), {k: (6, False) for k in ('beam', 'block', 'underline', 'hollow')})
         # after digits inside an RTL run: the digits are level 2, which is
-        # LTR, so the cursor is drawn at its own cell (rule 2)
+        # LTR, so the cursor is drawn at its own cell
         s = self.screen(bidi_auto_direction=False)
         s.draw(A + ' 12')
         self.refresh(s, 0)
