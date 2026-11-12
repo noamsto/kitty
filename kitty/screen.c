@@ -5722,6 +5722,9 @@ line(Screen *self, PyObject *val) {
 Line *
 screen_paused_line_for_cursor(Screen *self, index_type y) {
     if (!self->paused_rendering.expires_at) return NULL;
+    // With pixel scroll the snapshot has an extra leading row, so screen row y is at y + 1
+    y += self->paused_rendering.pixel_scroll;
+    if (y >= self->paused_rendering.linebuf->ynum) return NULL;
     linebuf_init_line(self->paused_rendering.linebuf, y);
     return self->paused_rendering.linebuf->line;
 }
