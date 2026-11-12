@@ -209,6 +209,17 @@ class TestBidi(BaseTest):
                 self.assertIsNotNone(v2l, f'U+{cp:04X} produced no map')
                 self.assertNotEqual(v2l, ID10, f'U+{cp:04X} was not reordered')
 
+    def test_flag_arabic_presentation_forms_b_end(self):
+        # U+FEFD and U+FEFE, unassigned, are AL by default and now flagged
+        for cp in (0xFEFD, 0xFEFE):
+            with self.subTest(hex(cp)):
+                s = self.screen()
+                s.draw('ab ' + chr(cp) + chr(cp))
+                self.assertTrue(s.test_bidi_line_flag(0), f'U+{cp:04X} did not set the flag')
+                v2l = self.refresh(s, 0)
+                self.assertIsNotNone(v2l, f'U+{cp:04X} produced no map')
+                self.assertNotEqual(v2l, ID10, f'U+{cp:04X} was not reordered')
+
     def test_history(self):
         # (h) 2 visible rows, 4 rows of one paragraph. Rows 0 and 1 are pushed to
         # the scrollback. Visible row 0 is five R letters, level 1: (4,3,2,1,0).
