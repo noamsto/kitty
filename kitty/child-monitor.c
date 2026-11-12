@@ -825,8 +825,8 @@ collect_cursor_info(CursorRenderInfo *ans, Window *w, monotonic_t now, OSWindow 
         ans->x = cursor->x;
         ans->y = cursor->y;
     }
-    ans->visual_x = ans->x < rd->screen->columns ?
-        bidi_visual_left_x(&rd->screen->bidi, ans->y + pixel_scroll_enabled(rd->screen), ans->x, 1) : ans->x;
+    bool mirrored;
+    ans->visual_x = screen_cursor_render_x(rd->screen, cursor->shape ? cursor->shape : OPT(cursor_shape), &mirrored);
     ans->is_visible = false;
     ans->multicursor_count = 0;
     ans->cursor_opacity = 1;

@@ -1857,3 +1857,115 @@ class TestBidi(BaseTest):
         # a click at visual 9, right of the text, lands on logical 0, the first
         # character (א): the half is flipped, so it is the start of that character
         self.ae(s.test_bidi_logical_x(9, 0), 0)
+
+    def test_bidi_control_parse(self):
+        NONE, LTR, RTL, AUTO = range(4)
+        s = self.screen(bidi_auto_direction=False)
+        c = s.callbacks
+        self.ae(s.test_bidi_base(), LTR)
+        parse_bytes(s, b'\x1b[8l')
+        self.ae(s.test_bidi_base(), NONE)
+        parse_bytes(s, b'\x1b[8h')
+        self.ae(s.test_bidi_base(), LTR)
+        s = self.screen(bidi_auto_direction=True)
+        self.ae(s.test_bidi_base(), AUTO)
+        parse_bytes(s, b'\x1b[8l')
+        self.ae(s.test_bidi_base(), NONE)
+        parse_bytes(s, b'\x1b[8h')
+        self.ae(s.test_bidi_base(), AUTO)
+        for seq, want in ((b'\x1b[2 k', RTL), (b'\x1b[1 k', LTR), (b'\x1b[0 k', AUTO), (b'\x1b[2 k', RTL), (b'\x1b[ k', AUTO)):
+            with self.subTest(seq=seq):
+                parse_bytes(s, seq)
+                self.ae(s.test_bidi_base(), want)
+        parse_bytes(s, b'\x1b[2 k')
+        parse_bytes(s, b'\x1b[1;0 k')
+        self.ae(s.test_bidi_base(), LTR)
+        for seq in (b'\x1b[1;2;3 k', b'\x1b[3 k', b'\x1b[?1 k'):
+            with self.subTest(seq=seq):
+                parse_bytes(s, seq)
+                self.ae(s.test_bidi_base(), LTR)
+        parse_bytes(s, b'\x1b[0 k')
+        self.ae(s.test_bidi_base(), AUTO)
+        parse_bytes(s, b'\x1b[?2501l')
+        self.ae(s.test_bidi_base(), LTR)
+        parse_bytes(s, b'\x1b[?2501h')
+        self.ae(s.test_bidi_base(), AUTO)
+        s = self.screen(bidi_auto_direction=False)
+        parse_bytes(s, b'\x1b[?2501h')
+        self.ae(s.test_bidi_base(), AUTO)
+        parse_bytes(s, b'\x1b[?2501l')
+        self.ae(s.test_bidi_base(), LTR)
+        parse_bytes(s, b'\x1b[2 k')
+        self.ae(s.test_bidi_base(), RTL)
+        s = self.screen(bidi_auto_direction=False)
+        c = s.callbacks
+        parse_bytes(s, b'\x1b[4;8l')
+        self.ae(s.test_bidi_base(), NONE)
+        parse_bytes(s, b'\x1b[4$p')
+        self.ae(c.wtcbuf, b'\x1b[4;2$y')
+        c.clear()
+        parse_bytes(s, b'\x1b[4;8h')
+        self.ae(s.test_bidi_base(), LTR)
+        parse_bytes(s, b'\x1b[4$p')
+        self.ae(c.wtcbuf, b'\x1b[4;1$y')
+        c.clear()
+        for seq, want in (
+            (b'\x1b[8$p', b'\x1b[8;1$y'),
+            (b'\x1b[8l\x1b[8$p', b'\x1b[8;2$y'),
+            (b'\x1b[8h\x1b[8$p', b'\x1b[8;1$y'),
+            (b'\x1b[?2501$p', b'\x1b[?2501;2$y'),
+            (b'\x1b[?2501h\x1b[?2501$p', b'\x1b[?2501;1$y'),
+            (b'\x1b[?2501l\x1b[?2501$p', b'\x1b[?2501;2$y'),
+        ):
+            with self.subTest(seq=seq):
+                parse_bytes(s, seq)
+                self.ae(c.wtcbuf, want)
+                c.clear()
+        s = self.screen(bidi_auto_direction=True)
+        c = s.callbacks
+        parse_bytes(s, b'\x1b[?2501$p')
+        self.ae(c.wtcbuf, b'\x1b[?2501;1$y')
+
+    def test_bidi_control_lifetime(self):
+        NONE, LTR, RTL, AUTO = range(4)
+        s = self.screen(bidi_auto_direction=True)
+        parse_bytes(s, b'\x1b[2 k')
+        parse_bytes(s, b'\x1b7\x1b[8l\x1b8')
+        self.ae(s.test_bidi_base(), NONE)
+        s.draw(A)
+        s.resize(s.lines + 1, s.columns + 3)
+        s.resize(s.lines, s.columns - 2)
+        self.ae(s.test_bidi_base(), NONE)
+        parse_bytes(s, b'\x1b[8h')
+        self.ae(s.test_bidi_base(), RTL)
+        s.draw(A)
+        parse_bytes(s, b'\x1b[2J\x1b[H')
+        self.ae(s.test_bidi_base(), RTL)
+        for seq in (b'\x1bc', b'\x1b[!p'):
+            with self.subTest(seq=seq):
+                s = self.screen(bidi_auto_direction=True)
+                parse_bytes(s, b'\x1b[8l\x1b[2 k\x1b[?2501l')
+                self.ae(s.test_bidi_base(), NONE)
+                parse_bytes(s, b'\x1b[?1049h')
+                parse_bytes(s, b'\x1b[8h\x1b[1 k')
+                self.ae(s.test_bidi_base(), LTR)
+                parse_bytes(s, seq)
+                self.ae(s.test_bidi_base(), AUTO)
+                parse_bytes(s, b'\x1b[?1049l')
+                self.ae(s.test_bidi_base(), AUTO)
+        for mode in (b'1049', b'47', b'1047'):
+            with self.subTest(mode=mode):
+                s = self.screen(bidi_auto_direction=False)
+                parse_bytes(s, b'\x1b[2 k')
+                parse_bytes(s, b'\x1b[?' + mode + b'h')
+                self.ae(s.test_bidi_base(), RTL)
+                parse_bytes(s, b'\x1b[8l')
+                self.ae(s.test_bidi_base(), NONE)
+                parse_bytes(s, b'\x1b[?' + mode + b'l')
+                self.ae(s.test_bidi_base(), RTL)
+                parse_bytes(s, b'\x1b[8l\x1b[?' + mode + b'h')
+                self.ae(s.test_bidi_base(), NONE)
+                parse_bytes(s, b'\x1b[8h\x1b[1 k')
+                self.ae(s.test_bidi_base(), LTR)
+                parse_bytes(s, b'\x1b[?' + mode + b'l')
+                self.ae(s.test_bidi_base(), NONE)

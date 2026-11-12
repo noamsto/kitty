@@ -88,6 +88,12 @@ typedef struct {
 
 
 typedef struct {
+    bool explicit_mode;
+    uint8_t direction; // 0 default, 1 LTR, 2 RTL
+    int8_t auto_detect; // -1 follow the option, 0 off, 1 on
+} BidiControl;
+
+typedef struct {
     PyObject *overlay_text;
     CPUCell *cpu_cells;
     GPUCell *gpu_cells;
@@ -229,6 +235,7 @@ typedef struct {
         GraphicsManager *grman;
         Selections selections, url_ranges;
         ExtraCursors extra_cursors;
+        BidiBase base;
     } paused_rendering;
     CharsetState charset;
     ListOfChars *lc;
@@ -248,6 +255,7 @@ typedef struct {
         DnDCommand metadata;
     } dnd_chunking;
     BidiMaps bidi;
+    BidiControl bidi_control[2]; // main, alt
 } Screen;
 
 #define live_pixel_scroll_enabled(screen) (OPT(pixel_scroll) && (screen)->linebuf == (screen)->main_linebuf)
@@ -367,6 +375,11 @@ void screen_report_size(Screen *, unsigned which, unsigned modifier);
 void screen_manipulate_title_stack(Screen *, unsigned int op, unsigned int which);
 bool screen_is_overlay_active(Screen *self);
 index_type screen_overlay_line_start(const Screen *self);
+BidiBase screen_bidi_base(Screen *self);
+void screen_set_bidi_direction(Screen *self, unsigned int direction);
+void screen_cursor_visual(Screen *self, index_type x, index_type y, CursorShape shape, index_type *col, bool *mirrored);
+index_type screen_cursor_render_x(Screen *self, CursorShape shape, bool *mirrored);
+index_type screen_ime_anchor_x(Screen *self);
 void screen_update_overlay_text(Screen *self, const char *utf8_text, int preedit_cursor);
 bool screen_ime_text_around_cursor(Screen *self, char **before, char **after);
 void screen_set_key_encoding_flags(Screen *self, uint32_t val, uint32_t how);

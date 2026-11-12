@@ -1270,10 +1270,7 @@ cell_update_uniform_block(
             colors_for_cell(line_for_cursor, cp, &cell_color_x, &cell_fg, &cell_bg, &reversed);
             const CPUCell *cursor_cell;
             const bool large_cursor = ((cursor_cell = &line_for_cursor->cpu_cells[cursor->x])->is_multicell) && cursor_cell->x == 0 && cursor_cell->y == 0;
-            if (screen->bidi.v2l) {
-                const index_type span = (cursor_cell->is_multicell && cursor_cell->x == 0) ? mcd_x_limit(cursor_cell) : 1;
-                rd->cursor_x1 = rd->cursor_x2 = bidi_visual_left_x(&screen->bidi, cursor->y + pixel_scroll_enabled(screen), cursor->x, span);
-            }
+            rd->cursor_x1 = rd->cursor_x2 = cursor->visual_x;
             if (large_cursor) {
                 switch (cs) {
                     case CURSOR_BEAM: rd->cursor_y2 += cursor_cell->scale - 1; break;

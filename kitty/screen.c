@@ -116,6 +116,18 @@ static void update_overlay_line_data(Screen *self, uint8_t *data);
         else Py_DECREF(callback_ret);                                               \
     }
 
+static inline BidiControl *
+active_bidi_control(Screen *self) {
+    return &self->bidi_control[self->linebuf == self->main_linebuf ? 0 : 1];
+}
+
+static void
+bidi_control_reset(BidiControl *c) {
+    c->explicit_mode = false;
+    c->direction = 0;
+    c->auto_detect = -1;
+}
+
 static PyObject *
 new_screen_object(PyTypeObject *type, PyObject *args, PyObject UNUSED *kwds) {
     Screen *self;
@@ -142,6 +154,8 @@ new_screen_object(PyTypeObject *type, PyObject *args, PyObject UNUSED *kwds) {
             Py_CLEAR(self);
             return PyErr_NoMemory();
         }
+        bidi_control_reset(&self->bidi_control[0]);
+        bidi_control_reset(&self->bidi_control[1]);
         self->reload_all_gpu_data = true;
         self->cell_size.width = cell_width;
         self->cell_size.height = cell_height;
@@ -219,6 +233,8 @@ do_screen_reset(Screen *self, bool is_hard_reset) {
     self->main_pointer_shape_stack.count = 0;
     self->alternate_pointer_shape_stack.count = 0;
     if (is_hard_reset && self->linebuf == self->alt_linebuf) screen_toggle_screen_buffer(self, true, true);
+    bidi_control_reset(&self->bidi_control[0]);
+    bidi_control_reset(&self->bidi_control[1]);
     if (screen_is_overlay_active(self)) {
         deactivate_overlay_line(self);
         // Cancel IME composition
@@ -1983,6 +1999,7 @@ screen_toggle_screen_buffer(Screen *self, bool save_cursor, bool clear_alt_scree
     self->active_hyperlink_id = 0;
     reset_pixel_scroll(self, 0);
     if (to_alt) {
+        self->bidi_control[1] = self->bidi_control[0];
         if (clear_alt_screen) {
             linebuf_clear(self->alt_linebuf, BLANK_CHAR);
             grman_clear(self->alt_grman, true, self->cell_size);
@@ -2076,6 +2093,8 @@ set_mode_from_const(Screen *self, unsigned int mode, bool val) {
             }
             break;
         case CONTROL_CURSOR_BLINK: self->cursor->non_blinking = !val; break;
+        case BDSM: active_bidi_control(self)->explicit_mode = !val; break;
+        case BIDI_AUTODETECT: active_bidi_control(self)->auto_detect = val; break;
         case SAVE_CURSOR: screen_save_cursor(self); break;
         case TOGGLE_ALT_SCREEN_1:
         case TOGGLE_ALT_SCREEN_2:
@@ -3379,6 +3398,11 @@ report_mode_status(Screen *self, unsigned int which, bool private) {
         case MOUSE_UTF8_MODE: ans = self->modes.mouse_tracking_protocol == UTF8_PROTOCOL ? 1 : 2; break;
         case MOUSE_SGR_PIXEL_MODE: ans = self->modes.mouse_tracking_protocol == SGR_PIXEL_PROTOCOL ? 1 : 2; break;
         case PENDING_UPDATE: ans = self->paused_rendering.expires_at ? 1 : 2; break;
+        case BDSM: ans = active_bidi_control(self)->explicit_mode ? 2 : 1; break;
+        case BIDI_AUTODETECT: {
+            const BidiControl *c = active_bidi_control(self);
+            ans = (c->auto_detect >= 0 ? c->auto_detect : OPT(bidi_auto_direction)) ? 1 : 2;
+        } break;
     }
     int sz = snprintf(buf, sizeof(buf) - 1, "%s%u;%u$y", (private ? "?" : ""), which, ans);
     if (sz > 0) write_escape_code_to_child(self, ESC_CSI, buf);
@@ -3908,6 +3932,7 @@ screen_pause_rendering(Screen *self, bool pause, int for_in_ms) {
     if (for_in_ms <= 0) for_in_ms = 2000;
     self->paused_rendering.expires_at = monotonic() + ms_to_monotonic_t(for_in_ms);
     self->paused_rendering.inverted = self->modes.mDECSCNM;
+    self->paused_rendering.base = screen_bidi_base(self);
     self->paused_rendering.scrolled_by = self->scrolled_by;
     self->paused_rendering.cell_data_updated = false;
     self->paused_rendering.cursor_visible = self->modes.mDECTCEM;
@@ -5424,6 +5449,59 @@ screen_overlay_line_start(const Screen *self) {
     return MIN(ol->xstart, xstart);
 }
 
+BidiBase
+screen_bidi_base(Screen *self) {
+    const BidiControl *c = active_bidi_control(self);
+    if (c->explicit_mode) return BIDI_BASE_NONE;
+    if (c->direction == BIDI_DIR_LTR) return BIDI_BASE_LTR;
+    if (c->direction == BIDI_DIR_RTL) return BIDI_BASE_RTL;
+    return (c->auto_detect >= 0 ? c->auto_detect : OPT(bidi_auto_direction)) ? BIDI_BASE_AUTO : BIDI_BASE_LTR;
+}
+
+void
+screen_set_bidi_direction(Screen *self, unsigned int direction) {
+    if (direction > BIDI_DIR_RTL) {
+        log_error("%s %s %u", ERROR_PREFIX, "Unsupported bidi direction: ", direction);
+        return;
+    }
+    active_bidi_control(self)->direction = direction;
+}
+
+void
+screen_cursor_visual(Screen *self, index_type x, index_type y, CursorShape shape UNUSED, index_type *col, bool *mirrored) {
+    *col = x;
+    *mirrored = false;
+    if (!self->bidi.v2l || x >= self->columns) return;
+    LineBuf *lb = self->paused_rendering.expires_at ? self->paused_rendering.linebuf : self->linebuf;
+    index_type span = 1;
+    if (y < lb->ynum) {
+        const CPUCell *c = linebuf_cpu_cells_for_line(lb, y) + x;
+        if (c->is_multicell && c->x == 0) span = mcd_x_limit(c);
+    }
+    *col = bidi_visual_left_x(&self->bidi, y + pixel_scroll_enabled(self), x, span);
+}
+
+index_type
+screen_cursor_render_x(Screen *self, CursorShape shape, bool *mirrored) {
+    index_type x, y;
+    if (screen_is_overlay_active(self)) {
+        x = self->overlay_line.cursor_x;
+        y = self->overlay_line.ynum;
+    } else {
+        const Cursor *cursor = self->paused_rendering.expires_at ? &self->paused_rendering.cursor : self->cursor;
+        x = cursor->x;
+        y = cursor->y;
+    }
+    index_type col;
+    screen_cursor_visual(self, x, y, shape, &col, mirrored);
+    return col;
+}
+
+index_type
+screen_ime_anchor_x(Screen *self) {
+    return screen_is_overlay_active(self) ? screen_overlay_line_start(self) : self->cursor->x;
+}
+
 static void
 screen_draw_overlay_line(Screen *self) {
     if (!self->overlay_line.overlay_text) return;
@@ -5553,7 +5631,7 @@ render_overlay_line(Screen *self, Line *line, FONTS_DATA_HANDLE fonts_data) {
     line_save_cells(line, 0, line->xnum, ol.gpu_cells, ol.cpu_cells);
     line_reset_cells(line, 0, line->xnum, ol.original_line.gpu_cells, ol.original_line.cpu_cells);
     ol.is_dirty = false;
-    const index_type x = screen_overlay_line_start(self), y = MIN(ol.ynum + self->scrolled_by, self->lines - 1);
+    const index_type x = screen_ime_anchor_x(self), y = MIN(ol.ynum + self->scrolled_by, self->lines - 1);
     // The IME is anchored at the start of the pre-edit text, see prepare_ime_position_update_event()
     if (ol.last_ime_pos.x != x || ol.last_ime_pos.y != y) {
         ol.last_ime_pos.x = x;
@@ -7601,6 +7679,53 @@ test_bidi_line_flag(Screen *self, PyObject *args) {
 }
 
 static PyObject *
+test_bidi_base(Screen *self, PyObject *a UNUSED) {
+    return PyLong_FromLong(screen_bidi_base(self));
+}
+
+static PyObject *
+test_cursor_visual(Screen *self, PyObject *args) {
+    unsigned x, y, shape;
+    if (!PyArg_ParseTuple(args, "III", &x, &y, &shape)) return NULL;
+    index_type col;
+    bool mirrored;
+    screen_cursor_visual(self, x, y, shape, &col, &mirrored);
+    return Py_BuildValue("(IO)", (unsigned)col, mirrored ? Py_True : Py_False);
+}
+
+static PyObject *
+test_cursor_render_x(Screen *self, PyObject *args) {
+    unsigned shape;
+    if (!PyArg_ParseTuple(args, "I", &shape)) return NULL;
+    bool mirrored;
+    const index_type col = screen_cursor_render_x(self, shape, &mirrored);
+    return Py_BuildValue("(IO)", (unsigned)col, mirrored ? Py_True : Py_False);
+}
+
+static PyObject *
+test_ime_anchor_x(Screen *self, PyObject *a UNUSED) {
+    return PyLong_FromUnsignedLong(screen_ime_anchor_x(self));
+}
+
+static PyObject *
+test_bidi_leading_mark(Screen *self UNUSED, PyObject *args) {
+    unsigned y;
+    if (!PyArg_ParseTuple(args, "I", &y)) return NULL;
+    return PyLong_FromLong(0);
+}
+
+static PyObject *
+test_bidi_line_rendered_with_bidi(Screen *self, PyObject *args) {
+    unsigned y;
+    if (!PyArg_ParseTuple(args, "I", &y)) return NULL;
+    if (y >= self->lines) {
+        PyErr_SetString(PyExc_IndexError, "y out of range");
+        return NULL;
+    }
+    return PyBool_FromLong(self->linebuf->line_attrs[y].rendered_with_bidi);
+}
+
+static PyObject *
 test_bidi_paused_dirty_lines(Screen *self, PyObject *a UNUSED) {
     RAII_PyObject(ans, PyList_New(0));
     if (!ans) return NULL;
@@ -7821,6 +7946,12 @@ static PyMethodDef methods[] = {
     METHODB(test_bidi_is_rtl, METH_VARARGS),
     METHODB(test_bidi_line_flag, METH_VARARGS),
     METHODB(test_bidi_paused_dirty_lines, METH_NOARGS),
+    METHODB(test_bidi_base, METH_NOARGS),
+    METHODB(test_cursor_visual, METH_VARARGS),
+    METHODB(test_cursor_render_x, METH_VARARGS),
+    METHODB(test_ime_anchor_x, METH_NOARGS),
+    METHODB(test_bidi_leading_mark, METH_VARARGS),
+    METHODB(test_bidi_line_rendered_with_bidi, METH_VARARGS),
     METHODB(test_bidi_resolve_count, METH_NOARGS),
     METHODB(test_bidi_trim, METH_O),
     METHODB(test_bidi_paragraph_rtl, METH_VARARGS),

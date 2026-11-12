@@ -11,6 +11,7 @@
 #include <fribidi.h>
 
 typedef enum { BIDI_DIR_GUESS = 0, BIDI_DIR_LTR = 1, BIDI_DIR_RTL = 2 } BidiDirection;
+typedef enum { BIDI_BASE_NONE, BIDI_BASE_LTR, BIDI_BASE_RTL, BIDI_BASE_AUTO } BidiBase;
 
 // Uses OPT() from state.h, which cannot be included here as it includes screen.h
 #define bidi_enabled() (OPT(bidi_reorder) && !OPT(force_ltr))
