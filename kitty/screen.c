@@ -2950,8 +2950,6 @@ screen_erase_in_line(Screen *self, unsigned int how, bool private) {
         default: break;
     }
     if (n > 0) {
-        const CPUCell *c0 = linebuf_cpu_cells_for_line(self->linebuf, self->cursor->y);
-        const bool clears_mark = s == 0 && (how != 0 || c0->ch_is_idx || (c0->ch_or_idx != 0 && c0->ch_or_idx != ' '));
         nuke_multicell_char_intersecting_with(self, s, s + n, self->cursor->y, self->cursor->y + 1, false);
         screen_dirty_line_graphics(self, self->cursor->y, self->cursor->y, self->linebuf == self->main_linebuf);
         linebuf_init_line(self->linebuf, self->cursor->y);
@@ -2960,9 +2958,8 @@ screen_erase_in_line(Screen *self, unsigned int how, bool private) {
         } else {
             line_apply_cursor(self->linebuf->line, self->cursor, s, n, true);
         }
-        // The mark sits before cell 0: an erase that includes cell 0 clears it,
-        // except EL 0 over a blank cell 0, as in RLM, EL 0, then the text
-        if (clears_mark) self->linebuf->line_attrs[self->cursor->y].leading_mark = 0;
+        // The mark sits before cell 0, so only an erase that includes cell 0 clears it
+        if (how == 1 || how == 2) self->linebuf->line_attrs[self->cursor->y].leading_mark = 0;
         self->is_dirty = true;
         clear_intersecting_selections(self, self->cursor->y);
         linebuf_mark_line_dirty(self->linebuf, self->cursor->y);
