@@ -2102,8 +2102,14 @@ set_mode_from_const(Screen *self, unsigned int mode, bool val) {
             }
             break;
         case CONTROL_CURSOR_BLINK: self->cursor->non_blinking = !val; break;
-        case BDSM: active_bidi_control(self)->explicit_mode = !val; break;
-        case BIDI_AUTODETECT: active_bidi_control(self)->auto_detect = val; break;
+        case BDSM: {
+            BidiControl *c = active_bidi_control(self);
+            if (c->explicit_mode != !val) { c->explicit_mode = !val; self->is_dirty = true; }
+        } break;
+        case BIDI_AUTODETECT: {
+            BidiControl *c = active_bidi_control(self);
+            if (c->auto_detect != val) { c->auto_detect = val; self->is_dirty = true; }
+        } break;
         case SAVE_CURSOR: screen_save_cursor(self); break;
         case TOGGLE_ALT_SCREEN_1:
         case TOGGLE_ALT_SCREEN_2:
@@ -3409,7 +3415,7 @@ report_mode_status(Screen *self, unsigned int which, bool private) {
         case MOUSE_UTF8_MODE: ans = self->modes.mouse_tracking_protocol == UTF8_PROTOCOL ? 1 : 2; break;
         case MOUSE_SGR_PIXEL_MODE: ans = self->modes.mouse_tracking_protocol == SGR_PIXEL_PROTOCOL ? 1 : 2; break;
         case PENDING_UPDATE: ans = self->paused_rendering.expires_at ? 1 : 2; break;
-        case BDSM: ans = active_bidi_control(self)->explicit_mode ? 2 : 1; break;
+        case BDSM: ans = !bidi_enabled() || active_bidi_control(self)->explicit_mode ? 2 : 1; break;
         case BIDI_AUTODETECT: {
             const BidiControl *c = active_bidi_control(self);
             ans = (c->auto_detect >= 0 ? c->auto_detect : OPT(bidi_auto_direction)) ? 1 : 2;
@@ -5487,7 +5493,8 @@ screen_set_bidi_direction(Screen *self, unsigned int direction) {
         log_error("%s %s %u", ERROR_PREFIX, "Unsupported bidi direction: ", direction);
         return;
     }
-    active_bidi_control(self)->direction = direction;
+    BidiControl *c = active_bidi_control(self);
+    if (c->direction != direction) { c->direction = direction; self->is_dirty = true; }
 }
 
 static index_type
@@ -8137,6 +8144,7 @@ static PyMemberDef members[] = {
     {"main_linebuf", T_OBJECT_EX, offsetof(Screen, main_linebuf), READONLY, "main_linebuf"},
     {"historybuf", T_OBJECT_EX, offsetof(Screen, historybuf), READONLY, "historybuf"},
     {"command_running", T_BOOL, offsetof(Screen, command_state.running), READONLY, "command_running"},
+    {"is_dirty", T_BOOL, offsetof(Screen, is_dirty), READONLY, "is_dirty"},
     {"command_started_at", T_LONGLONG, offsetof(Screen, command_state.started_at), READONLY, "command_started_at"},
     {"command_finished_at", T_LONGLONG, offsetof(Screen, command_state.finished_at), READONLY, "command_finished_at"},
     {"alternate_screen_entered_at", T_LONGLONG, offsetof(Screen, alternate_screen.entered_at), READONLY, "alternate_screen_entered_at"},

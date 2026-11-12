@@ -1139,6 +1139,7 @@ class Screen:
     scrolled_by: int
     pixel_scroll_offset_y: int
     command_running: bool
+    is_dirty: bool
     command_started_at: int
     command_finished_at: int
     alternate_screen_entered_at: int

@@ -1946,6 +1946,33 @@ class TestBidi(BaseTest):
         c = s.callbacks
         parse_bytes(s, b'\x1b[?2501$p')
         self.ae(c.wtcbuf, b'\x1b[?2501;1$y')
+        # bidi_reorder off is the master switch: nothing is reordered, so BDSM
+        # reports reset (explicit) whatever was set, a documented deviation
+        s = self.screen(bidi_reorder=False, bidi_auto_direction=False)
+        c = s.callbacks
+        for seq in (b'\x1b[8$p', b'\x1b[8h\x1b[8$p', b'\x1b[8l\x1b[8$p'):
+            with self.subTest(bidi_reorder=False, seq=seq):
+                parse_bytes(s, seq)
+                self.ae(c.wtcbuf, b'\x1b[8;2$y')
+                c.clear()
+
+    def test_bidi_control_change_marks_dirty(self):
+        # The cell data is rebuilt only for a dirty screen, so a change of base
+        # with no output after it must mark the screen dirty; setting the value
+        # it already has must not
+        with setup_for_testing():
+            s = self.screen(bidi_auto_direction=False)
+            s.draw('abc ' + A)
+            for seq, dirty in (
+                (b'\x1b[8h', False), (b'\x1b[8l', True), (b'\x1b[8l', False), (b'\x1b[8h', True),
+                (b'\x1b[0 k', False), (b'\x1b[1 k', True), (b'\x1b[1 k', False), (b'\x1b[2 k', True), (b'\x1b[0 k', True),
+                (b'\x1b[?2501h', True), (b'\x1b[?2501h', False), (b'\x1b[?2501l', True),
+            ):
+                with self.subTest(seq=seq):
+                    test_screen_update_cell_data(s)
+                    self.assertFalse(s.is_dirty)
+                    parse_bytes(s, seq)
+                    self.assertIs(s.is_dirty, dirty)
 
     def test_bidi_control_lifetime(self):
         NONE, LTR, RTL, AUTO = range(4)
