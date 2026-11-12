@@ -5,7 +5,6 @@
  */
 
 #include "bidi.h"
-#include "state.h"
 
 #define row_of(arr) (b->arr + (size_t)render_row * b->cols)
 
@@ -146,7 +145,7 @@ keys_equal(const BidiFrameKey *a, const BidiFrameKey *k) {
     return a->linebuf == k->linebuf && a->historybuf == k->historybuf && a->linebuf_generation == k->linebuf_generation &&
            a->historybuf_generation == k->historybuf_generation && a->rows == k->rows && a->cols == k->cols &&
            a->scrolled_by == k->scrolled_by && a->row_offset == k->row_offset &&
-           a->auto_direction == k->auto_direction;
+           a->base == k->base;
 }
 
 void
@@ -408,7 +407,7 @@ write_row(BidiMaps *b, index_type render_row, uint32_t row_first_char, uint32_t 
 
 bool
 bidi_resolve_paragraph(BidiMaps *b, BidiCellSource src, void *ctx, int first_y, int last_y, int y_to_render_row,
-    index_type first_render_row, bool cacheable) {
+    index_type first_render_row, bool cacheable, BidiBase base) {
     const int num_rows = last_y - first_y + 1;
     const index_type cols = b->cols;
     FriBidiLevel max_level = 0;
@@ -439,13 +438,17 @@ bidi_resolve_paragraph(BidiMaps *b, BidiCellSource src, void *ctx, int first_y, 
             if (FRIBIDI_IS_EXPLICIT(b->types[i])) { n_trim = n; break; }
         }
     }
-    if (!n_trim) goto no_bidi;
-
     // ON takes the direction of the first strong character (P2-P3) and stays ON when there is none
-    FriBidiParType base_dir = OPT(bidi_auto_direction) ? FRIBIDI_PAR_ON : FRIBIDI_PAR_LTR;
-    b->resolve_count++;
-    // Returns the highest level plus one, or 0 on failure
-    max_level = fribidi_get_par_embedding_levels_ex(b->types, b->brackets, (FriBidiStrIndex)n_trim, &base_dir, b->para_levels);
+    FriBidiParType base_dir = base == BIDI_BASE_RTL ? FRIBIDI_PAR_RTL : base == BIDI_BASE_AUTO ? FRIBIDI_PAR_ON : FRIBIDI_PAR_LTR;
+    if (n_trim) {
+        b->resolve_count++;
+        // Returns the highest level plus one, or 0 on failure
+        max_level = fribidi_get_par_embedding_levels_ex(b->types, b->brackets, (FriBidiStrIndex)n_trim, &base_dir, b->para_levels);
+    } else if (base_dir == FRIBIDI_PAR_RTL) {
+        // All blank under a forced RTL base: every cell takes level 1 below, so the row is reversed
+        b->resolve_count++;
+        max_level = 2;
+    } else goto no_bidi;
     const bool rtl = base_dir == FRIBIDI_PAR_RTL;
     const FriBidiParType line_dir = rtl ? FRIBIDI_PAR_RTL : FRIBIDI_PAR_LTR;
     for (uint32_t i = n_trim; i < n; i++) b->para_levels[i] = rtl ? 1 : 0;

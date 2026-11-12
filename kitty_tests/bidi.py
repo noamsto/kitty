@@ -1986,3 +1986,230 @@ class TestBidi(BaseTest):
                 self.ae(s.test_bidi_base(), LTR)
                 parse_bytes(s, b'\x1b[?' + mode + b'l')
                 self.ae(s.test_bidi_base(), NONE)
+
+    # 'abc אבג' at paragraph level 0: the Hebrew run reversed in place. At
+    # level 1: abc is 2 (I2), the space and the blanks 1 (N2, L1); L2 reverses
+    # abc, then the row, so the row ends at the right edge, trailing blanks
+    # first. 'abc' alone at level 1 maps the same way.
+    LTR_MIXED = (0, 1, 2, 3, 6, 5, 4, 7, 8, 9)
+    RTL_MIXED = (9, 8, 7, 6, 5, 4, 3, 0, 1, 2)
+
+    def test_bdsm_explicit_disables_reordering(self):
+        # Row 0, LTR paragraph: אב(ג) at level 1, the brackets R by N0 (R inside,
+        # R before), so shaped mirrored. Row 1, RTL paragraph (auto, R first):
+        # (1) is R by N0 (EN counts as R), 1 is 2, every other cell 1, so the row
+        # is reversed. CSI 8 l stops reordering on the next frame with no config
+        # reload, so the rows shaped with levels are reshaped on that frame;
+        # CSI 8 h gives the old maps back.
+        rows = ['ab אב(ג)', A + ' (1)']
+        with setup_for_testing():
+            s = self.screen(bidi_auto_direction=True)
+            self.fill(s, rows)
+            test_screen_update_cell_data(s)
+            before = self.maps(s)
+            self.ae(before, ((0, 1, 2, 7, 6, 5, 4, 3, 8, 9), ID10[::-1], None, None, None))
+            self.assertTrue(all(s.test_bidi_line_rendered_with_bidi(y) for y in range(2)))
+            parse_bytes(s, b'\x1b[8l')
+            buf = test_screen_update_cell_data(s)
+            self.ae(self.maps(s), (None,) * s.lines)
+            self.assertFalse(any(s.test_bidi_line_rendered_with_bidi(y) for y in range(2)))
+            parse_bytes(s, b'\x1b[8h')
+            test_screen_update_cell_data(s)
+            self.ae(self.maps(s), before)
+            # made last, as making a screen sets the options
+            f = self.screen(bidi_reorder=False, bidi_auto_direction=True)
+            self.fill(f, rows)
+            self.assert_same_upload(s, buf, f, test_screen_update_cell_data(f), range(2))
+
+    def test_scp_overrides_auto(self):
+        # SCP 1 and 2 force the paragraph direction whatever the autodetection
+        # says; SCP 0 or no parameter gives the option's behaviour back.
+        # A + ' abc' at level 0: the Hebrew run reversed in place, the space
+        # between R and L at the embedding level (N2).
+        s = self.screen(bidi_auto_direction=True)
+        parse_bytes(s, b'\x1b[1 k')
+        self.fill(s, [A + ' abc'])
+        self.ae(self.refresh(s, 0), (2, 1, 0) + ID10[3:])
+        self.assertIs(s.test_bidi_paragraph_rtl(0), False)
+        # A Latin-first row with Hebrew and a Latin-only row both right-aligned,
+        # and an all-blank row all level 1: the full reversal
+        s = self.screen(bidi_auto_direction=False)
+        parse_bytes(s, b'\x1b[2 k')
+        self.fill(s, ['abc ' + A, 'abc'])
+        s.test_bidi_refresh()
+        self.ae(self.maps(s), (self.RTL_MIXED, self.RTL_MIXED) + (ID10[::-1],) * 3)
+        self.ae(s.test_bidi_levels(1), (2, 2, 2) + (1,) * 7)
+        self.assertTrue(all(s.test_bidi_paragraph_rtl(y) for y in range(2)))
+        rows = [A + ' abc', 'abc ' + A, 'abc']
+        for auto in (True, False):
+            f = self.screen(bidi_auto_direction=auto)
+            self.fill(f, rows)
+            f.test_bidi_refresh()
+            want = self.maps(f)
+            for seq in (b'\x1b[0 k', b'\x1b[ k'):
+                with self.subTest(auto=auto, seq=seq):
+                    s = self.screen(bidi_auto_direction=auto)
+                    self.fill(s, rows)
+                    parse_bytes(s, b'\x1b[2 k')
+                    s.test_bidi_refresh()
+                    self.assertNotEqual(self.maps(s), want)
+                    parse_bytes(s, seq)
+                    s.test_bidi_refresh()
+                    self.ae(self.maps(s), want)
+
+    def test_owner_hebrew_first_stays_ltr(self):
+        # A line whose first strong character is Hebrew stays LTR-based when the
+        # program asks for it: שלום reversed in place, the line left-aligned.
+        # Explicit mode shows it in logical order. The default options case
+        # already passed before the direction control: coverage only.
+        ltr = (3, 2, 1, 0) + ID10[4:]
+        for auto, seq, want in (
+            (True, b'\x1b[1 k', ltr),
+            (True, b'\x1b[?2501l', ltr),
+            (True, b'\x1b[8l', None),
+            (False, b'', ltr),
+        ):
+            with self.subTest(auto=auto, seq=seq):
+                s = self.screen(bidi_auto_direction=auto)
+                parse_bytes(s, seq)
+                s.draw('שלום abc')
+                self.ae(self.refresh(s, 0), want)
+                self.ae([s.test_bidi_visual_x(x, 0) for x in range(s.columns)], list(want or ID10))
+                if want:
+                    self.assertIs(s.test_bidi_paragraph_rtl(0), False)
+
+    def test_control_change_reresolves(self):
+        # The effective base is in the frame key: a change of base makes the next
+        # frame resolve the cached paragraphs again (explicit mode resolves
+        # nothing and drops the maps), and the same-class shortcut never keeps
+        # maps across it.
+        NONE, LTR, RTL, AUTO = range(4)
+        rows = ['abc ' + A, A + ' abc']
+        with setup_for_testing():
+            s = self.screen(bidi_auto_direction=False)
+            self.fill(s, rows)
+            self.frame(s)
+            self.warm(s)
+            # no change: the cache holds
+            self.ae(self.frame(s), 0)
+            sent = b''
+            for seq, base in ((b'\x1b[8l', NONE), (b'\x1b[8h', LTR), (b'\x1b[2 k', RTL), (b'\x1b[0 k', LTR), (b'\x1b[?2501h', AUTO)):
+                with self.subTest(seq=seq):
+                    parse_bytes(s, seq)
+                    sent += seq
+                    self.ae(s.test_bidi_base(), base)
+                    count = self.frame(s)
+                    if base == NONE:
+                        self.ae(self.maps(s), (None,) * s.lines)
+                    else:
+                        self.assertGreater(count, 0)
+                    got = self.maps(s)
+                    f = self.screen(bidi_auto_direction=False)
+                    parse_bytes(f, sent)
+                    self.fill(f, rows)
+                    self.frame(f)
+                    self.ae(got, self.maps(f))
+                    self.warm(s)
+                    self.ae(self.frame(s), 0)
+            # x for a, L for L, in the frame of the base change
+            s = self.screen(bidi_auto_direction=False)
+            self.fill(s, rows)
+            self.frame(s)
+            self.warm(s)
+            s.cursor_position(1, 1)
+            s.draw('x')
+            parse_bytes(s, b'\x1b[2 k')
+            count = self.frame(s)
+            self.ae(self.maps(s)[:2], (self.RTL_MIXED, (9, 8, 7, 4, 5, 6, 3, 2, 1, 0)))
+            self.assertGreater(count, 0)
+            got = self.maps(s)
+            f = self.screen(bidi_auto_direction=False)
+            parse_bytes(f, b'\x1b[2 k')
+            self.fill(f, ['x' + rows[0][1:], rows[1]])
+            self.frame(f)
+            self.ae(got, self.maps(f))
+            # Entering and leaving the alternate screen (47 keeps its content)
+            # resolve again: coverage, as the linebuf was in the key already
+            s = self.screen(bidi_auto_direction=False)
+            self.fill(s, rows)
+            parse_bytes(s, b'\x1b[?47h')
+            self.fill(s, rows[::-1])
+            self.frame(s)
+            self.warm(s)
+            parse_bytes(s, b'\x1b[?47l')
+            self.assertGreater(self.frame(s), 0)
+            self.warm(s)
+            parse_bytes(s, b'\x1b[?47h')
+            self.assertGreater(self.frame(s), 0)
+
+    def test_paused_frame_uses_paused_base(self):
+        # A paused frame renders its snapshot with the base captured when the
+        # pause began; a base sent during the pause applies when it ends.
+        with setup_for_testing():
+            s = self.screen(bidi_auto_direction=False)
+            s.draw('abc ' + A)
+            self.frame(s)
+            self.warm(s)
+            parse_bytes(s, b'\x1b[?2026h')
+            parse_bytes(s, b'\x1b[2 k')
+            self.frame(s)
+            self.ae(s.test_bidi_v2l(0), self.LTR_MIXED)
+            parse_bytes(s, b'\x1b[?2026l')
+            self.frame(s)
+            self.ae(s.test_bidi_v2l(0), self.RTL_MIXED)
+            # sent before the pause with no live frame between: the snapshot
+            # goes with the new base, not with the last live frame's
+            s = self.screen(bidi_auto_direction=False)
+            s.draw('abc ' + A)
+            self.frame(s)
+            self.warm(s)
+            parse_bytes(s, b'\x1b[2 k\x1b[?2026h')
+            self.frame(s)
+            self.ae(s.test_bidi_v2l(0), self.RTL_MIXED)
+            parse_bytes(s, b'\x1b[?2026l')
+            self.frame(s)
+            self.ae(s.test_bidi_v2l(0), self.RTL_MIXED)
+
+    def test_tmux_like_opt_out(self):
+        # A multiplexer's two panes on the alternate screen, the border at
+        # logical column 10. The opt-out is sent on the main screen, which holds
+        # row A too, and carried into the alternate screen on entry.
+        NONE, LTR, RTL, AUTO = range(4)
+        row_a = 'אבג דהו   │ abc def   '  # Hebrew in the left pane only
+        row_b = 'אבג       │ שלום      '  # Hebrew on both sides
+        border = 10
+
+        def run(seq):
+            s = self.screen(cols=22, bidi_auto_direction=True)
+            s.draw(row_a)
+            parse_bytes(s, seq + b'\x1b[?1049h')
+            self.fill(s, [row_a, row_b])
+            for y in range(2):
+                self.refresh(s, y)
+            return s, [s.test_bidi_visual_x(border, y) for y in range(2)]
+
+        def leave(s):
+            parse_bytes(s, b'\x1b[?1049l')
+            self.refresh(s, 0)
+            return s.test_bidi_base(), s.test_bidi_visual_x(border, 0)
+
+        # No opt-out: both rows R first, so RTL paragraphs at level 1, every
+        # cell but abc def at level 1, the row reversed: the border moves
+        s, cols = run(b'')
+        self.ae(cols, [11, 11])
+        self.assertTrue(all(s.test_bidi_paragraph_rtl(y) for y in range(2)))
+        self.ae(leave(s), (AUTO, 11))
+        # Explicit mode: nothing is reordered, the borders stay put
+        s, cols = run(b'\x1b[8l')
+        self.ae([s.test_bidi_v2l(y) for y in range(2)], [None, None])
+        self.ae(cols, [border, border])
+        self.ae(leave(s), (NONE, border))
+        self.assertIsNone(s.test_bidi_v2l(0))
+        # LTR: row A's border is between R and L, at the embedding level (N2),
+        # 0, so it stays. Row B's is between R and R, so R (N1) in any paragraph
+        # direction: columns 0-15 form one level 1 run, reversed in place, and
+        # the border moves to 15 - 10. This is the documented limit of SCP 1.
+        s, cols = run(b'\x1b[1 k')
+        self.ae(cols, [border, 5])
+        self.assertFalse(any(s.test_bidi_paragraph_rtl(y) for y in range(2)))
+        self.ae(leave(s), (LTR, border))

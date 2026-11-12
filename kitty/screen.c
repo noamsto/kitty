@@ -4253,7 +4253,7 @@ bidi_source_line_id(void *ctx, int y) {
 }
 
 static bool
-bidi_paragraph_needs_reordering(BidiParaSource *s, int first, int last) {
+bidi_paragraph_needs_reordering(BidiParaSource *s, int first, int last, BidiBase base) {
     Line l = {0};
     bool flagged = false;
     for (int y = first; y <= last; y++) {
@@ -4261,7 +4261,8 @@ bidi_paragraph_needs_reordering(BidiParaSource *s, int first, int last) {
         if (l.attrs.has_image_placeholders) return false;
         if (l.attrs.has_bidi) flagged = true;
     }
-    if (!flagged) return false;
+    // A forced RTL base right-aligns unflagged paragraphs too
+    if (!flagged && base != BIDI_BASE_RTL) return false;
     for (int y = first; y <= last; y++) {
         const CPUCell *cells = bidi_source_cells_at(s, y);
         for (index_type x = 0; x < s->self->columns; x++) {
@@ -4274,6 +4275,12 @@ bidi_paragraph_needs_reordering(BidiParaSource *s, int first, int last) {
 static const uint8_t *
 screen_bidi_resolve_row(Screen *self, LineBuf *paused, unsigned render_row, int range_y, Line *linep) {
     BidiMaps *b = &self->bidi;
+    // A paused frame goes with the base captured with its snapshot
+    const BidiBase base = paused ? self->paused_rendering.base : (BidiBase)b->key.base;
+    if (base == BIDI_BASE_NONE) {
+        bidi_set_row_inactive(b, render_row);
+        return NULL;
+    }
     if (b->para.valid && b->para.first <= range_y && range_y <= b->para.last) {
         // The first on-screen row of the paragraph set the maps of all its rows
         if (b->para.has_bidi && b->v2l && render_row < b->rows)
@@ -4281,7 +4288,8 @@ screen_bidi_resolve_row(Screen *self, LineBuf *paused, unsigned render_row, int 
         return NULL;
     }
     BidiParaSource src = {.self = self, .paused = paused};
-    if (!linep->attrs.has_bidi && !linep->cpu_cells[linep->xnum - 1].next_char_was_wrapped && !bidi_source_is_continued(&src, range_y)) {
+    if (base != BIDI_BASE_RTL && !linep->attrs.has_bidi && !linep->cpu_cells[linep->xnum - 1].next_char_was_wrapped &&
+            !bidi_source_is_continued(&src, range_y)) {
         bidi_set_row_inactive(b, render_row);
         return NULL;
     }
@@ -4320,7 +4328,7 @@ screen_bidi_resolve_row(Screen *self, LineBuf *paused, unsigned render_row, int 
     }
 
     // The level compare (bidi.c note_line_state) redraws the rows whose levels change
-    const bool needs = bidi_paragraph_needs_reordering(&src, first, last);
+    const bool needs = bidi_paragraph_needs_reordering(&src, first, last, base);
     // The level compare marks lines dirty, this one through linep
     src.current = linep;
     src.current_y = range_y;
@@ -4351,7 +4359,7 @@ screen_bidi_resolve_row(Screen *self, LineBuf *paused, unsigned render_row, int 
     }
     // A paragraph longer than the window can start a new window above this row:
     // the rows above were uploaded with the previous window's maps and keep them
-    if (!bidi_resolve_paragraph(b, cell_source, &src, first, last, y_to_render_row, render_row, cacheable)) return NULL;
+    if (!bidi_resolve_paragraph(b, cell_source, &src, first, last, y_to_render_row, render_row, cacheable, base)) return NULL;
     b->para.has_bidi = true;
     return b->active[render_row] ? b->levels + (size_t)render_row * b->cols : NULL;
 }
@@ -4415,7 +4423,7 @@ screen_bidi_start_frame(Screen *self, bool scroll_changed) {
         .cols = self->columns,
         .scrolled_by = self->scrolled_by,
         .row_offset = pixel_scroll_enabled(self),
-        .auto_direction = OPT(bidi_auto_direction),
+        .base = screen_bidi_base(self),
         .valid = true};
     bidi_frame_begin(&self->bidi, key, scroll_changed);
 }

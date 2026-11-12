@@ -45,7 +45,7 @@ typedef struct BidiFrameKey {
     index_type rows, cols, scrolled_by;
     index_type historybuf_count, historybuf_start, historybuf_ynum; // not compared by keys_equal
     int row_offset;
-    bool auto_direction; // the mode, not the direction: that derives from the text, whose changes dirty rows
+    uint8_t base; // the effective BidiBase: it is not derived from the text, so it is part of the key
     bool valid;
 } BidiFrameKey;
 
@@ -125,7 +125,7 @@ uint64_t *bidi_paused_line_ids(BidiMaps *b, index_type rows);
 // first_render_row (rows already uploaded this frame keep their maps). Returns
 // true when at least one of those rows got a map.
 bool bidi_resolve_paragraph(BidiMaps *b, BidiCellSource src, void *ctx, int first_y, int last_y, int y_to_render_row,
-    index_type first_render_row, bool cacheable);
+    index_type first_render_row, bool cacheable, BidiBase base);
 // True when line y, at render_row, still feeds FriBidi the classes and bracket
 // types, in the same cells, as when its current map was written by a cacheable
 // resolve. Resolves nothing.
