@@ -5510,8 +5510,11 @@ cursor_visual_in_row(Screen *self, index_type x, index_type y, index_type render
     *col = x;
     *mirrored = false;
     if (!self->bidi.v2l) return;
-    LineBuf *lb = self->paused_rendering.expires_at ? self->paused_rendering.linebuf : self->linebuf;
-    const CPUCell *cells = y < lb->ynum ? linebuf_cpu_cells_for_line(lb, y) : NULL;
+    // The paused snapshot is indexed by render row, as the maps are
+    const bool paused = self->paused_rendering.expires_at;
+    LineBuf *lb = paused ? self->paused_rendering.linebuf : self->linebuf;
+    const index_type row = paused ? render_row : y;
+    const CPUCell *cells = row < lb->ynum ? linebuf_cpu_cells_for_line(lb, row) : NULL;
     if (x > 0 && x <= self->columns) {
         // After an RTL character the next RTL character appears at its visual left edge
         index_type p = x - 1;

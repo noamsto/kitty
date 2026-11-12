@@ -2494,6 +2494,23 @@ class TestBidi(BaseTest):
         s.draw('abc')
         self.ae(self.cursor_cells(s, 3), {k: (3, False) for k in ('beam', 'block', 'underline', 'hollow')})
 
+    def test_cursor_after_rtl_char_paused_pixel_scroll(self):
+        # With pixel scroll the paused snapshot has a leading row, so its row
+        # y + 1 is screen row y. The cursor is in the blank after the Hebrew run
+        # of row 1, with a letter above it in row 0: a block read from the wrong
+        # row sees the letter and stays at 6 instead of moving left of the run.
+        with setup_for_testing():
+            s = self.screen(pixel_scroll=True, bidi_auto_direction=False)
+            parse_bytes(s, f'abcdefgh\r\nls {A}'.encode())
+            self.ae((s.cursor.x, s.cursor.y), (6, 1))
+            self.frame(s)
+            live = s.test_cursor_render_x(CURSOR_BLOCK)
+            self.ae(live, (2, False))
+            parse_bytes(s, b'\x1b[?2026h')
+            self.frame(s)
+            self.ae(s.test_cursor_render_x(CURSOR_BLOCK), live)
+            self.ae(s.test_cursor_visual(6, 1, CURSOR_BLOCK), live)
+
     def test_cursor_block_over_char_after_rtl(self):
         # שלומd, auto off: with the cursor on the d the block must keep covering
         # it, at its visual column. A beam is an insertion point, so it goes to
