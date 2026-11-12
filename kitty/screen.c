@@ -5497,18 +5497,45 @@ screen_set_bidi_direction(Screen *self, unsigned int direction) {
     active_bidi_control(self)->direction = direction;
 }
 
+static index_type
+cursor_cell_span(const CPUCell *cells, index_type x) {
+    return cells && cells[x].is_multicell && cells[x].x == 0 ? mcd_x_limit(&cells[x]) : 1;
+}
+
 void
-screen_cursor_visual(Screen *self, index_type x, index_type y, CursorShape shape UNUSED, index_type *col, bool *mirrored) {
+screen_cursor_visual(Screen *self, index_type x, index_type y, CursorShape shape, index_type *col, bool *mirrored) {
     *col = x;
     *mirrored = false;
-    if (!self->bidi.v2l || x >= self->columns) return;
+    if (!self->bidi.v2l) return;
     LineBuf *lb = self->paused_rendering.expires_at ? self->paused_rendering.linebuf : self->linebuf;
-    index_type span = 1;
-    if (y < lb->ynum) {
-        const CPUCell *c = linebuf_cpu_cells_for_line(lb, y) + x;
-        if (c->is_multicell && c->x == 0) span = mcd_x_limit(c);
+    const CPUCell *cells = y < lb->ynum ? linebuf_cpu_cells_for_line(lb, y) : NULL;
+    const index_type render_row = y + pixel_scroll_enabled(self);
+    if (x > 0 && x <= self->columns) {
+        // After an RTL character the next RTL character appears at its visual left edge
+        index_type p = x - 1;
+        while (p && cells && cells[p].is_multicell && cells[p].x) p--;
+        if (bidi_cell_is_rtl(&self->bidi, render_row, p)) {
+            const index_type left = bidi_visual_left_x(&self->bidi, render_row, p, cursor_cell_span(cells, p));
+            if (shape == CURSOR_BEAM) {
+                *col = left ? left - 1 : 0;
+                *mirrored = left > 0;
+                return;
+            }
+            // Under a character the block stays on it, so only a blank cell moves
+            const bool blank = x == self->columns || !cells || (!cells[x].ch_is_idx && (cells[x].ch_or_idx == 0 || cells[x].ch_or_idx == ' '));
+            if (blank) {
+                *col = left ? left - 1 : 0;
+                return;
+            }
+        }
     }
-    *col = bidi_visual_left_x(&self->bidi, y + pixel_scroll_enabled(self), x, span);
+    if (x >= self->columns) return;
+    const index_type span = cursor_cell_span(cells, x);
+    *col = bidi_visual_left_x(&self->bidi, render_row, x, span);
+    if (shape == CURSOR_BEAM && bidi_cell_is_rtl(&self->bidi, render_row, x)) {
+        *mirrored = true;
+        *col += span - 1;
+    }
 }
 
 index_type

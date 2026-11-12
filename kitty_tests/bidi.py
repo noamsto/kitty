@@ -6,7 +6,7 @@ import struct
 import tempfile
 from collections import namedtuple
 
-from kitty.fast_data_types import test_screen_update_cell_data
+from kitty.fast_data_types import CURSOR_BEAM, CURSOR_BLOCK, CURSOR_HOLLOW, CURSOR_UNDERLINE, test_screen_update_cell_data
 from kitty.fonts.render import setup_for_testing, shape_string
 
 from .base import BaseTest, draw_multicell, parse_bytes
@@ -2333,3 +2333,169 @@ class TestBidi(BaseTest):
                     self.ae(self.maps(s), want)
                     self.ae(s.test_bidi_leading_mark(0), 2 if mark else 0)
                     self.warm(s)
+
+    def cursor_cells(self, s, x, y=0):
+        # what the shader draws for the cursor cell (x, y), for each shape
+        s.test_bidi_refresh()
+        return {
+            'beam': s.test_cursor_visual(x, y, CURSOR_BEAM),
+            'block': s.test_cursor_visual(x, y, CURSOR_BLOCK),
+            'underline': s.test_cursor_visual(x, y, CURSOR_UNDERLINE),
+            'hollow': s.test_cursor_visual(x, y, CURSOR_HOLLOW),
+        }
+
+    def test_beam_mirrored_in_rtl_cell(self):
+        # RTL paragraph (auto): אבג is level 1 in a level 1 row, v2l = 9..0, so
+        # logical x is at visual 9 - x. On the first letter there is no
+        # preceding character: the beam goes in the cell's own column, mirrored
+        # so that it is on the right edge, the leading edge of an RTL cell.
+        s = self.screen(bidi_auto_direction=True)
+        s.draw(A)
+        got = self.cursor_cells(s, 0)
+        self.ae(s.test_bidi_visual_x(0, 0), 9)
+        self.ae(got['beam'], (9, True))
+        # block, underline and hollow never mirror
+        self.ae((got['block'], got['underline'], got['hollow']), ((9, False),) * 3)
+        # in the RTL paragraph a letter after a Hebrew one is level 2: its beam
+        # is on the Hebrew letter's left edge (rule 1), and a Hebrew letter after
+        # it has an LTR character before it (rule 2)
+        s = self.screen(bidi_auto_direction=True)
+        s.draw('אaב')
+        self.ae(self.refresh(s, 0), ID10[::-1])
+        self.ae(s.test_bidi_levels(0)[:3], (1, 2, 1))
+        self.ae(self.cursor_cells(s, 1)['beam'], (8, True))
+        self.ae(self.cursor_cells(s, 2)['beam'], (7, True))
+        # an LTR cell after an LTR one is not mirrored
+        s = self.screen(bidi_auto_direction=True)
+        s.draw('אab')
+        self.refresh(s, 0)
+        self.ae(s.test_bidi_levels(0)[:3], (1, 2, 2))
+        self.ae(s.test_bidi_visual_x(2, 0), 8)
+        self.ae(self.cursor_cells(s, 2)['beam'], (8, False))
+        # LTR paragraph (auto off): abc then אב at cols 3 and 4, reversed to 4, 3
+        s = self.screen(bidi_auto_direction=False)
+        s.draw('abcאב')
+        self.ae(self.refresh(s, 0), (0, 1, 2, 4, 3) + ID10[5:])
+        # Latin cells: never mirrored
+        for x in range(3):
+            self.ae(self.cursor_cells(s, x)['beam'], (x, False))
+        # the first Hebrew cell, after a Latin letter: rule 2, mirrored
+        got = self.cursor_cells(s, 3)
+        self.ae((got['beam'], got['block'], got['underline']), ((4, True), (4, False), (4, False)))
+        # the second, after a Hebrew letter: rule 1 puts the beam on the left
+        # edge of the preceding one (visual 4), in the cell left of it
+        self.ae(self.cursor_cells(s, 4)['beam'], (3, True))
+        # a wide char at level 1: אבג after 😀 in an RTL paragraph, the emoji
+        # is between sos (R) and R, so N1 makes it level 1. Its two cells are
+        # at visual 8 and 9. There is no preceding character: the beam is in
+        # the rightmost column of the span, mirrored; a block starts at the left
+        s = self.screen(bidi_auto_direction=True)
+        s.draw('😀' + A)
+        self.refresh(s, 0)
+        self.ae(s.test_bidi_levels(0)[:2], (1, 1))
+        self.ae(s.test_bidi_visual_x(0, 0, 2) + 1, 9)
+        got = self.cursor_cells(s, 0)
+        self.ae((got['beam'], got['block'], got['underline']), ((9, True), (8, False), (8, False)))
+        # a wide preceding character (rule 1): אב then 😀 at cells 2 and 3, all
+        # level 1 in the RTL paragraph, so the emoji is at visual 7 and 6 and the
+        # blank after it (x=4) is drawn just left of it, at 5
+        s = self.screen(bidi_auto_direction=True)
+        s.draw('אב😀')
+        self.refresh(s, 0)
+        self.ae(s.test_bidi_levels(0)[:4], (1, 1, 1, 1))
+        self.ae(s.test_bidi_visual_x(2, 0, 2), 6)
+        got = self.cursor_cells(s, 4)
+        self.ae((got['beam'], got['block'], got['underline'], got['hollow']), ((5, True), (5, False), (5, False), (5, False)))
+
+    def test_cursor_after_rtl_char(self):
+        # The owner case: ls שלום in an LTR paragraph (auto off). The Hebrew
+        # run is level 1 at cols 3..6 and is drawn reversed, v2l 0 1 2 6 5 4 3.
+        # The cursor, in the blank at logical 7, is where the next Hebrew letter
+        # will appear: left of the run.
+        s = self.screen(bidi_auto_direction=False)
+        s.draw('ls שלום')
+        self.ae(self.refresh(s, 0), (0, 1, 2, 6, 5, 4, 3) + ID10[7:])
+        self.ae(s.cursor.x, 7)
+        self.ae(s.test_bidi_visual_x(6, 0), 3)
+        got = self.cursor_cells(s, 7)
+        self.ae(got['block'], (2, False))
+        self.ae(got['underline'], (2, False))
+        self.ae(got['hollow'], (2, False))
+        self.ae(got['beam'], (2, True))
+        # after Latin: the cursor stays on its own cell
+        s = self.screen(bidi_auto_direction=False)
+        s.draw('ls abc')
+        self.ae(self.cursor_cells(s, 6), {k: (6, False) for k in ('beam', 'block', 'underline', 'hollow')})
+        # after digits inside an RTL run: the digits are level 2, which is
+        # LTR, so the cursor is drawn at its own cell (rule 2)
+        s = self.screen(bidi_auto_direction=False)
+        s.draw(A + ' 12')
+        self.refresh(s, 0)
+        self.ae(s.test_bidi_levels(0)[:6], (1, 1, 1, 1, 2, 2))
+        self.ae(s.test_bidi_visual_x(6, 0), 6)
+        self.ae(self.cursor_cells(s, 6), {k: (6, False) for k in ('beam', 'block', 'underline', 'hollow')})
+        # RTL paragraph (auto): the text is at 7..9; the blank after it is at 6
+        # whether or not the preceding character counts, the beam is on the
+        # text's left edge, that is, in the cell left of it, mirrored
+        s = self.screen(bidi_auto_direction=True)
+        s.draw(A)
+        self.refresh(s, 0)
+        self.ae(s.test_bidi_visual_x(3, 0), 6)
+        got = self.cursor_cells(s, 3)
+        self.ae((got['block'], got['underline'], got['beam']), ((6, False), (6, False), (6, True)))
+        # a run at the left edge of the row: nothing to its left, the cursor
+        # is on column 0 and not mirrored
+        s = self.screen(bidi_auto_direction=False)
+        s.draw(A)
+        self.ae(self.refresh(s, 0), (2, 1, 0) + ID10[3:])
+        self.ae(self.cursor_cells(s, 3), {k: (0, False) for k in ('beam', 'block', 'underline', 'hollow')})
+        # an inactive row has no map: the cursor is at x
+        s = self.screen(bidi_auto_direction=False)
+        s.draw('abc')
+        self.ae(self.cursor_cells(s, 3), {k: (3, False) for k in ('beam', 'block', 'underline', 'hollow')})
+
+    def test_cursor_block_over_char_after_rtl(self):
+        # שלומd, auto off: with the cursor on the d the block must keep covering
+        # it, at its visual column. A beam is an insertion point, so it goes to
+        # the run's left edge, which is column 0: not mirrored.
+        s = self.screen(bidi_auto_direction=False)
+        s.draw('שלום' + 'd')
+        self.ae(self.refresh(s, 0), (3, 2, 1, 0, 4) + ID10[5:])
+        got = self.cursor_cells(s, 4)
+        self.ae((got['block'], got['underline'], got['hollow']), ((4, False),) * 3)
+        self.ae(got['beam'], (0, False))
+        # with a prefix the run's left edge has a cell to its left to mirror in
+        s = self.screen(bidi_auto_direction=False)
+        s.draw('ab' + 'שלום' + 'd')
+        self.ae(self.refresh(s, 0), (0, 1, 5, 4, 3, 2, 6) + ID10[7:])
+        got = self.cursor_cells(s, 6)
+        self.ae((got['block'], got['underline'], got['hollow']), ((6, False),) * 3)
+        self.ae(got['beam'], (1, True))
+        # a space is blank: the block moves
+        s = self.screen(bidi_auto_direction=False)
+        s.draw('ab' + 'שלום' + ' d')
+        self.refresh(s, 0)
+        got = self.cursor_cells(s, 6)
+        self.ae((got['block'], got['underline'], got['beam']), ((1, False), (1, False), (1, True)))
+
+    def test_cursor_pending_wrap_after_rtl(self):
+        # The row is full: the cursor is at x == columns, no cell of its own.
+        # Hebrew last: the run is at 6..9, so the cursor is left of it, at 5.
+        s = self.screen(bidi_auto_direction=False)
+        s.draw('abcdef' + 'אבגד')
+        self.ae(s.cursor.x, 10)
+        self.ae(self.refresh(s, 0), (0, 1, 2, 3, 4, 5, 9, 8, 7, 6))
+        got = self.cursor_cells(s, 10)
+        self.ae((got['block'], got['underline'], got['hollow']), ((5, False),) * 3)
+        self.ae(got['beam'], (5, True))
+        # Latin last: unchanged, the cursor is at the pending column
+        s = self.screen(bidi_auto_direction=False)
+        s.draw('אבגד' + 'abcdef')
+        self.ae(s.cursor.x, 10)
+        self.refresh(s, 0)
+        self.ae(self.cursor_cells(s, 10), {k: (10, False) for k in ('beam', 'block', 'underline', 'hollow')})
+        # no RTL on the row: unchanged
+        s = self.screen(bidi_auto_direction=False)
+        s.draw('abcdefghij')
+        self.ae(s.cursor.x, 10)
+        self.ae(self.cursor_cells(s, 10), {k: (10, False) for k in ('beam', 'block', 'underline', 'hollow')})

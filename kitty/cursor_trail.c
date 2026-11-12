@@ -29,10 +29,13 @@ update_cursor_trail_target(CursorTrail *ct, Window *w, ndc_coords g) {
             right = left + g.dx;
             top = bottom + g.dy;
             break;
-        case CURSOR_BEAM:
-            right = left + g.dx / WD.screen->cell_size.width * OPT(cursor_beam_thickness);
+        case CURSOR_BEAM: {
+            const float beam_width = g.dx / WD.screen->cell_size.width * OPT(cursor_beam_thickness);
+            if (WD.screen->cursor_render_info.beam_mirrored) left += g.dx - beam_width;
+            right = left + beam_width;
             top = bottom + g.dy;
             break;
+        }
         case CURSOR_UNDERLINE:
             right = left + g.dx;
             top = bottom + g.dy / WD.screen->cell_size.height * OPT(cursor_underline_thickness);

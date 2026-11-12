@@ -39,6 +39,10 @@ public struct CellRenderData {
     // must have unique entries with 0 being default_bg and unset being UINT32_MAX
     public uint bg_colors0, bg_colors1, bg_colors2, bg_colors3, bg_colors4, bg_colors5, bg_colors6, bg_colors7;
     public float bg_opacities0, bg_opacities1, bg_opacities2, bg_opacities3, bg_opacities4, bg_opacities5, bg_opacities6, bg_opacities7;
+
+    // Set for a beam cursor in an RTL cell, it is drawn on the cell's right edge.
+    // Must stay last, the C struct mirroring this one appends it the same way.
+    public uint cursor_beam_mirrored;
 };
 
 // Uniform Blocks (adjust binding slots as needed for your pipeline layout)
@@ -235,6 +239,7 @@ public struct CellData {
     public float reverse_video_cursor;
     public uint2 pos;
     public uint cursor_fg_sprite_idx;
+    public uint cursor_mirror;
     public ColorPair cursor;
 };
 
@@ -329,6 +334,7 @@ compute_background(uint3 colors, uint2 sprite_idx, uint is_selected, uint instan
         if_one_then(has_main_cursor, float(crd.main_cursor_is_special), max(explicit_extra_reverse_video, inherited_reverse_video));
     cell_data.pos = pos;
     cell_data.cursor_fg_sprite_idx = cursor_shape_map[int(final_cursor_shape)];
+    cell_data.cursor_mirror = uint(has_main_cursor) * crd.cursor_beam_mirrored;
     cell_data.cursor = cursor;
     // }}}
 

@@ -825,8 +825,8 @@ collect_cursor_info(CursorRenderInfo *ans, Window *w, monotonic_t now, OSWindow 
         ans->x = cursor->x;
         ans->y = cursor->y;
     }
-    bool mirrored;
-    ans->visual_x = screen_cursor_render_x(rd->screen, cursor->shape ? cursor->shape : OPT(cursor_shape), &mirrored);
+    const CursorShape shape = cursor->shape ? cursor->shape : OPT(cursor_shape);
+    ans->visual_x = screen_cursor_render_x(rd->screen, cursor_shape_drawn(os_window->is_focused, shape), &ans->beam_mirrored);
     ans->is_visible = false;
     ans->multicursor_count = 0;
     ans->cursor_opacity = 1;
@@ -856,7 +856,7 @@ collect_cursor_info(CursorRenderInfo *ans, Window *w, monotonic_t now, OSWindow 
     }
     ans->text_blink_opacity = blink_opacity;
     ans->cursor_opacity = cursor_blinking ? blink_opacity : 1.0f;
-    ans->shape = cursor->shape ? cursor->shape : OPT(cursor_shape);
+    ans->shape = shape;
     ans->is_focused = os_window->is_focused;
     return cursor_needs_render(w);
 }

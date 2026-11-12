@@ -777,6 +777,11 @@ sprite_index_to_pos(unsigned idx, unsigned xnum, unsigned ynum, unsigned *x, uns
     *x = r2.rem;
 }
 
+static inline CursorShape
+cursor_shape_drawn(bool is_focused, CursorShape shape) {
+    return (is_focused || OPT(cursor_shape_unfocused) == NO_CURSOR_SHAPE) ? shape : OPT(cursor_shape_unfocused);
+}
+
 
 void initialize_gpu(void);
 void free_vao(ssize_t vao_idx);
