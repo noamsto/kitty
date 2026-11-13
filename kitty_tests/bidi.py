@@ -70,6 +70,41 @@ class TestBidi(BaseTest):
                 pb(s, '\x1b[8h' + x)
                 self.ae(self.records(s, 0), [LTR])
 
+    def test_c1_only_draw_does_not_stamp(self):
+        for x in ('\u0085', '\u0080\u009f', '\x7f'):
+            with self.subTest(x=x):
+                s = self.screen()
+                pb(s, 'abc')
+                pb(s, '\x1b[8h' + x)
+                self.ae(self.records(s, 0), [NONE])
+        s = self.screen()
+        pb(s, 'abc\x1b[8h\u0085d')
+        self.ae(self.records(s, 0), [LTR])
+
+    def test_wrapping_first_char_stamps_the_row_it_lands_on(self):
+        for x in ('X', '\tX', '\x07X'):
+            with self.subTest(x=x):
+                s = self.screen(cols=5)
+                pb(s, 'abcde\x1b[8h' + x)
+                self.ae(self.records(s, 0, 1), [NONE, LTR])
+        with self.subTest(x='wide'):
+            s = self.screen(cols=5)
+            pb(s, 'abcd\x1b[8h\u4e16')
+            self.ae(self.records(s, 0, 1), [NONE, LTR])
+        for x in ('\rX', '\x08X'):
+            with self.subTest(x=x):  # still lands on row 0
+                s = self.screen(cols=5)
+                pb(s, 'abcde\x1b[8h' + x)
+                self.ae(self.records(s, 0, 1), [LTR, NONE])
+        with self.subTest(x='no autowrap'):
+            s = self.screen(cols=5)
+            pb(s, '\x1b[?7labcde\x1b[8hX')
+            self.ae(self.records(s, 0, 1), [LTR, NONE])
+        with self.subTest(x='wide fits'):
+            s = self.screen(cols=5)
+            pb(s, 'abc\x1b[8h\u4e16')
+            self.ae(self.records(s, 0, 1), [LTR, NONE])
+
     def test_bidi_control_parse(self):
         # (setup, SCP sequence, direction after)
         for setup, seq, rtl in (

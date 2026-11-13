@@ -1040,6 +1040,8 @@ dealloc(Screen *self) {
 typedef struct text_loop_state {
     bool image_placeholder_marked;
     bool bdsm;
+    // the bidi record to write into a line first written to in implicit mode, set when bdsm
+    uint8_t bidi_record;
     const CPUCell cc;
     CPUCell *cp;
     GraphemeSegmentationResult seg;
@@ -1144,21 +1146,47 @@ set_bidi_record(LineAttrs *a, LineAttrs r) {
 }
 
 static void __attribute__((noinline, cold))
-stamp_line_for_bidi(Screen *self, index_type y) {
+stamp_line_for_bidi(Screen *self, index_type y, uint8_t record) {
+    // A line without a record has all its record bits clear, so the record
+    // is one OR.
     LineAttrs *a = self->linebuf->line_attrs + y;
     if (a->bidi_stamp) return;
-    set_bidi_record(a, current_bidi_record(self));
+    a->val |= record;
     self->linebuf->bidi_stamped = true;
 }
 
 static void __attribute__((noinline, cold))
-stamp_line_at_draw_start(Screen *self, const uint32_t *chars, size_t num_chars) {
-    // A draw call that only moves the cursor (CR, BEL, a leading LF) must not
-    // record the line it starts on: that line may hold explicit-mode text.
+stamp_line_at_draw_start(Screen *self, text_loop_state *s, const uint32_t *chars, size_t num_chars) {
+    // Record only the line the first printable char lands on. A draw call that
+    // only moves the cursor (CR, BEL, a leading LF) must not record the line it
+    // starts on, as that line may hold explicit-mode text. Neither must one
+    // whose first printable char wraps off the line: that char is stamped on
+    // the line it wraps to.
+    const bool wraps = self->modes.mDECAWM;
+    bool pending_wrap = self->cursor->x >= self->columns;
+    // The column is only known until a BS or HT moves the cursor
+    index_type x = self->cursor->x;
+    bool x_known = true;
     for (size_t i = 0; i < num_chars; i++) {
         const uint32_t ch = chars[i];
         if (ch == LF || ch == VT || ch == FF) return;
-        if (ch >= ' ' && ch != DEL) { stamp_line_for_bidi(self, self->cursor->y); return; }
+        if (ch == CR) { pending_wrap = false; x = 0; x_known = true; continue; }
+        if (ch == BS) { pending_wrap = x_known = false; continue; }
+        if (ch == HT) {
+            if (pending_wrap && wraps) return;
+            pending_wrap = x_known = false;
+            continue;
+        }
+        if (ch < ' ' || ch == DEL) continue;
+        unsigned width = 1;
+        if (ch > DEL) {
+            const CharProps cp = char_props_for(ch);
+            if (cp.is_invalid) continue;  // C1 controls are dropped
+            width = wcwidth_std(cp) == 2 ? 2 : 1;
+        }
+        if (wraps && (pending_wrap || (x_known && x + width > self->columns && width <= self->columns))) return;
+        stamp_line_for_bidi(self, self->cursor->y, s->bidi_record);
+        return;
     }
 }
 
@@ -1193,7 +1221,7 @@ init_text_loop_line(Screen *self, text_loop_state *s, bool stamp) {
     linebuf_init_cells(self->linebuf, self->cursor->y, &s->cp, NULL);
     clear_intersecting_selections(self, self->cursor->y);
     linebuf_mark_line_dirty(self->linebuf, self->cursor->y);
-    if (UNLIKELY(s->bdsm) && stamp) stamp_line_for_bidi(self, self->cursor->y);
+    if (UNLIKELY(s->bdsm) && stamp) stamp_line_for_bidi(self, self->cursor->y, s->bidi_record);
     s->image_placeholder_marked = false;
     s->line_has_no_multicell = false;
     init_segmentation_state(self, s);
@@ -1910,7 +1938,10 @@ draw_non_ascii_run(Screen *self, text_loop_state *s, const uint32_t *chars, size
 static void
 draw_text_loop(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_state *s) {
     init_text_loop_line(self, s, false);
-    if (UNLIKELY(s->bdsm)) stamp_line_at_draw_start(self, chars, num_chars);
+    if (UNLIKELY(s->bdsm)) {
+        s->bidi_record = current_bidi_record(self).val;
+        stamp_line_at_draw_start(self, s, chars, num_chars);
+    }
     int char_width;
 #define TEMPLATE_CELLS 16
     CPUCell cpu_template[TEMPLATE_CELLS];
@@ -2173,7 +2204,7 @@ handle_fixed_width_multicell_command(Screen *self, CPUCell mcd, ListOfChars *lc)
     for (index_type y = self->cursor->y; y < self->cursor->y + height; y++) {
         linebuf_init_cells(self->linebuf, y, &s.cp, NULL);
         linebuf_mark_line_dirty(self->linebuf, y);
-        if (UNLIKELY(s.bdsm)) stamp_line_for_bidi(self, y);
+        if (UNLIKELY(s.bdsm)) stamp_line_for_bidi(self, y, current_bidi_record(self).val);
         mcd.x = 0;
         mcd.y = y - self->cursor->y;
         for (index_type x = self->cursor->x; x < self->cursor->x + width; x++, mcd.x++) {
