@@ -1159,12 +1159,10 @@ stamp_line_for_bidi(Screen *self, index_type y, uint8_t record) {
 
 static void __attribute__((noinline, cold))
 stamp_line_at_draw_start(Screen *self, text_loop_state *s, const uint32_t *chars, size_t num_chars) {
-    // Record only the line the first character that is written lands on. A draw
-    // call that only moves the cursor (CR, BEL, a leading LF) must not record
-    // the line it starts on, as that line may hold explicit-mode text. Neither
-    // must one whose first character wraps off the line: it is stamped on the
-    // line it wraps to, as are the lines BS and HT wrap to. The column is
-    // tracked through the controls that move it, following draw_text_loop.
+    // Record only the line the first written character lands on, never the
+    // line the draw call starts on if that character wraps off it or nothing is
+    // written: that line may hold explicit-mode text. The column is tracked
+    // through CR, BS and HT the way draw_text_loop moves it.
     const bool wraps = self->modes.mDECAWM;
     index_type x = self->cursor->x;
     for (size_t i = 0; i < num_chars; i++) {
