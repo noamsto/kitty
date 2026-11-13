@@ -212,6 +212,8 @@ static Line *range_line_(Screen *self, int y);
 static void reset_style_table_if_unused(Screen *self);
 
 static void rederive_blank_bidi_records(LineBuf *lb, LineAttrs record);
+static uint32_t map_char(Screen *self, const uint32_t ch);
+static bool cursor_within_margins(Screen *self);
 
 static void
 clamp_scroll_position(Screen *self) {
@@ -1157,24 +1159,33 @@ stamp_line_for_bidi(Screen *self, index_type y, uint8_t record) {
 
 static void __attribute__((noinline, cold))
 stamp_line_at_draw_start(Screen *self, text_loop_state *s, const uint32_t *chars, size_t num_chars) {
-    // Record only the line the first printable char lands on. A draw call that
-    // only moves the cursor (CR, BEL, a leading LF) must not record the line it
-    // starts on, as that line may hold explicit-mode text. Neither must one
-    // whose first printable char wraps off the line: that char is stamped on
-    // the line it wraps to.
+    // Record only the line the first character that is written lands on. A draw
+    // call that only moves the cursor (CR, BEL, a leading LF) must not record
+    // the line it starts on, as that line may hold explicit-mode text. Neither
+    // must one whose first character wraps off the line: it is stamped on the
+    // line it wraps to, as are the lines BS and HT wrap to. The column is
+    // tracked through the controls that move it, following draw_text_loop.
     const bool wraps = self->modes.mDECAWM;
-    bool pending_wrap = self->cursor->x >= self->columns;
-    // The column is only known until a BS or HT moves the cursor
     index_type x = self->cursor->x;
-    bool x_known = true;
     for (size_t i = 0; i < num_chars; i++) {
-        const uint32_t ch = chars[i];
+        const uint32_t ch = map_char(self, chars[i]);
         if (ch == LF || ch == VT || ch == FF) return;
-        if (ch == CR) { pending_wrap = false; x = 0; x_known = true; continue; }
-        if (ch == BS) { pending_wrap = x_known = false; continue; }
+        if (ch == CR) { x = 0; continue; }
+        if (ch == BS) {
+            if (x > self->columns - 1) x = self->columns - 1;
+            else if (x > 0) x--;
+            else if (self->cursor->y != (cursor_within_margins(self) && self->modes.mDECOM ? self->margin_top : 0)) return;
+            continue;
+        }
         if (ch == HT) {
-            if (pending_wrap && wraps) return;
-            pending_wrap = x_known = false;
+            if (x >= self->columns) {
+                if (wraps) return;
+                x = self->columns - 1;
+                continue;
+            }
+            index_type found = 0;
+            for (index_type k = x + 1; k < self->columns && !found; k++) if (self->tabstops[k]) found = k;
+            x = found ? found : self->columns - 1;
             continue;
         }
         if (ch < ' ' || ch == DEL) continue;
@@ -1182,9 +1193,17 @@ stamp_line_at_draw_start(Screen *self, text_loop_state *s, const uint32_t *chars
         if (ch > DEL) {
             const CharProps cp = char_props_for(ch);
             if (cp.is_invalid) continue;  // C1 controls are dropped
-            width = wcwidth_std(cp) == 2 ? 2 : 1;
+            const int w = wcwidth_std(cp);
+            // a zero width char joins the cell before the cursor, none at the start of a line
+            if (w == 0) {
+                if (x == 0) continue;
+                stamp_line_for_bidi(self, self->cursor->y, s->bidi_record);
+                return;
+            }
+            width = w == 2 ? 2 : 1;
         }
-        if (wraps && (pending_wrap || (x_known && x + width > self->columns && width <= self->columns))) return;
+        if (width > self->columns) continue;  // discarded
+        if (wraps && x + width > self->columns) return;
         stamp_line_for_bidi(self, self->cursor->y, s->bidi_record);
         return;
     }

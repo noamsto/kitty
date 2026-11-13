@@ -100,6 +100,32 @@ class TestBidi(BaseTest):
             s = self.screen(cols=5)
             pb(s, '\x1b[?7labcde\x1b[8hX')
             self.ae(self.records(s, 0, 1), [LTR, NONE])
+        for pre, x in (('abcde', '\x08\u4e16'), ('abc', '\t\u4e16'), ('abcdefgh\r', '\t\u4e16')):
+            with self.subTest(pre=pre, x=x):  # BS and HT leave the column at the last one
+                s = self.screen(cols=9 if pre.startswith('abcdefgh') else 5)
+                pb(s, pre + '\x1b[8h' + x)
+                self.ae(self.records(s, 0, 1), [NONE, LTR])
+        for x in ('\u0301', '\u200b'):
+            with self.subTest(x=x, case='zero width joins the last cell'):
+                s = self.screen(cols=5)
+                pb(s, 'abcde\x1b[8h' + x)
+                self.ae(self.records(s, 0, 1), [LTR, NONE])
+            with self.subTest(x=x, case='zero width at the line start is dropped'):
+                s = self.screen(cols=5)
+                pb(s, 'abc\r\x1b[8h' + x)
+                self.ae(self.records(s, 0), [NONE])
+        with self.subTest(x='wider than the line'):
+            s = self.screen(cols=1)
+            pb(s, 'a\r\x1b[8h\u4e16')
+            self.ae(self.records(s, 0), [NONE])
+        with self.subTest(x='BS to the previous line'):
+            s = self.screen(cols=5)
+            pb(s, 'abc\r\nxyz\r\x1b[8h\x08Q')
+            self.ae(self.records(s, 1), [NONE])
+        with self.subTest(x='charset maps a control to a glyph'):
+            s = self.screen(cols=5)
+            pb(s, '\x1b(U\x1b[8h\x01')
+            self.ae(self.records(s, 0), [LTR])
         with self.subTest(x='wide fits'):
             s = self.screen(cols=5)
             pb(s, 'abc\x1b[8h\u4e16')
