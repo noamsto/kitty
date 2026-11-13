@@ -19,6 +19,7 @@ typedef struct {
     LineAttrs *line_attrs;
     Line *line;
     TextCache *text_cache;
+    bool bidi_stamped; // set by the first bidi record written into this buffer, cleared only by RIS
 } LineBuf;
 
 
