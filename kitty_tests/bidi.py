@@ -69,12 +69,6 @@ class TestBidi(BaseTest):
                 pb(s, 'abc')
                 pb(s, '\x1b[8h' + x)
                 self.ae(self.records(s, 0), [LTR])
-        s = self.screen()
-        pb(s, '\x1b[8h\x1b[2 ka\r\x1b[2K\x1b[1 kb')
-        self.ae(self.records(s, 0), [LTR])
-        s = self.screen()
-        pb(s, '\x1b[8h\x1b[2 ka\r\x1b[K\x1b[8l')
-        self.ae(self.records(s, 0), [NONE])
 
     def test_bidi_control_parse(self):
         # (setup, SCP sequence, direction after)
@@ -194,6 +188,12 @@ class TestBidi(BaseTest):
         self.ae(self.records(s, 0), [LTR])
         pb(s, '\x1b[2 k' + CUP(1) + '\x1b[2K\x1b[2 k' + CUP(1) + 'c')
         self.ae(self.records(s, 0), [LTR])
+        s = self.screen()
+        pb(s, '\x1b[8h\x1b[2 ka\r\x1b[2K\x1b[1 kb')  # EL leaves no text, so the change re-derives
+        self.ae(self.records(s, 0), [LTR])
+        s = self.screen()
+        pb(s, '\x1b[8h\x1b[2 ka\r\x1b[K\x1b[8l')
+        self.ae(self.records(s, 0), [NONE])
         s = self.screen()
         pb(s, '\x1b[8h\x1b[2 ka\x1b[1 k' + CUP(1) + '\x1b[L' + CUP(1) + 'b')
         self.ae(self.records(s, 0, 1), [LTR, RTL])
