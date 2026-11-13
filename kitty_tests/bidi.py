@@ -8,6 +8,8 @@ from collections import namedtuple
 
 from kitty.fast_data_types import CURSOR_BEAM, CURSOR_BLOCK, CURSOR_HOLLOW, CURSOR_UNDERLINE, test_screen_update_cell_data
 from kitty.fonts.render import setup_for_testing, shape_string
+from kitty.options.parse import parse_conf_item
+from kitty.options.types import defaults
 
 from .base import BaseTest, draw_multicell, parse_bytes
 from .fonts import testing_font_data
@@ -148,9 +150,6 @@ class TestBidi(BaseTest):
         return rows[0]
 
     def test_auto_direction_option_default(self):
-        from kitty.options.parse import parse_conf_item
-        from kitty.options.types import defaults
-
         self.assertIs(defaults.bidi_auto_direction, False)
         ans = {}
         parse_conf_item('bidi_auto_direction', 'yes', ans)
@@ -680,7 +679,6 @@ class TestBidi(BaseTest):
         self.ae([x is not None for x in m], [True] * 3 + [False] * 2)
         up, down = (lambda s: s.scroll(1, True)), (lambda s: s.scroll(1, False))
         rev = tuple(range(12, -1, -1))
-        add_line = lambda s: parse_bytes(s, '\x1b[3;1H\nאב'.encode())  # noqa: E731
         # (name, build, trigger, expected maps, compare with a fresh screen)
         cases = (
             ('index', lambda: self.filled(rows), lambda s: parse_bytes(s, b'\x1b[5;1H\x1bD'), self.plain_maps(rows[1:], lines=5), True),
@@ -689,7 +687,13 @@ class TestBidi(BaseTest):
             ('scrollback view', lambda: self.history(hist), up, self.plain_maps(hist[5:], 5, lines=3), False),
             ('view crossing bottom edge', bottom_build, up, (None, None, None, m[0], m[1]), False),
             ('view crossing top edge', top_build, down, (m[1], m[2], None, None, None), False),
-            ('history add while scrolled', lambda: self.history(hist[:6], 2), add_line, self.plain_maps(hist[2:5], 5), False),
+            (
+                'history add while scrolled',
+                lambda: self.history(hist[:6], 2),
+                lambda s: parse_bytes(s, '\x1b[3;1H\nאב'.encode()),
+                self.plain_maps(hist[2:5], 5),
+                False,
+            ),
             ('resize rewrap', lambda: self.drawn(long_row), lambda s: s.resize(5, 13), (rev, None, None, None, None), True),
         )
         for name, build, trigger, expect, fresh in cases:
@@ -1033,7 +1037,6 @@ class TestBidi(BaseTest):
             s.scroll(3, True)
             return s
 
-        paused = lambda s: (s.pause_rendering(True, 1000), self.frame(s), s.pause_rendering(False))  # noqa: E731
         cases = (
             ('dirty row', basic, lambda s: parse_bytes(s, b'\x1b[4;4H\xd7\x93'), base),
             ('index', basic, lambda s: parse_bytes(s, b'\x1b[5;1H\x1bD'), (mix, rev, rev, None, None)),
@@ -1042,7 +1045,7 @@ class TestBidi(BaseTest):
             ('view scroll, bottom edge', lambda: edge('x0\r\nx1\r\nx2\r\n' + para), lambda s: s.scroll(1, True), (None, None, None, rev5, rev5)),
             ('view scroll, top edge', edge_top, lambda s: s.scroll(1, False), (rev5, rev5, None, None, None)),
             ('resize with rewrap', lambda: scr(long), lambda s: s.resize(5, 13), (tuple(range(12, -1, -1)), None, None, None, None)),
-            ('pause', basic, paused, base),
+            ('pause', basic, lambda s: (s.pause_rendering(True, 1000), self.frame(s), s.pause_rendering(False)), base),
         )
         for name, build, trigger, expect in cases:
             with self.subTest(name):
