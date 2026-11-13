@@ -1151,10 +1151,22 @@ stamp_line_for_bidi(Screen *self, index_type y) {
     self->linebuf->bidi_stamped = true;
 }
 
+static void __attribute__((noinline, cold))
+stamp_line_at_draw_start(Screen *self, const uint32_t *chars, size_t num_chars) {
+    // A draw call that only moves the cursor (CR, BEL, a leading LF) must not
+    // record the line it starts on: that line may hold explicit-mode text.
+    for (size_t i = 0; i < num_chars; i++) {
+        const uint32_t ch = chars[i];
+        if (ch == LF || ch == VT || ch == FF) return;
+        if (ch >= ' ' && ch != DEL) { stamp_line_for_bidi(self, self->cursor->y); return; }
+    }
+}
+
 static void
 rederive_blank_bidi_records(LineBuf *lb, LineAttrs record) {
-    // A record on a line with no text came from the cursor arriving, not from
-    // a write, so it follows the controls until text is written.
+    // A line with no text, whether the cursor only arrived there or its text
+    // was erased, carries nothing written, so its record follows the controls
+    // until text is written.
     if (!lb->bidi_stamped) return;
     for (index_type y = 0; y < lb->ynum; y++) {
         if (!lb->line_attrs[y].bidi_stamp) continue;
@@ -1172,7 +1184,7 @@ bidi_controls_changed(Screen *self) {
 }
 
 static inline __attribute__((always_inline)) void
-init_text_loop_line(Screen *self, text_loop_state *s) {
+init_text_loop_line(Screen *self, text_loop_state *s, bool stamp) {
     // Also collect garbage in the text cache when starting a new line, not just
     // when starting to draw text, as a single draw can add a great many entries,
     // for example, when drawing a long stream of unique multi-codepoint cells,
@@ -1181,7 +1193,7 @@ init_text_loop_line(Screen *self, text_loop_state *s) {
     linebuf_init_cells(self->linebuf, self->cursor->y, &s->cp, NULL);
     clear_intersecting_selections(self, self->cursor->y);
     linebuf_mark_line_dirty(self->linebuf, self->cursor->y);
-    if (UNLIKELY(s->bdsm)) stamp_line_for_bidi(self, self->cursor->y);
+    if (UNLIKELY(s->bdsm) && stamp) stamp_line_for_bidi(self, self->cursor->y);
     s->image_placeholder_marked = false;
     s->line_has_no_multicell = false;
     init_segmentation_state(self, s);
@@ -1192,7 +1204,7 @@ init_text_loop_line(Screen *self, text_loop_state *s) {
 static inline __attribute__((always_inline)) void
 reinit_text_loop_line(Screen *self, text_loop_state *s) {
     const GraphemeSegmentationResult seg = s->seg;
-    init_text_loop_line(self, s);
+    init_text_loop_line(self, s, true);
     s->seg = seg;
 }
 
@@ -1563,7 +1575,7 @@ move_widened_char_past_multiline_chars(Screen *self, text_loop_state *s, CPUCell
         self->cursor->x++;
     }
     if (self->cursor->y == before) init_segmentation_state(self, s);
-    else init_text_loop_line(self, s);
+    else init_text_loop_line(self, s, true);
 }
 
 static void
@@ -1732,14 +1744,14 @@ draw_control_char(Screen *self, text_loop_state *s, uint32_t ch) {
             index_type before = self->cursor->y;
             screen_backspace(self);
             if (before == self->cursor->y) init_segmentation_state(self, s);
-            else init_text_loop_line(self, s);
+            else init_text_loop_line(self, s, true);
         } break;
         case HT:
             if (UNLIKELY(self->cursor->x >= self->columns)) {
                 if (self->modes.mDECAWM) {
                     // xterm discards the TAB in this case so match its behavior
                     continue_to_next_line(self);
-                    init_text_loop_line(self, s);
+                    init_text_loop_line(self, s, true);
                 } else if (self->columns > 0) {
                     self->cursor->x = self->columns - 1;
                     if (s->cp[self->cursor->x].is_multicell) {
@@ -1760,7 +1772,7 @@ draw_control_char(Screen *self, text_loop_state *s, uint32_t ch) {
             // and the cursor ends up on the bottom line, which is cleared
             const bool scrolls = self->cursor->y == self->margin_bottom;
             screen_linefeed(self);
-            init_text_loop_line(self, s);
+            init_text_loop_line(self, s, true);
             s->line_has_no_multicell = scrolls && self->cursor->y == self->margin_bottom;
         } break;
         case CR:
@@ -1897,7 +1909,8 @@ draw_non_ascii_run(Screen *self, text_loop_state *s, const uint32_t *chars, size
 
 static void
 draw_text_loop(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_state *s) {
-    init_text_loop_line(self, s);
+    init_text_loop_line(self, s, false);
+    if (UNLIKELY(s->bdsm)) stamp_line_at_draw_start(self, chars, num_chars);
     int char_width;
 #define TEMPLATE_CELLS 16
     CPUCell cpu_template[TEMPLATE_CELLS];

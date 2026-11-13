@@ -54,6 +54,28 @@ class TestBidi(BaseTest):
         pb(s, '\x1b[8h\x1b[8l' + CUP(4) + 'c')
         self.ae(self.records(s, 3), [NONE])
 
+    def test_control_only_draw_does_not_stamp(self):
+        for x in ('\r', '\x07', '\n', '\r\n', '\x1b[2 k\n'):
+            with self.subTest(x=x):
+                s = self.screen()
+                pb(s, 'abc')
+                pb(s, '\x1b[8h' + x)
+                self.ae(self.records(s, 0), [NONE])
+                if '\n' in x:
+                    self.assertNotEqual(self.records(s, 1), [NONE])
+        for x in ('def', '\rdef'):
+            with self.subTest(x=x):
+                s = self.screen()
+                pb(s, 'abc')
+                pb(s, '\x1b[8h' + x)
+                self.ae(self.records(s, 0), [LTR])
+        s = self.screen()
+        pb(s, '\x1b[8h\x1b[2 ka\r\x1b[2K\x1b[1 kb')
+        self.ae(self.records(s, 0), [LTR])
+        s = self.screen()
+        pb(s, '\x1b[8h\x1b[2 ka\r\x1b[K\x1b[8l')
+        self.ae(self.records(s, 0), [NONE])
+
     def test_bidi_control_parse(self):
         # (setup, SCP sequence, direction after)
         for setup, seq, rtl in (
@@ -209,6 +231,11 @@ class TestBidi(BaseTest):
             pb(s, '\x1b[8ha\x1b[?1049h\x1b[8hb')
             s.resize(lines, cols)
             self.ae(s.test_bidi_state()[3:], (True, True), (lines, cols))
+        for lines, cols in ((5, 6), (8, 10)):
+            s = self.screen()
+            pb(s, '\x1b[8h\x1b[2 kabc\r\n')
+            s.resize(lines, cols)
+            self.ae(self.records(s, 0), [RTL], (lines, cols))
 
     def test_overlay_does_not_stamp(self):
         s = self.screen()
