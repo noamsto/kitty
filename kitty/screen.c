@@ -1171,7 +1171,7 @@ bidi_controls_changed(Screen *self) {
     rederive_blank_bidi_records(self->linebuf, current_bidi_record(self));
 }
 
-static void
+static inline __attribute__((always_inline)) void
 init_text_loop_line(Screen *self, text_loop_state *s) {
     // Also collect garbage in the text cache when starting a new line, not just
     // when starting to draw text, as a single draw can add a great many entries,
@@ -1189,7 +1189,7 @@ init_text_loop_line(Screen *self, text_loop_state *s) {
 
 // Used when the cursor is moved after the current char has already been
 // through grapheme segmentation, so the segmentation state must be preserved
-static void
+static inline __attribute__((always_inline)) void
 reinit_text_loop_line(Screen *self, text_loop_state *s) {
     const GraphemeSegmentationResult seg = s->seg;
     init_text_loop_line(self, s);
