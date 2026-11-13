@@ -34,6 +34,8 @@ typedef struct {
     Line *line;
     TextCache *text_cache;
     index_type start_of_data, count;
+    uint64_t bidi_generation; // bumped when rows move or are cleared without being marked dirty
+    uint64_t bidi_push_generation; // bumped by historybuf_push only
 } HistoryBuf;
 
 
@@ -44,3 +46,4 @@ void historybuf_fast_rewrap(HistoryBuf *dest, HistoryBuf *src, index_type count,
 index_type historybuf_next_dest_line(HistoryBuf *self, ANSIBuf *as_ansi_buf, Line *src_line, index_type dest_y, Line *dest_line, bool continued);
 bool historybuf_is_line_continued(HistoryBuf *self, index_type lnum);
 void historybuf_delete_newest_lines(HistoryBuf *self, index_type count);
+index_type historybuf_ring_index(HistoryBuf *self, index_type lnum);

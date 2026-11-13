@@ -14,6 +14,7 @@
 #include "decorations.h"
 #include "glyph-cache.h"
 #include "shaped-run-cache.h"
+#include "bidi.h"
 #include "print-graphics.h"
 #include "simd-string.h"
 
@@ -1260,7 +1261,7 @@ render_box_cell(FontGroup *fg, RunFont rf, CPUCell *cpu_cell, GPUCell *gpu_cell,
 }
 
 static void
-load_hb_buffer(CPUCell *first_cpu_cell, index_type num_cells, const TextCache *tc, ListOfChars *lc) {
+load_hb_buffer(CPUCell *first_cpu_cell, index_type num_cells, const TextCache *tc, ListOfChars *lc, BidiDirection dir) {
     size_t num = 0;
     hb_buffer_clear_contents(harfbuzz_buffer);
     // Although hb_buffer_add_codepoints is supposedly an append, we have to
@@ -1275,6 +1276,7 @@ load_hb_buffer(CPUCell *first_cpu_cell, index_type num_cells, const TextCache *t
     }
     hb_buffer_add_codepoints(harfbuzz_buffer, shape_buffer.codepoints, num, 0, num);
     hb_buffer_guess_segment_properties(harfbuzz_buffer);
+    if (dir != BIDI_DIR_GUESS) hb_buffer_set_direction(harfbuzz_buffer, dir == BIDI_DIR_RTL ? HB_DIRECTION_RTL : HB_DIRECTION_LTR);
     if (OPT(force_ltr)) hb_buffer_set_direction(harfbuzz_buffer, HB_DIRECTION_LTR);
 }
 
@@ -1552,7 +1554,7 @@ restore_shaped_run(CPUCell *first_cpu_cell, GPUCell *first_gpu_cell, index_type 
 }
 
 static void
-shape(CPUCell *first_cpu_cell, GPUCell *first_gpu_cell, index_type num_cells, hb_font_t *font, Font *fobj, bool disable_ligature, const TextCache *tc) {
+shape(CPUCell *first_cpu_cell, GPUCell *first_gpu_cell, index_type num_cells, hb_font_t *font, Font *fobj, bool disable_ligature, const TextCache *tc, BidiDirection dir) {
     if (!ensure_group_capacity(num_cells, 0)) fatal("Out of memory");
     RAII_ListOfChars(lc);
     text_in_cell(first_cpu_cell, tc, &lc);
@@ -1573,11 +1575,13 @@ shape(CPUCell *first_cpu_cell, GPUCell *first_gpu_cell, index_type num_cells, hb
     group_state.first_gpu_cell = first_gpu_cell;
     group_state.last_cpu_cell = first_cpu_cell + (num_cells ? num_cells - 1 : 0);
     group_state.last_gpu_cell = first_gpu_cell + (num_cells ? num_cells - 1 : 0);
-    load_hb_buffer(first_cpu_cell, num_cells, tc, &lc);
+    load_hb_buffer(first_cpu_cell, num_cells, tc, &lc, dir);
 
     size_t num_features = fobj->num_ffs_hb_features;
     if (num_features && !disable_ligature) num_features--; // the last feature is always -calt
     hb_shape(font, harfbuzz_buffer, fobj->ffs_hb_features, num_features);
+    // Grouping walks cells in logical order, so it needs clusters in logical order
+    if (dir == BIDI_DIR_RTL) hb_buffer_reverse_clusters(harfbuzz_buffer);
 
     unsigned int info_length, positions_length;
     group_state.info = hb_buffer_get_glyph_infos(harfbuzz_buffer, &info_length);
@@ -1687,7 +1691,7 @@ detect_spacer_strategy(hb_font_t *hbf, Font *font, const TextCache *tc) {
     size_t len = set_ascii_cells(cpu_cells, "===");
     const CellAttrs w1 = {0};
     GPUCell gpu_cells[5] = {{.attrs = w1}, {.attrs = w1}, {.attrs = w1}, {.attrs = w1}, {.attrs = w1}};
-    shape(cpu_cells, gpu_cells, len, hbf, font, false, tc);
+    shape(cpu_cells, gpu_cells, len, hbf, font, false, tc, BIDI_DIR_GUESS);
     font->spacer_strategy = SPACERS_BEFORE;
     if (G(num_glyphs) > 1) {
         glyph_index glyph_id = G(info)[G(num_glyphs) - 1].codepoint;
@@ -1698,7 +1702,7 @@ detect_spacer_strategy(hb_font_t *hbf, Font *font, const TextCache *tc) {
     static const char *probes[5] = {"==", "->", "<-", "<<=", "<==>"};
     for (size_t i = 0; i < arraysz(probes); i++) {
         len = set_ascii_cells(cpu_cells, probes[i]);
-        shape(cpu_cells, gpu_cells, len, hbf, font, false, tc);
+        shape(cpu_cells, gpu_cells, len, hbf, font, false, tc, BIDI_DIR_GUESS);
         if (shaped_glyphs_have_iosevka_join_names(hbf)) {
             font->spacer_strategy = SPACERS_IOSEVKA;
             break;
@@ -1708,7 +1712,7 @@ detect_spacer_strategy(hb_font_t *hbf, Font *font, const TextCache *tc) {
     // https://github.com/kovidgoyal/kitty/issues/4721
     if (font->spacer_strategy == SPACERS_BEFORE) {
         len = set_ascii_cells(cpu_cells, "###");
-        shape(cpu_cells, gpu_cells, len, hbf, font, false, tc);
+        shape(cpu_cells, gpu_cells, len, hbf, font, false, tc, BIDI_DIR_GUESS);
         if (G(num_glyphs) > 1) {
             glyph_index glyph_id = G(info)[G(num_glyphs) - 1].codepoint;
             bool is_special = is_special_glyph(glyph_id, font, &G(current_cell_data));
@@ -1927,12 +1931,13 @@ shape_run(
     FontGroup *fg,
     bool disable_ligature,
     const TextCache *tc,
-    ListOfChars *lc) {
+    ListOfChars *lc,
+    BidiDirection dir) {
     float scale = apply_scale_to_font_group(fg, &rf);
     const uint8_t key_scale = (uint8_t)MAX(1u, rf.scale);
     uint8_t subscale = ((rf.subscale_n & 0xf) << 4) | (rf.subscale_d & 0xf);
     ShapedRun cached;
-    if (shaped_run_get(font->shaped_run_hash_table, first_cpu_cell, num_cells, tc, disable_ligature, OPT(force_ltr), key_scale, subscale, &cached)) {
+    if (shaped_run_get(font->shaped_run_hash_table, first_cpu_cell, num_cells, tc, disable_ligature, OPT(force_ltr), (uint8_t)dir, key_scale, subscale, &cached)) {
         if (restore_shaped_run(first_cpu_cell, first_gpu_cell, num_cells, &cached)) {
             if (scale != 1.f) apply_scale_to_font_group(fg, NULL);
             return scale;
@@ -1942,7 +1947,7 @@ shape_run(
         if (!face_apply_scaling(font->face, (FONTS_DATA_HANDLE)fg) && PyErr_Occurred()) PyErr_Print();
     hb_font_t *hbf = harfbuzz_font_for_face(font->face);
     if (font->spacer_strategy == SPACER_STRATEGY_UNKNOWN) detect_spacer_strategy(hbf, font, tc);
-    shape(first_cpu_cell, first_gpu_cell, num_cells, hbf, font, disable_ligature, tc);
+    shape(first_cpu_cell, first_gpu_cell, num_cells, hbf, font, disable_ligature, tc, dir);
     if (font->spacer_strategy == SPACERS_IOSEVKA) group_iosevka(font, hbf, tc, lc);
     else group_normal(font, hbf, tc, lc);
 #if 0
@@ -1994,7 +1999,7 @@ split_run_at_offset(index_type cursor_offset, index_type *left, index_type *righ
 }
 
 static void
-render_groups(FontGroup *fg, RunFont rf, bool center_glyph, const TextCache *tc) {
+render_groups(FontGroup *fg, RunFont rf, bool center_glyph, const TextCache *tc, BidiDirection dir) {
     unsigned idx = 0;
     const FontCellMetrics unscaled_metrics = fg->fcm;
     float scale = apply_scale_to_font_group(fg, &rf);
@@ -2023,6 +2028,16 @@ render_groups(FontGroup *fg, RunFont rf, bool center_glyph, const TextCache *tc)
                 tc,
                 scale,
                 unscaled_metrics);
+            if (dir == BIDI_DIR_RTL && group->num_cells > 1) {
+                // RTL cells are displayed last to first, so the sprites of a
+                // multi-cell group must be stored last to first as well
+                GPUCell *cells = G(first_gpu_cell) + group->first_cell_idx;
+                for (unsigned a = 0, b = group->num_cells - 1; a < b; a++, b--) {
+                    const sprite_index tmp = cells[a].sprite_idx;
+                    cells[a].sprite_idx = cells[b].sprite_idx;
+                    cells[b].sprite_idx = tmp;
+                }
+            }
         }
         idx++;
     }
@@ -2075,8 +2090,8 @@ static PyObject *
 test_shape(PyObject UNUSED *self, PyObject *args) {
     Line *line;
     char *path = NULL;
-    int index = 0;
-    if (!PyArg_ParseTuple(args, "O!|zi", &Line_Type, &line, &path, &index)) return NULL;
+    int index = 0, rtl = 0;
+    if (!PyArg_ParseTuple(args, "O!|zii", &Line_Type, &line, &path, &index, &rtl)) return NULL;
     index_type num = 0;
     const CPUCell *c;
     while (num < line->xnum && cell_has_text(line->cpu_cells + num)) {
@@ -2111,10 +2126,11 @@ test_shape(PyObject UNUSED *self, PyObject *args) {
     }
     RunFont rf = {0};
     RAII_ListOfChars(lc);
-    shape_run(line->cpu_cells, line->gpu_cells, num, font, rf, fg, false, line->text_cache, &lc);
+    const BidiDirection dir = rtl ? BIDI_DIR_RTL : BIDI_DIR_GUESS;
+    shape_run(line->cpu_cells, line->gpu_cells, num, font, rf, fg, false, line->text_cache, &lc, dir);
     PyObject *ans = shaped_groups_as_python();
     if (!ans) goto done;
-    shape_run(line->cpu_cells, line->gpu_cells, num, font, rf, fg, false, line->text_cache, &lc);
+    shape_run(line->cpu_cells, line->gpu_cells, num, font, rf, fg, false, line->text_cache, &lc, dir);
     PyObject *cached = shaped_groups_as_python();
     if (!cached) {
         Py_CLEAR(ans);
@@ -2148,31 +2164,35 @@ render_run(
     int cursor_offset,
     DisableLigature disable_ligature_strategy,
     const TextCache *tc,
-    ListOfChars *lc) {
+    ListOfChars *lc,
+    BidiDirection dir) {
     float scale;
     switch (rf.font_idx) {
         default:
             scale = shape_run(
-                first_cpu_cell, first_gpu_cell, num_cells, &fg->fonts[rf.font_idx], rf, fg, disable_ligature_strategy == DISABLE_LIGATURES_ALWAYS, tc, lc);
+                first_cpu_cell, first_gpu_cell, num_cells, &fg->fonts[rf.font_idx], rf, fg, disable_ligature_strategy == DISABLE_LIGATURES_ALWAYS, tc, lc, dir);
             if (pua_space_ligature) collapse_pua_space_ligature(num_cells);
             else if (cursor_offset > -1) { // false if DISABLE_LIGATURES_NEVER
                 index_type left, right;
                 split_run_at_offset(cursor_offset, &left, &right, scale);
                 if (right > left) {
                     if (left) {
-                        shape_run(first_cpu_cell, first_gpu_cell, left, &fg->fonts[rf.font_idx], rf, fg, false, tc, lc);
-                        render_groups(fg, rf, center_glyph, tc);
+                        shape_run(first_cpu_cell, first_gpu_cell, left, &fg->fonts[rf.font_idx], rf, fg, false, tc, lc, dir);
+                        render_groups(fg, rf, center_glyph, tc, dir);
                     }
-                    shape_run(first_cpu_cell + left, first_gpu_cell + left, right - left, &fg->fonts[rf.font_idx], rf, fg, true, tc, lc);
-                    render_groups(fg, rf, center_glyph, tc);
+                    shape_run(first_cpu_cell + left, first_gpu_cell + left, right - left, &fg->fonts[rf.font_idx], rf, fg, true, tc, lc, dir);
+                    render_groups(fg, rf, center_glyph, tc, dir);
                     if (right < num_cells) {
-                        shape_run(first_cpu_cell + right, first_gpu_cell + right, num_cells - right, &fg->fonts[rf.font_idx], rf, fg, false, tc, lc);
-                        render_groups(fg, rf, center_glyph, tc);
+                        shape_run(first_cpu_cell + right, first_gpu_cell + right, num_cells - right, &fg->fonts[rf.font_idx], rf, fg, false, tc, lc, dir);
+                        render_groups(fg, rf, center_glyph, tc, dir);
                     }
                     break;
                 }
             }
-            render_groups(fg, rf, center_glyph, tc);
+            // a PUA+space ligature is a single glyph drawn across its cells; on an
+            // RTL level its cells are displayed last to first, so its sprites are
+            // mirrored like those of any other multi-cell group
+            render_groups(fg, rf, center_glyph, tc, dir);
             break;
         case BLANK_FONT:
             while (num_cells--) {
@@ -2235,8 +2255,13 @@ multicell_intersects_cursor(const Line *line, index_type lnum, const Cursor *cur
     } else return lnum == cursor->y;
 }
 
+static BidiDirection
+direction_for_level(bool bidi, uint8_t level) {
+    return !bidi ? BIDI_DIR_GUESS : (level & 1) ? BIDI_DIR_RTL : BIDI_DIR_LTR;
+}
+
 void
-render_line(FONTS_DATA_HANDLE fg_, Line *line, index_type lnum, Cursor *cursor, DisableLigature disable_ligature_strategy, ListOfChars *lc) {
+render_line(FONTS_DATA_HANDLE fg_, Line *line, index_type lnum, Cursor *cursor, DisableLigature disable_ligature_strategy, ListOfChars *lc, const uint8_t *levels) {
 #define RENDER                                                                                                          \
     if (run_font.font_idx != NO_FONT && i > first_cell_in_run) {                                                        \
         int cursor_offset = -1;                                                                                         \
@@ -2254,12 +2279,17 @@ render_line(FONTS_DATA_HANDLE fg_, Line *line, index_type lnum, Cursor *cursor, 
             cursor_offset,                                                                                              \
             disable_ligature_strategy,                                                                                  \
             line->text_cache,                                                                                           \
-            lc);                                                                                                        \
+            lc,                                                                                                         \
+            direction_for_level(bidi, run_level));                                                                      \
     }
     FontGroup *fg = (FontGroup *)fg_;
     RunFont basic_font = {.scale = 1, .font_idx = NO_FONT}, run_font = basic_font, cell_font = basic_font;
     bool center_glyph = false;
     bool disable_ligature_at_cursor = cursor != NULL && disable_ligature_strategy == DISABLE_LIGATURES_CURSOR;
+    const bool bidi = levels != NULL;
+    // the caller writes this back to the line's source along with the clean state
+    line->attrs.rendered_with_bidi = bidi;
+    uint8_t run_level = 0;
     index_type first_cell_in_run, i;
     for (i = 0, first_cell_in_run = 0; i < line->xnum; i++) {
         cell_font = basic_font;
@@ -2275,6 +2305,15 @@ render_line(FONTS_DATA_HANDLE fg_, Line *line, index_type lnum, Cursor *cursor, 
             cell_font.align.vertical = cpu_cell->valign;
             cell_font.align.horizontal = cpu_cell->halign;
             cell_font.multicell_y = cpu_cell->y;
+        }
+        // Also covers the first cell and the cell after a PUA+space ligature, where
+        // RENDER is a no-op as no run is open. Must precede text_in_cell() as
+        // RENDER clobbers lc.
+        if (bidi && levels[i] != run_level) {
+            RENDER
+            run_font = basic_font;
+            first_cell_in_run = i;
+            run_level = levels[i];
         }
         text_in_cell(cpu_cell, line->text_cache, lc);
         bool is_main_font, is_emoji_presentation;
@@ -2297,7 +2336,7 @@ render_line(FONTS_DATA_HANDLE fg_, Line *line, index_type lnum, Cursor *cursor, 
             unsigned int num_spaces = 0;
             while (i + num_spaces + 1 < line->xnum &&
                    (cell_is_char(line->cpu_cells + i + num_spaces + 1, ' ') || cell_is_char(line->cpu_cells + i + num_spaces + 1, 0x2002)) // space or en-space
-                   && num_spaces < MAX_NUM_EXTRA_GLYPHS_PUA && num_spaces + 1 < desired_cells) {
+                   && num_spaces < MAX_NUM_EXTRA_GLYPHS_PUA && num_spaces + 1 < desired_cells && (!bidi || levels[i + num_spaces + 1] == levels[i])) {
                 num_spaces++;
                 // We have a private use char followed by space(s), render it as a multi-cell ligature.
                 GPUCell *space_cell = line->gpu_cells + i + num_spaces;
@@ -2323,7 +2362,8 @@ render_line(FONTS_DATA_HANDLE fg_, Line *line, index_type lnum, Cursor *cursor, 
                     -1,
                     disable_ligature_strategy,
                     line->text_cache,
-                    lc);
+                    lc,
+                    direction_for_level(bidi, run_level));
                 run_font = basic_font;
                 first_cell_in_run = i + num_spaces + 1;
                 i += num_spaces;
@@ -2611,8 +2651,27 @@ test_render_line(PyObject UNUSED *self, PyObject *args) {
         return NULL;
     }
     RAII_ListOfChars(lc);
-    render_line((FONTS_DATA_HANDLE)font_groups, (Line *)line, 0, NULL, DISABLE_LIGATURES_NEVER, &lc);
+    render_line((FONTS_DATA_HANDLE)font_groups, (Line *)line, 0, NULL, DISABLE_LIGATURES_NEVER, &lc, NULL);
     Py_RETURN_NONE;
+}
+
+extern PyTypeObject Screen_Type;
+
+static PyObject *
+test_screen_update_cell_data(PyObject UNUSED *self, PyObject *args) {
+    PyObject *screen;
+    unsigned int repeat = 1;
+    if (!PyArg_ParseTuple(args, "O!|I", &Screen_Type, &screen, &repeat)) return NULL;
+    if (!num_font_groups) {
+        PyErr_SetString(PyExc_RuntimeError, "must create font group first");
+        return NULL;
+    }
+    Screen *s = (Screen *)screen;
+    PyObject *ans = PyBytes_FromStringAndSize(NULL, (Py_ssize_t)(sizeof(GPUCell) * render_lines_for_screen(s) * s->columns));
+    if (!ans) return NULL;
+    memset(PyBytes_AS_STRING(ans), 0, PyBytes_GET_SIZE(ans));
+    for (unsigned int i = 0; i < repeat; i++) screen_update_cell_data(s, PyBytes_AS_STRING(ans), (FONTS_DATA_HANDLE)font_groups, false);
+    return ans;
 }
 
 static uint32_t
@@ -2923,6 +2982,7 @@ static PyMethodDef module_methods[] = {
     METHODB(test_shape, METH_VARARGS),
     METHODB(current_fonts, METH_VARARGS),
     METHODB(test_render_line, METH_VARARGS),
+    METHODB(test_screen_update_cell_data, METH_VARARGS),
     METHODB(get_fallback_font, METH_VARARGS),
     {"specialize_font_descriptor", (PyCFunction)pyspecialize_font_descriptor, METH_VARARGS, ""},
     {"render_box_char", (PyCFunction)pyrender_box_char, METH_VARARGS, ""},

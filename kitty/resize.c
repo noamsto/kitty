@@ -95,15 +95,17 @@ init_src_line(Rewrap *r) {
     return newline_needed;
 }
 
-#define set_dest_line_attrs(dest_y)                     \
-    r->dest.lb->line_attrs[dest_y] = r->src.line.attrs; \
-    r->src.line.attrs.prompt_kind = UNKNOWN_PROMPT_KIND;
+#define set_dest_line_attrs(dest_y)                      \
+    r->dest.lb->line_attrs[dest_y] = r->src.line.attrs;  \
+    r->src.line.attrs.prompt_kind = UNKNOWN_PROMPT_KIND; \
+    r->src.line.attrs.leading_mark = 0;
 
 static void
 first_dest_line(Rewrap *r) {
     if (r->src.hb_count) {
         historybuf_next_dest_line(r->dest.hb, r->as_ansi_buf, &r->src.line, 0, &r->dest.line, false);
         r->src.line.attrs.prompt_kind = UNKNOWN_PROMPT_KIND;
+        r->src.line.attrs.leading_mark = 0;
     } else {
         r->dest_line_from_linebuf = true;
         linebuf_init_line_at(r->dest.lb, 0, &r->dest.line);
@@ -150,6 +152,7 @@ next_dest_line(Rewrap *r, bool continued) {
     } else {
         r->dest.y = historybuf_next_dest_line(r->dest.hb, r->as_ansi_buf, &r->src.line, r->dest.y, &r->dest.line, continued);
         r->src.line.attrs.prompt_kind = UNKNOWN_PROMPT_KIND;
+        r->src.line.attrs.leading_mark = 0;
     }
     if (r->sb->line_attrs[0].has_dirty_text) {
         CPUCell *cpu_cells;
@@ -203,6 +206,13 @@ copy_range(Line *src, index_type src_at, Line *dest, index_type dest_at, index_t
 }
 
 static void
+merge_bidi_flag(Rewrap *r) {
+    if (!r->src.line.attrs.has_bidi) return;
+    if (r->dest_line_from_linebuf) r->dest.lb->line_attrs[r->dest.y].has_bidi = true;
+    else historybuf_mark_line_has_bidi(r->dest.hb, 0);
+}
+
+static void
 copy_multiline_extra_lines(Rewrap *r, CPUCell *src_cell, index_type mc_width) {
     for (index_type i = 1; i < src_cell->scale; i++) {
         init_src_line_basic(r, r->src.y + i, &r->src.scratch_line, false);
@@ -233,6 +243,7 @@ multiline_copy_src_to_dest(Rewrap *r) {
         } else mc_width = 1;
         find_space_in_dest(r, mc_width);
         copy_range(&r->src.line, r->src.x, &r->dest.line, r->dest.x, mc_width);
+        merge_bidi_flag(r);
         update_tracked_cursors(r, mc_width, r->src.y, r->dest.y, r->src_x_limit);
         if (c->scale > 1) copy_multiline_extra_lines(r, c, mc_width);
         r->src.x += mc_width;
@@ -259,6 +270,7 @@ fast_copy_src_to_dest(Rewrap *r) {
             return;
         }
         copy_range(&r->src.line, r->src.x, &r->dest.line, r->dest.x, num);
+        merge_bidi_flag(r);
         update_tracked_cursors(r, num, r->src.y, r->dest.y, r->src_x_limit);
         r->src.x += num;
         r->dest.x += num;

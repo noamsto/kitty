@@ -19,6 +19,7 @@ typedef struct {
     LineAttrs *line_attrs;
     Line *line;
     TextCache *text_cache;
+    uint64_t bidi_generation; // bumped when rows move or are cleared without being marked dirty
 } LineBuf;
 
 

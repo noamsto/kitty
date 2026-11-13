@@ -1170,6 +1170,8 @@ cell_update_uniform_block(
 
         GLuint bg_colors0, bg_colors1, bg_colors2, bg_colors3, bg_colors4, bg_colors5, bg_colors6, bg_colors7;
         GLfloat bg_opacities0, bg_opacities1, bg_opacities2, bg_opacities3, bg_opacities4, bg_opacities5, bg_opacities6, bg_opacities7;
+
+        GLuint cursor_beam_mirrored;
     };
     // Send the uniform data
     ColorProfile *cp = screen->paused_rendering.expires_at ? &screen->paused_rendering.color_profile : screen->color_profile;
@@ -1237,14 +1239,16 @@ cell_update_uniform_block(
     // its shape, so the main cursor render data must be computed even when the
     // main cursor itself is hidden by DECTCEM.
     if (rd->cursor_opacity != 0 && (cursor->is_visible || cursor->multicursor_count)) {
-        rd->cursor_x1 = cursor->x, rd->cursor_y1 = cursor->y;
-        rd->cursor_x2 = cursor->x, rd->cursor_y2 = cursor->y;
+        // visual_x is also set where there is no cell to read, the pending wrap column
+        rd->cursor_x1 = cursor->visual_x, rd->cursor_y1 = cursor->y;
+        rd->cursor_x2 = cursor->visual_x, rd->cursor_y2 = cursor->y;
         if (pixel_scroll_enabled(screen)) {
             rd->cursor_y1 += 1;
             rd->cursor_y2 += 1;
         }
-        CursorShape cs = (cursor->is_focused || OPT(cursor_shape_unfocused) == NO_CURSOR_SHAPE) ? cursor->shape : OPT(cursor_shape_unfocused);
+        CursorShape cs = cursor_shape_drawn(cursor->is_focused, cursor->shape);
         rd->cursor_shape = cs;
+        rd->cursor_beam_mirrored = cs == CURSOR_BEAM && cursor->beam_mirrored;
         color_type cell_fg = rd->default_fg, cell_bg = rd->bg_colors0;
         index_type cell_color_x = cursor->x;
         bool reversed = false;
@@ -1310,6 +1314,7 @@ cell_update_uniform_block(
         if (!cursor->is_visible) {
             // Move the main cursor off screen so that only it is hidden, the
             // extra cursors keep their shape and colors.
+            rd->cursor_beam_mirrored = 0;
             rd->cursor_x1 = screen->columns + 1;
             rd->cursor_x2 = screen->columns;
             rd->cursor_y1 = screen->lines + 1;
@@ -1317,6 +1322,7 @@ cell_update_uniform_block(
         }
     } else {
         rd->cursor_shape = 0;
+        rd->cursor_beam_mirrored = 0;
         rd->cursor_x1 = screen->columns + 1;
         rd->cursor_x2 = screen->columns;
         rd->cursor_y1 = screen->lines + 1;
@@ -1421,6 +1427,10 @@ cell_prepare_to_render(ssize_t vao_idx, Screen *screen, FONTS_DATA_HANDLE fonts_
     }
 #undef update_selection_data
 #undef update_cell_data
+    // The row maps are resolved by update_cell_data, after collect_cursor_info read them, so the
+    // cursor column it stored lags one frame behind the cells that are drawn
+    CursorRenderInfo *cri = &screen->cursor_render_info;
+    if (cri->is_visible) cri->visual_x = screen_cursor_render_x(screen, cursor_shape_drawn(cri->is_focused, cri->shape), &cri->beam_mirrored);
     screen->last_rendered.columns = screen->columns;
     screen->last_rendered.lines = screen->lines;
     screen->last_rendered.cursor = screen->cursor_render_info;

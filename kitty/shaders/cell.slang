@@ -189,7 +189,8 @@ vertex_main(
         foreground = if_one_then(cell_data.has_block_cursor, final_cursor_text_color, foreground);
         vo.decoration_fg = if_one_then(cell_data.has_block_cursor, final_cursor_text_color, vo.decoration_fg);
         uint cursor_sprite = cell_data.cursor_fg_sprite_idx * uint(cell_data.has_cursor);
-        vo.cursor_pos = to_sprite_pos(cell_data.pos, cursor_sprite);
+        uint2 cursor_cell_pos = uint2(cell_data.cursor_mirror != 0u ? 1u - cell_data.pos.x : cell_data.pos.x, cell_data.pos.y);
+        vo.cursor_pos = to_sprite_pos(cursor_cell_pos, cursor_sprite);
         uint skip_text = uint((sprite_idx[0] & SPRITE_INDEX_MASK) == 0u && decs[0] == 0u && decs[1] == 0u && cursor_sprite == 0u);
         vo.underline_exclusion_pos = to_underline_exclusion_pos(sprite_idx) | (skip_text * SKIP_TEXT_FLAG);
     }

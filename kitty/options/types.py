@@ -68,6 +68,8 @@ option_names = (
     'bell_border_color',
     'bell_on_tab',
     'bell_path',
+    'bidi_auto_direction',
+    'bidi_reorder',
     'bold_font',
     'bold_italic_font',
     'box_drawing_scale',
@@ -555,6 +557,8 @@ class Options:
     bell_border_color: Color = Color(255, 90, 0)
     bell_on_tab: str = '🔔 '
     bell_path: str | None = None
+    bidi_auto_direction: bool = False
+    bidi_reorder: bool = False
     bold_font: FontSpec = FontSpec(family=None, style=None, postscript_name=None, full_name=None, system='auto', axes=(), variable_name=None, features=(), created_from_string='auto')
     bold_italic_font: FontSpec = FontSpec(family=None, style=None, postscript_name=None, full_name=None, system='auto', axes=(), variable_name=None, features=(), created_from_string='auto')
     box_drawing_scale: tuple[float, float, float, float] = (0.001, 1.0, 1.5, 2.0)

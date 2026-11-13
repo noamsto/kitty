@@ -128,6 +128,8 @@ typedef struct Options {
     int tab_title_max_length;
     DisableLigature disable_ligatures;
     bool force_ltr;
+    bool bidi_reorder;
+    bool bidi_auto_direction;
     bool resize_in_steps;
     bool sync_to_monitor;
     bool close_on_child_death;
@@ -773,6 +775,11 @@ sprite_index_to_pos(unsigned idx, unsigned xnum, unsigned ynum, unsigned *x, uns
     *z = r.quot;
     *y = r2.quot;
     *x = r2.rem;
+}
+
+static inline CursorShape
+cursor_shape_drawn(bool is_focused, CursorShape shape) {
+    return (is_focused || OPT(cursor_shape_unfocused) == NO_CURSOR_SHAPE) ? shape : OPT(cursor_shape_unfocused);
 }
 
 

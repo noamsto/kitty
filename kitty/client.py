@@ -209,6 +209,10 @@ def screen_set_cursor(mode: int, secondary: int) -> None:
     write(f'{CSI}{secondary} q')
 
 
+def screen_set_bidi_direction(p: int) -> None:
+    write(f'{CSI}{p} k')
+
+
 def screen_insert_lines(num: int) -> None:
     write(f'{CSI}{num}L')
 

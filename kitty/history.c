@@ -184,6 +184,12 @@ index_of(HistoryBuf *self, index_type lnum) {
     return (self->start_of_data + idx) % self->ynum;
 }
 
+index_type
+historybuf_ring_index(HistoryBuf *self, index_type lnum) {
+    // The buffer position of line lnum, stable until the line is overwritten
+    return index_of(self, lnum);
+}
+
 static bool
 hb_line_is_continued(HistoryBuf *self, index_type num) {
     if (num == self->start_of_data) {
@@ -241,7 +247,20 @@ historybuf_set_line_has_image_placeholders(HistoryBuf *self, index_type y, bool 
 }
 
 void
+historybuf_mark_line_rendered(HistoryBuf *self, index_type y, bool with_bidi) {
+    LineAttrs *a = attrptr(self, index_of(self, y));
+    a->has_dirty_text = false;
+    a->rendered_with_bidi = with_bidi;
+}
+
+void
+historybuf_mark_line_has_bidi(HistoryBuf *self, index_type y) {
+    attrptr(self, index_of(self, y))->has_bidi = true;
+}
+
+void
 historybuf_clear(HistoryBuf *self) {
+    self->bidi_generation++;
     pagerhist_clear(self);
     self->count = 0;
     self->start_of_data = 0;
@@ -316,6 +335,8 @@ pagerhist_push(HistoryBuf *self, ANSIBuf *as_ansi_buf) {
 
 static index_type
 historybuf_push(HistoryBuf *self, ANSIBuf *as_ansi_buf, bool *needs_clear) {
+    self->bidi_generation++;
+    self->bidi_push_generation++;
     index_type idx = (self->start_of_data + self->count) % self->ynum;
     if (self->count == self->ynum) {
         pagerhist_push(self, as_ansi_buf);
@@ -356,6 +377,7 @@ historybuf_add_line(HistoryBuf *self, const Line *line, ANSIBuf *as_ansi_buf) {
 bool
 historybuf_pop_line(HistoryBuf *self, Line *line) {
     if (self->count <= 0) return false;
+    self->bidi_generation++;
     index_type idx = (self->start_of_data + self->count - 1) % self->ynum;
     init_line(self, idx, line);
     self->count--;
@@ -365,6 +387,7 @@ historybuf_pop_line(HistoryBuf *self, Line *line) {
 void
 historybuf_delete_newest_lines(HistoryBuf *self, index_type count) {
     if (!count) return;
+    self->bidi_generation++;
     count = MIN(self->count, count);
     self->count -= count - 1;
     // now nuke multi cell chars that overlap onto the last line

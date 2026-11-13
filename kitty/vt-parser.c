@@ -1460,6 +1460,19 @@ dispatch_csi(PS *self) {
                 default: REPORT_ERROR("Unknown CSI p sequence with start and end modifiers: '%c' '%c'", start_modifier, end_modifier); break;
             }
             break;
+        case 'k':
+            if (end_modifier == ' ' && !start_modifier) {
+                if (num_params > 2) {
+                    REPORT_ERROR("SCP escape code with more than 2 parameters is invalid");
+                } else {
+                    const unsigned int p1 = num_params ? MAX(params[0], 0) : 0;
+                    REPORT_COMMAND(screen_set_bidi_direction, p1);
+                    screen_set_bidi_direction(self->screen, p1);
+                }
+                break;
+            }
+            REPORT_ERROR("Unknown CSI k sequence with start and end modifiers: '%c' '%c'", start_modifier, end_modifier);
+            break;
         case 'm':
             if (!start_modifier && !end_modifier) {
                 _parse_sgr(self, &self->csi);

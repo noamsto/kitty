@@ -288,13 +288,13 @@ def render_string(text: str, family: str = 'monospace', size: float = 11.0, dpi:
 
 
 def shape_string(
-    text: str = 'abcd', family: str = 'monospace', size: float = 11.0, dpi: float = 96.0, path: str | None = None
+    text: str = 'abcd', family: str = 'monospace', size: float = 11.0, dpi: float = 96.0, path: str | None = None, rtl: bool = False
 ) -> list[tuple[int, int, int, tuple[int, ...]]]:
     with setup_for_testing(family, size, dpi) as (sprites, cell_width, cell_height):
         s = Screen(None, 1, len(text) * 2)
         line = s.line(0)
         s.draw(text)
-        return test_shape(line, path)
+        return test_shape(line, path, 0, int(rtl))
 
 
 def show(rgba_data: bytes | memoryview, width: int, height: int, fmt: int = 32) -> None:

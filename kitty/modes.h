@@ -20,8 +20,16 @@
 */
 #define IRM 4
 
+/* *Bidirectional Support Mode*: when reset, the terminal does not reorder
+   text, the application supplies it in visual order.
+*/
+#define BDSM 8
+
 
 // Private modes.
+
+// Autodetect the paragraph direction from the first strong character
+#define BIDI_AUTODETECT (2501 << 5)
 
 // Arrow keys send application sequences or cursor movement commands
 #define DECCKM (1 << 5)

@@ -125,6 +125,9 @@ void linebuf_mark_line_dirty(LineBuf *self, index_type y);
 void linebuf_clear_attrs_and_dirty(LineBuf *self, index_type y);
 void linebuf_mark_line_clean(LineBuf *self, index_type y);
 void linebuf_set_line_has_image_placeholders(LineBuf *self, index_type y, bool val);
+void linebuf_set_line_has_bidi(LineBuf *self, index_type y, bool val);
+// Marks the line clean and records whether render_line() shaped it with bidi levels
+void linebuf_mark_line_rendered(LineBuf *self, index_type y, bool with_bidi);
 void linebuf_set_last_char_as_continuation(LineBuf *self, index_type y, bool continued);
 CPUCell *linebuf_cpu_cell_at(LineBuf *self, index_type x, index_type y);
 bool linebuf_line_ends_with_continuation(LineBuf *self, index_type y);
@@ -137,6 +140,8 @@ CPUCell *historybuf_cpu_cells(HistoryBuf *self, index_type num);
 void historybuf_mark_line_clean(HistoryBuf *self, index_type y);
 void historybuf_mark_line_dirty(HistoryBuf *self, index_type y);
 void historybuf_set_line_has_image_placeholders(HistoryBuf *self, index_type y, bool val);
+void historybuf_mark_line_has_bidi(HistoryBuf *self, index_type y);
+void historybuf_mark_line_rendered(HistoryBuf *self, index_type y, bool with_bidi);
 void historybuf_refresh_sprite_positions(HistoryBuf *self);
 void historybuf_clear(HistoryBuf *self);
 void mark_text_in_line(PyObject *marker, Line *line, ANSIBuf *buf);

@@ -270,9 +270,9 @@ typedef struct {
 } Cursor;
 
 typedef struct {
-    bool is_focused, render_even_when_unfocused, is_visible;
+    bool is_focused, render_even_when_unfocused, is_visible, beam_mirrored;
     CursorShape shape;
-    unsigned x, y, multicursor_count;
+    unsigned x, y, visual_x, multicursor_count;
     float cursor_opacity, text_blink_opacity;
 } CursorRenderInfo;
 
