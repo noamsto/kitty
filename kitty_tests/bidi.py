@@ -107,8 +107,7 @@ class TestBidi(BaseTest):
         return self.maps(f)
 
     def trigger_case(self, build, trigger, expect=None, fresh=True):
-        # maps after the trigger frame, equal to a fresh screen's that sees the trigger and one frame
-        # (fresh=False when a screen's first frame changes the view) and to expect when given
+        # maps after the trigger frame, equal to a fresh screen's (fresh=False: a first frame changes the view) and to expect when given
         s = build()
         self.frame(s)
         self.warm(s)
@@ -169,7 +168,9 @@ class TestBidi(BaseTest):
                 s = self.screen()
                 s.draw(text)
                 self.ae((self.refresh(s, 0), s.test_bidi_levels(0)), (v2l, levels))
-        # on the last case's screen: logical cell 1 (span 1) is at visual column 2; the emoji's span of 2 starts at its second cell, column 1
+        # logical cell 1 (span 1) is at visual column 2; the emoji's span of 2 starts at its second cell, column 1
+        s = self.drawn('א😀ב')
+        self.refresh(s, 0)
         self.ae((s.test_bidi_visual_x(1, 0), s.test_bidi_visual_x(1, 0, 2)), (2, 1))
 
     def test_unflagged_continuation_and_history(self):
@@ -208,8 +209,7 @@ class TestBidi(BaseTest):
         self.ae((flags, s.test_bidi_line_flag(0), self.refresh(s, 0)), ([True, True], True, None))  # no map from the stale flag
 
     def test_flag_range_boundaries(self):
-        # Each side of the classifier's range boundaries; the zero-width U+08FF, U+0900, U+FE00, U+11000 and U+FEFF never reach
-        # the flag test, so the nearest drawable codepoint on that side stands in. RLM is only seen by the leading-mark path.
+        # each side of the classifier's boundaries (zero-width ones never reach the flag test: the nearest drawable stands in); RLM: leading-mark path only
         flagged = (0x590, 0x8C9, 0xFB1D, 0xFDFF, 0xFE70, 0xFEFE, 0x10800, 0x10FFF, 0x1E800, 0x1EFFF)
         unflagged = (0x58F, 0x904, 0xFB1C, 0xFE10, 0xFE6F, 0xFF01, 0x107FF, 0x11003, 0x1E7FF, 0x1F000)
         for cp, want in [(cp, True) for cp in flagged] + [(cp, False) for cp in unflagged]:
@@ -410,7 +410,9 @@ class TestBidi(BaseTest):
         f = self.paragraph('אבגדה', '12 3!', 'בbcde', 'fghij', 'klmno', lines=6)
         fbuf = test_screen_update_cell_data(f)
         self.ae(f.test_bidi_levels(1), (2, 2, 1, 2, 1))
-        self.ae([self.sprites(gpu_row(s, buf, y)) for y in range(5)], [self.sprites(gpu_row(f, fbuf, y)) for y in range(5)])
+        want = [self.sprites(gpu_row(f, fbuf, y)) for y in range(5)]
+        self.assertTrue(all(map(any, want)))
+        self.ae([self.sprites(gpu_row(s, buf, y)) for y in range(5)], want)
         s.cursor_position(4, 2)
         s.draw('z')  # Latin over Latin changes no levels: only the written row redraws
         s.test_bidi_refresh()
@@ -809,12 +811,12 @@ class TestBidi(BaseTest):
             def rlo(last):
                 s = self.screen(cols=4, lines=1, scrollback=0)
                 s.draw('ב/')
-                parse_bytes(s, '\x1b]66;w=1;‮\x07'.encode())
+                parse_bytes(s, '\x1b]66;w=1;\u202e\x07'.encode())
                 s.draw(last)
-                self.ae(str(s.linebuf.line(0))[2], '‮')
+                self.ae(str(s.linebuf.line(0))[2], '\u202e')
                 return s
 
-            s = rlo(' ')
+            s = rlo('\u2003')
             self.frame(s)
             self.warm(s)
             self.put(s, 1, 4, ' ')
@@ -823,8 +825,7 @@ class TestBidi(BaseTest):
             self.same_as(s, rlo(' '))
 
     def test_cache_bypass_between_resolves(self):
-        # frame A resolves MIXED. B draws a scale-2 multicell over rows 0-1, cols 0-1: the paragraph is inactive under valid stamps.
-        # C restores the four cells: the rows feed FriBidi what they fed in A but the maps are B's, so C must resolve to MIXED's
+        # A resolves MIXED; B draws a scale-2 multicell (paragraph inactive); C restores the cells: same FriBidi input as A, B's maps
         s = self.screen(lines=4, scrollback=0)
         s.draw(self.MIXED)
         self.ae(self.frame(s), 1)
@@ -838,6 +839,7 @@ class TestBidi(BaseTest):
         self.put(s, 1, 1, self.MIXED[:2])
         self.put(s, 2, 1, self.MIXED[10:12])
         self.ae(str(s.linebuf.line(0)) + str(s.linebuf.line(1)), self.MIXED[:20])
+        self.ae([s.linebuf.is_continued(y) for y in range(4)], [False, True, True, False])  # same bounds as in A: only the signatures differ
         self.ae(self.frame(s), 1)
         self.ae(self.state(s), self.MIXED_STATE)
 
@@ -889,11 +891,12 @@ class TestBidi(BaseTest):
             s.draw('ב')
             s.cursor_position(2, 1)
             s.erase_characters(1)
+            self.assertTrue(s.linebuf.is_continued(1))
 
         def rlo_cell(s):  # draw drops a zero-width Cf, an OSC 66 cell keeps it; untrimmed, blanks after the RLO set the eos of the run before
             s.draw('ב/')
-            parse_bytes(s, '\x1b]66;w=1;‮\x07'.encode())
-            self.ae(str(s.linebuf.line(0))[2], '‮')
+            parse_bytes(s, '\x1b]66;w=1;\u202e\x07'.encode())
+            self.ae(str(s.linebuf.line(0))[2], '\u202e')
 
         cases = {
             'neutral then blanks': lambda s: s.draw('אבג!'),
@@ -940,8 +943,7 @@ class TestBidi(BaseTest):
         self.ae(row[9].sprite_idx, frow[2].sprite_idx)
 
     def test_rtl_paragraph_direction(self):
-        # P2-P3: the first strong character (R, AL or L; not EN or AN) sets the paragraph direction. Per row, in each auto mode
-        # listed, after one refresh: (levels, map, paragraph_rtl)
+        # P2-P3: the first strong character (R, AL or L; not EN or AN) sets the direction; per row, per auto mode listed, after a refresh: (levels, map, rtl)
         rev, rev5 = ID10[::-1], (4, 3, 2, 1, 0)
         cases = (
             ('שלום!', 10, (True,), [((1,) * 10, rev, True)]),
@@ -986,11 +988,11 @@ class TestBidi(BaseTest):
         expect = {}
         for auto, v2l in ((False, (2, 1, 0) + ID10[3:]), (True, ID10[::-1])):
             f = self.drawn(A, bidi_auto_direction=auto)
-            expect[auto] = (v2l, self.upload_sprites(f, (0,))[0])
+            expect[auto] = (self.upload_sprites(f, (0,))[0], v2l)
         s = self.drawn(A, bidi_auto_direction=True)
         self.ae(self.frame(s), 1)
         self.warm(s)
-        self.ae((s.test_bidi_v2l(0), s.test_bidi_paragraph_rtl(0)), (expect[True][0], True))
+        self.ae((s.test_bidi_v2l(0), s.test_bidi_paragraph_rtl(0)), (expect[True][1], True))
         for auto in (False, True):
             with self.subTest(auto=auto):
                 self.set_options({'bidi_reorder': True, 'bidi_auto_direction': auto})
@@ -999,7 +1001,7 @@ class TestBidi(BaseTest):
                 s.test_bidi_refresh()
                 self.assertGreater(s.test_bidi_resolve_count() - count, 0)
                 self.ae(self.dirty(s), [0])
-                self.ae((s.test_bidi_v2l(0), self.upload_sprites(s, (0,))[0], s.test_bidi_paragraph_rtl(0)), (*expect[auto], auto))
+                self.ae((self.upload_sprites(s, (0,))[0], s.test_bidi_v2l(0), s.test_bidi_paragraph_rtl(0)), (*expect[auto], auto))
                 self.warm(s)
         self.toggle_drops_maps(A, ID10[::-1], True, bidi_auto_direction=True)
 
@@ -1052,8 +1054,7 @@ class TestBidi(BaseTest):
         self.ae((self.maps(s), [s.test_bidi_paragraph_rtl(y) for y in range(4)]), (base, [True] * 4))
 
     def test_rtl_paragraph_split_changes_direction(self):
-        # overwriting the last cell of row 0 clears its soft wrap, so row 1 becomes its own paragraph with its own first strong
-        # character. Row 1 is not written, but its direction changes, so it must be reshaped
+        # clearing row 0's soft wrap makes row 1 its own paragraph with its own first strong character: unwritten, but reshaped
         def build(first, second):
             s = self.screen(cols=5, lines=5, bidi_auto_direction=True)
             s.draw(first)
@@ -1064,6 +1065,7 @@ class TestBidi(BaseTest):
             with self.subTest(first):
                 s = build(first, second)
                 self.warm(s)
+                self.assertIs(s.test_bidi_paragraph_rtl(1), not rtl_after)
                 self.put(s, 1, 5, 'x')
                 count = s.test_bidi_resolve_count()
                 s.test_bidi_refresh()
@@ -1084,7 +1086,7 @@ class TestBidi(BaseTest):
 
     LTR_MIXED = (0, 1, 2, 3, 6, 5, 4, 7, 8, 9)  # 'abc אבג' at level 0
     RTL_MIXED = (9, 8, 7, 6, 5, 4, 3, 0, 1, 2)  # the same at level 1
-    LRM, RLM, ALM = '‎', '‏', '؜'
+    LRM, RLM, ALM = '\u200e', '\u200f', '\u061c'
     RTL_PLAIN = (9, 8, 7) + ID10[:7]  # 'abc def' at level 2 in an RTL paragraph
 
     def bases(self, s, *seqs):
@@ -1114,10 +1116,8 @@ class TestBidi(BaseTest):
     def test_bidi_control_parse(self):
         # SCP 0 and no parameter give AUTO back; extra parameters, SCP 3 and a private SCP are ignored
         self.ae(self.bases(self.screen(bidi_auto_direction=False), b'', b'\x1b[8l', b'\x1b[8h'), 'LTR NONE LTR')
-        # fmt: off
         seqs = (b'', b'\x1b[8l', b'\x1b[8h', b'\x1b[2 k', b'\x1b[1 k', b'\x1b[0 k', b'\x1b[2 k', b'\x1b[ k',
-                b'\x1b[2 k', b'\x1b[1;0 k', b'\x1b[1;2;3 k', b'\x1b[3 k', b'\x1b[?1 k', b'\x1b[0 k', b'\x1b[?2501l', b'\x1b[?2501h')
-        # fmt: on
+                b'\x1b[2 k', b'\x1b[1;0 k', b'\x1b[1;2;3 k', b'\x1b[3 k', b'\x1b[?1 k', b'\x1b[0 k', b'\x1b[?2501l', b'\x1b[?2501h')  # fmt: skip
         self.ae(self.bases(self.screen(bidi_auto_direction=True), *seqs), 'AUTO NONE AUTO RTL LTR AUTO RTL AUTO RTL LTR LTR LTR LTR AUTO LTR AUTO')
         self.ae(self.bases(self.screen(bidi_auto_direction=False), b'\x1b[?2501h', b'\x1b[?2501l', b'\x1b[2 k'), 'AUTO LTR RTL')
         s = self.screen(bidi_auto_direction=False)
@@ -1137,10 +1137,8 @@ class TestBidi(BaseTest):
         # a change of base with no output after it must mark the screen dirty, setting the value it already has must not
         s = self.screen(bidi_auto_direction=False)
         s.draw('abc ' + A)
-        # fmt: off
         seqs = (b'\x1b[8h', b'\x1b[8l', b'\x1b[8l', b'\x1b[8h', b'\x1b[0 k', b'\x1b[1 k', b'\x1b[1 k', b'\x1b[2 k', b'\x1b[0 k',
-                b'\x1b[?2501h', b'\x1b[?2501h', b'\x1b[?2501l')
-        # fmt: on
+                b'\x1b[?2501h', b'\x1b[?2501h', b'\x1b[?2501l')  # fmt: skip
         got = []
         for seq in seqs:
             test_screen_update_cell_data(s)
@@ -1374,6 +1372,7 @@ class TestBidi(BaseTest):
     def test_cursor_visual_in_bidi_rows(self):
         # The beam goes to the left edge of an RTL run it follows; block, underline and hollow stay on the cell's own column unless blank
         L, R = False, True
+        # (name, auto, text, levels prefix, v2l, ((visual_x args), want)..., [(x, beam column, mirrored, block/underline/hollow column)])
         cases = (
             ('rtl letters, blank after', R, A, None, ID10[::-1], (((0, 0), 9), ((3, 0), 6)), [(0, 9, R, 9), (3, 6, R, 6)]),
             ('latin after hebrew in rtl', R, 'אaב', (1, 2, 1), ID10[::-1], (), [(1, 8, R), (2, 7, R)]),
@@ -1397,7 +1396,8 @@ class TestBidi(BaseTest):
                 s = self.screen(bidi_auto_direction=auto)
                 s.draw(text)
                 got = self.refresh(s, 0)
-                self.ae(got, v2l or got)
+                if v2l:  # None: not asserted
+                    self.ae(got, v2l)
                 if levels:
                     self.ae(s.test_bidi_levels(0)[: len(levels)], levels)
                 self.ae([s.test_bidi_visual_x(*args) for args, _ in vx], [want for _, want in vx])
@@ -1456,7 +1456,7 @@ class TestBidi(BaseTest):
             self.frame(s)
         self.ae((s.test_bidi_resolve_count(), s.test_bidi_line_rendered_with_bidi(0)), (count, True))
         s.test_update_overlay_text('')
-        self.ae((self.maps(s), self.uploaded(s, 0)), (maps0, row0))
+        self.ae((self.uploaded(s, 0), self.maps(s)), (row0, maps0))
         parse_bytes(s, b'\x1b[8l')
         self.ae(self.sprites(self.uploaded(s, 0)), self.sprites(plain_ref))
 
