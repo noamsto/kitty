@@ -14,10 +14,7 @@ from .fonts import testing_font_data
 
 A = 'אבג'  # three Hebrew letters, bidi class R
 ID10 = tuple(range(10))
-# A row whose map is not its own inverse, on 5 columns: R R WS EN EN at
-# paragraph level 0. W2 and W7 keep EN (last strong is R), N1 makes the space,
-# between R and EN (as R), R. I1: R -> 1, EN -> 2. L2 reverses cols 3..4, then
-# 0..4: v2l = 3 4 2 1 0, so l2v = 4 3 2 0 1.
+# a row whose map is not its own inverse: R R WS EN EN, N1 makes the space R
 NSI = 'אב 12'
 NSI_LEVELS = (1, 1, 1, 2, 2)
 NSI_V2L = (3, 4, 2, 1, 0)
@@ -27,16 +24,14 @@ GPU_CELL = struct.Struct('=5I')  # GPUCell in kitty/line.h, 20 bytes
 
 
 def gpu_row(s, buf, y):
-    # the cells of screen row y in the buffer test_screen_update_cell_data
-    # returns, which has an extra leading render row when pixel scroll is on
+    # the buffer has an extra leading render row when pixel scroll is on
     row_size = s.columns * GPU_CELL.size
     start = (y + len(buf) // row_size - s.lines) * row_size
     return [GPUCellData(*c) for c in GPU_CELL.iter_unpack(buf[start : start + row_size])]
 
 
 def draw_coloured(s, text):
-    # draws each character with its own 256-colour fg and returns the GPUCell.fg
-    # of each, an indexed colour being stored as (index << 8) | 1
+    # each character gets its own 256-colour fg; returns the GPUCell.fg values, (index << 8) | 1
     for i, ch in enumerate(text):
         parse_bytes(s, f'\x1b[38;5;{i + 1}m{ch}'.encode())
     parse_bytes(s, b'\x1b[m')
@@ -56,791 +51,27 @@ class TestBidi(BaseTest):
             self.ae(sorted(v2l), list(range(s.columns)), 'v2l must be a bijection over the columns')
         return v2l
 
-    def test_auto_direction_option_default(self):
-        from kitty.options.parse import parse_conf_item
-        from kitty.options.types import defaults
+    def setUp(self):
+        self.enterContext(setup_for_testing())
 
-        self.assertIs(defaults.bidi_auto_direction, False)
-        ans = {}
-        parse_conf_item('bidi_auto_direction', 'yes', ans)
-        self.assertIs(ans['bidi_auto_direction'], True)
+    def uploaded(self, s, y):
+        # GPUCells of screen row y after rendering a frame
+        return gpu_row(s, test_screen_update_cell_data(s), y)
 
-    def test_basic_run(self):
-        # (a) abcאבג: L L L R R R then blanks. Hebrew letters resolve to level 1,
-        # everything else level 0. Reordering reverses only the level 1 run
-        # (cols 3..5) so visual order is 0 1 2 5 4 3 6 7 8 9. Trailing blanks
-        # are WS at the end of the paragraph, reset to level 0 by L1.
-        s = self.screen()
-        s.draw('abc' + A)
-        v2l = self.refresh(s, 0)
-        self.ae(v2l, (0, 1, 2, 5, 4, 3, 6, 7, 8, 9))
-        self.ae(s.test_bidi_levels(0), (0, 0, 0, 1, 1, 1, 0, 0, 0, 0))
+    def sprites(self, row):
+        return [c.sprite_idx for c in row]
 
-    def test_neutrals_between_rtl(self):
-        # (b) אב, גד: R R CS WS R R. The comma and the space lie between R and R,
-        # so N1 gives them R. Cols 0..5 are one level 1 run and are fully
-        # reversed. Trailing blanks go to level 0 (L1).
-        s = self.screen()
-        s.draw('אב, גד')
-        v2l = self.refresh(s, 0)
-        self.ae(s.test_bidi_levels(0), (1, 1, 1, 1, 1, 1, 0, 0, 0, 0))
-        self.ae(v2l, (5, 4, 3, 2, 1, 0, 6, 7, 8, 9))
+    def fresh_sprites(self, text, cols=5, **opts):
+        # sprites of text drawn alone on a new screen with the same options
+        f = self.screen(cols=cols, lines=2, **opts)
+        f.draw(text)
+        ans = self.sprites(self.uploaded(f, 0))
+        self.assertTrue(any(ans))
+        return ans
 
-    def test_wide_cells(self):
-        # (c1) א😀ב: emoji is class ON between R and R so N1 makes it R. Cells are
-        # א=0, emoji=1,2 (second cell is the continuation), ב=3, all level 1.
-        # Reversing the run visually gives cells 3, then the emoji reversed
-        # (2 left of 1), then 0.
-        s = self.screen()
-        s.draw('א😀ב')
-        v2l = self.refresh(s, 0)
-        self.ae(s.test_bidi_levels(0), (1, 1, 1, 1, 0, 0, 0, 0, 0, 0))
-        self.ae(v2l, (3, 2, 1, 0, 4, 5, 6, 7, 8, 9))
-        # with a span of 1 logical cell 1 alone is at visual column 2; with the
-        # emoji's span of 2 its leftmost visual cell is its second cell, column 1
-        self.ae(s.test_bidi_visual_x(1, 0), 2)
-        self.ae(s.test_bidi_visual_x(1, 0, 2), 1)
-        # (c2) א好ב: 好 is strong L so it stays level 0 and its two cells keep order;
-        # the single-cell R runs on either side reverse to themselves.
-        s = self.screen()
-        s.draw('א好ב')
-        v2l = self.refresh(s, 0)
-        self.ae(s.test_bidi_levels(0), (1, 0, 0, 1, 0, 0, 0, 0, 0, 0))
-        self.ae(v2l, ID10)
-        # (c3) אב好גד: R R L(wide) R R. Two level 1 runs of two cells each:
-        # cells 0,1 reverse to 1,0 and cells 4,5 to 5,4, the wide cells 2,3 stay.
-        s = self.screen()
-        s.draw('אב好גד')
-        v2l = self.refresh(s, 0)
-        self.ae(v2l, (1, 0, 2, 3, 5, 4, 6, 7, 8, 9))
+    def dirty(self, s):
+        return s.linebuf.dirty_lines()
 
-    def test_soft_wrap_unflagged_continuation(self):
-        # (d) cols=5: אבגדה fills row 0, 12 34 soft-wraps to row 1 and has no RTL
-        # character so its has_bidi is False. Paragraph: R*5 EN EN WS EN EN.
-        # W2 keeps EN (last strong is R). N1 treats EN as R, so the space is R.
-        # I1 (the paragraph level, 0, is even): R -> level 1 and EN -> level 2.
-        # Row 0 is all level 1: (4,3,2,1,0).
-        # Row 1 levels 2,2,1,2,2: reverse level>=2 runs -> 1 0 2 4 3, then
-        # reverse the whole level>=1 span -> 3 4 2 0 1.
-        s = self.screen(cols=5, lines=5)
-        s.draw('אבגדה')
-        s.draw('12 34')
-        self.assertTrue(s.line(1).as_ansi())
-        self.assertFalse(s.test_bidi_line_flag(1))
-        self.assertTrue(s.test_bidi_line_flag(0))
-        s.test_bidi_refresh()
-        self.ae(self.refresh(s, 0), (4, 3, 2, 1, 0))
-        self.ae(s.test_bidi_levels(1), (2, 2, 1, 2, 2))
-        self.ae(self.refresh(s, 1), (3, 4, 2, 0, 1))
-
-    def test_latin_only_and_option_off(self):
-        # (e) no strong RTL: no flag, no map
-        s = self.screen()
-        s.draw('hello world')
-        self.assertFalse(s.test_bidi_line_flag(0))
-        self.assertIsNone(self.refresh(s, 0))
-        # (f) option off: Hebrew sets no flag and gets no map
-        s = self.create_screen(cols=10, lines=5, options={'bidi_reorder': False})
-        s.draw('abc' + A)
-        self.assertFalse(s.test_bidi_line_flag(0))
-        self.assertIsNone(self.refresh(s, 0))
-        # (l) force_ltr wins over bidi_reorder: no map
-        s = self.screen(force_ltr=True)
-        s.draw('abc' + A)
-        self.assertIsNone(self.refresh(s, 0))
-        # and a real frame uploads the row unpermuted
-        with setup_for_testing():
-            s = self.screen(force_ltr=True)
-            fgs = draw_coloured(s, 'abc' + A)
-            row = gpu_row(s, test_screen_update_cell_data(s), 0)
-            self.assertIsNone(s.test_bidi_v2l(0))
-            self.ae([c.fg for c in row[: len(fgs)]], fgs)
-
-    def test_flag_latch(self):
-        # (g) the flag is a latch set when a reorderable codepoint is drawn.
-        s = self.screen()
-        self.assertFalse(s.test_bidi_line_flag(0))
-        s.draw('א')
-        self.assertTrue(s.test_bidi_line_flag(0))
-        # erasing the cell leaves the flag (false positive accepted)
-        s.erase_in_line(0)
-        self.assertTrue(s.test_bidi_line_flag(0))
-        s.cursor_position(1, 1)
-        s.erase_in_line(2)
-        self.assertTrue(s.test_bidi_line_flag(0))
-        # with the text gone the stale flag gives no map: all cells are level 0
-        self.assertIsNone(self.refresh(s, 0))
-
-    def test_flag_range_boundaries(self):
-        # (S5) the classifier's ranges, each boundary on both sides. The set is
-        # the one bidi_codepoint_may_reorder has always had. A fresh screen per
-        # codepoint, so one stale flag cannot hide another.
-        # U+08FF, U+0900, U+FE00 and U+11000 are zero-width marks: draw_text_loop returns
-        # before the flag test for them, so they are replaced by the nearest
-        # drawable codepoint on the same side (U+08C9, U+0904, U+FE10, U+11003).
-        # U+FE6F, the codepoint below the flagged U+FE70, is unassigned and draws.
-        # U+FEFF is zero-width, so the unflagged side above U+FEFE is U+FF01.
-        flagged = (0x590, 0x8C9, 0xFB1D, 0xFDFF, 0xFE70, 0xFEFE, 0x10800, 0x10FFF, 0x1E800, 0x1EFFF)
-        unflagged = (0x58F, 0x904, 0xFB1C, 0xFE10, 0xFE6F, 0xFF01, 0x107FF, 0x11003, 0x1E7FF, 0x1F000)
-        for cp, want in [(cp, True) for cp in flagged] + [(cp, False) for cp in unflagged]:
-            with self.subTest(hex(cp)):
-                s = self.screen()
-                s.draw(chr(cp))
-                self.assertGreater(s.cursor.x, 0, 'codepoint did not draw')
-                self.assertIs(s.test_bidi_line_flag(0), want)
-        # option off: Hebrew sets no flag
-        s = self.screen(bidi_reorder=False)
-        s.draw('א')
-        self.assertFalse(s.test_bidi_line_flag(0))
-
-    def test_flag_covers_fribidi_rtl(self):
-        # RLM is zero-width so it never reaches the draw loop's flag check; the leading-mark path handles it.
-        self.ae(self.screen().test_bidi_flag_misses(), [0x200F])
-
-    def test_flag_named_scripts(self):
-        # coverage only: these blocks were flagged before the change; FriBidi 14
-        # shows no assigned R/AL letter outside the flag
-        for cp in (0x0710, 0x0784, 0x07CA, 0x0800, 0x0840, 0x08A0, 0x0870, 0xFB2A, 0xFB50, 0xFE8D, 0x10A10, 0x1E900, 0x1EE00):
-            with self.subTest(hex(cp)):
-                s = self.screen()
-                s.draw('ab ' + chr(cp) + chr(cp))
-                self.assertTrue(s.test_bidi_line_flag(0), f'U+{cp:04X} did not set the flag')
-                v2l = self.refresh(s, 0)
-                self.assertIsNotNone(v2l, f'U+{cp:04X} produced no map')
-                self.assertNotEqual(v2l, ID10, f'U+{cp:04X} was not reordered')
-
-    def test_flag_arabic_presentation_forms_b_end(self):
-        # U+FEFD and U+FEFE, unassigned, are AL by default and flagged
-        for cp in (0xFEFD, 0xFEFE):
-            with self.subTest(hex(cp)):
-                s = self.screen()
-                s.draw('ab ' + chr(cp) + chr(cp))
-                self.assertTrue(s.test_bidi_line_flag(0), f'U+{cp:04X} did not set the flag')
-                v2l = self.refresh(s, 0)
-                self.assertIsNotNone(v2l, f'U+{cp:04X} produced no map')
-                self.assertNotEqual(v2l, ID10, f'U+{cp:04X} was not reordered')
-
-    def test_history(self):
-        # (h) 2 visible rows, 4 rows of one paragraph. Rows 0 and 1 are pushed to
-        # the scrollback. Visible row 0 is five R letters, level 1: (4,3,2,1,0).
-        # Visible row 1 is 12 34 after R text: levels 2,2,1,2,2 -> (3,4,2,0,1)
-        # as derived in test_soft_wrap_unflagged_continuation.
-        s = self.screen(cols=5, lines=2, scrollback=10)
-        for t in ('אבגדה', 'ובזחט', 'יכלמנ', '12 34'):
-            s.draw(t)
-        self.ae(s.historybuf.count, 2)
-        self.ae(self.refresh(s, 0), (4, 3, 2, 1, 0))
-        self.ae(self.refresh(s, 1), (3, 4, 2, 0, 1))
-        # Only the continuation visible: text before it is all in history.
-        s = self.screen(cols=5, lines=1, scrollback=10)
-        for t in ('אבגדה', 'ובזחט', '12 34'):
-            s.draw(t)
-        self.ae(s.historybuf.count, 2)
-        self.ae(self.refresh(s, 0), (3, 4, 2, 0, 1))
-
-    def test_bypass(self):
-        # (i) a row with an image placeholder or scaled text is not reordered
-        s = self.screen()
-        s.draw(A)
-        self.assertIsNotNone(self.refresh(s, 0))
-        s = self.screen()
-        s.draw(A)
-        s.draw(chr(0x10EEEE))
-        self.assertIsNone(self.refresh(s, 0))
-        s = self.screen()
-        s.draw(A)
-        draw_multicell(s, 'x', scale=2)
-        self.assertIsNone(self.refresh(s, 0))
-
-    def selected_columns(self, s, start, end):
-        # the visual columns lit on screen row 0 when logical cells start..end
-        # of it are selected; no other row may be lit
-        s.clear_selection()
-        s.start_selection(start, 0)
-        s.update_selection(end, 0)
-        s.test_bidi_refresh()
-        raw = s.current_selections()
-        offset = len(raw) // s.columns - s.lines
-        self.assertIn(offset, (0, 1))
-        lit = []
-        for y in range(s.lines):
-            row = raw[s.columns * (y + offset) : s.columns * (y + offset + 1)]
-            nonzero = [x for x, b in enumerate(row) if b]
-            if y:
-                self.ae(nonzero, [], f'row {y}')
-            else:
-                lit = nonzero
-        return lit
-
-    def test_selection_permutation(self):
-        # (j) logical cells 3 and 4 of abcאבג sit at visual columns 5 and 4
-        # (v2l = 0 1 2 5 4 3 ...: visual 5 shows logical 3, visual 4 logical 4).
-        s = self.screen()
-        s.draw('abc' + A)
-        self.ae(self.selected_columns(s, 3, 4), [4, 5])
-        # on a row whose map is not its own inverse, a swapped map lights
-        # visual 3 for logical 0 and visual 1 for logical 3
-        s = self.screen(cols=5)
-        s.draw(NSI)
-        self.ae(self.refresh(s, 0), NSI_V2L)
-        self.ae(self.selected_columns(s, 0, 0), [4])
-        self.ae(self.selected_columns(s, 3, 3), [0])
-
-    def test_inverse_maps(self):
-        # (k) logical_x(visual_x(x)) == x; v2l and visual_x are inverse
-        s = self.screen()
-        s.draw('abc' + A + ' d')
-        v2l = self.refresh(s, 0)
-        levels = s.test_bidi_levels(0)
-        for x in range(s.columns):
-            vx = s.test_bidi_visual_x(x, 0)
-            self.ae(s.test_bidi_logical_x(vx, 0), x)
-            self.ae(vx, v2l.index(x))
-            self.ae(s.test_bidi_logical_x(x, 0), v2l[x])
-            self.ae(s.test_bidi_is_rtl(x, 0), bool(levels[x] & 1))
-        # rows without a map give identity
-        self.ae((s.test_bidi_visual_x(2, 3), s.test_bidi_logical_x(2, 3), s.test_bidi_is_rtl(2, 3)), (2, 2, False))
-        # the map above is its own inverse, so this one tells v2l from l2v
-        s = self.screen(cols=5)
-        s.draw(NSI)
-        self.ae(self.refresh(s, 0), NSI_V2L)
-        self.ae(s.test_bidi_levels(0), NSI_LEVELS)
-        self.ae(tuple(s.test_bidi_logical_x(x, 0) for x in range(5)), NSI_V2L)
-        self.ae(tuple(s.test_bidi_visual_x(x, 0) for x in range(5)), NSI_L2V)
-        self.assertNotEqual(NSI_V2L, NSI_L2V)
-
-    def test_upload_permutes_cells(self):
-        # each visual cell of the uploaded buffer is the logical cell v2l[visual],
-        # told apart by fg colour, on a row whose map is not its own inverse
-        with setup_for_testing():
-            s = self.screen(cols=5)
-            fgs = draw_coloured(s, NSI)
-            row = gpu_row(s, test_screen_update_cell_data(s), 0)
-            self.ae(s.test_bidi_v2l(0), NSI_V2L)
-            self.ae([c.fg for c in row], [fgs[NSI_V2L[v]] for v in range(5)])
-
-    def test_widen_merges_flag_and_map(self):
-        # (m) row 0 abcde is Latin, the continuation row holds the only Hebrew.
-        s = self.screen(cols=5, lines=5)
-        s.draw('abcde')
-        s.draw(A)
-        self.assertFalse(s.test_bidi_line_flag(0))
-        self.assertTrue(s.test_bidi_line_flag(1))
-        # Row 1 is R R R blank blank: levels 1,1,1,0,0 -> reverse cols 0..2.
-        self.ae(self.refresh(s, 1), (2, 1, 0, 3, 4))
-        s.resize(5, 25)
-        # merged: abcde + אבג on one row; the flag arrived only through the OR
-        self.assertTrue(s.test_bidi_line_flag(0))
-        v2l = self.refresh(s, 0)
-        # L*5 then R R R at cols 5..7 reversed -> 7 6 5, rest identity
-        self.ae(v2l, tuple(range(5)) + (7, 6, 5) + tuple(range(8, 25)))
-
-    def test_overlay_row_keeps_map(self):
-        # The IME overlay row keeps its map, observed through the real
-        # update-cell-data path
-        with setup_for_testing():
-            s = self.screen(bidi_auto_direction=False)
-            s.draw('abc' + A)
-            s.cursor_position(1, 9)  # row 0, so the overlay stays on the Hebrew row
-            test_screen_update_cell_data(s)
-            self.ae(s.test_bidi_v2l(0), (0, 1, 2, 5, 4, 3, 6, 7, 8, 9))
-            s.test_update_overlay_text('xy')
-            test_screen_update_cell_data(s)
-            self.ae(s.test_bidi_v2l(0), (0, 1, 2, 5, 4, 3, 6, 7, 8, 9))
-
-    def test_option_off_at_runtime(self):
-        # turning bidi off at runtime (config reload) drops the maps on the next
-        # frame instead of leaving the old ones applied to selection, cursor and mouse
-        for opts in ({'bidi_reorder': False}, {'bidi_reorder': True, 'force_ltr': True}):
-            s = self.screen()
-            s.draw('abc' + A)
-            self.ae(self.refresh(s, 0), (0, 1, 2, 5, 4, 3, 6, 7, 8, 9))
-            self.set_options(opts)
-            s.cursor_position(1, 1)
-            s.erase_in_line(2)
-            s.draw('hello')
-            s.test_bidi_refresh()
-            self.assertIsNone(s.test_bidi_v2l(0), opts)
-            self.ae([s.test_bidi_logical_x(x, 0) for x in range(s.columns)], list(ID10), opts)
-
-    def test_resize_narrower_drops_maps(self):
-        # until the next frame, maps sized for the old width must not be used
-        s = self.screen(cols=20, lines=3)
-        s.draw(''.join(chr(0x5D0 + i) for i in range(20)))
-        self.ae(self.refresh(s, 0), tuple(range(19, -1, -1)))
-        s.resize(3, 10)
-        self.ae([s.test_bidi_logical_x(x, 0) for x in range(10)], list(ID10))
-        self.ae([s.test_bidi_visual_x(x, 0) for x in range(10)], list(ID10))
-        self.ae(self.refresh(s, 0), tuple(range(9, -1, -1)))
-
-    def test_selection_clean_after_resize_with_option_off(self):
-        # a resize after bidi is turned off drops the maps, the next selection
-        # apply must leave the selection clean instead of dirty every frame
-        s = self.screen()
-        s.draw('abc' + A)
-        self.refresh(s, 0)
-        s.current_selections()
-        self.set_options({'bidi_reorder': False})
-        s.resize(5, 8)
-        s.test_bidi_refresh()
-        s.current_selections()
-        self.assertFalse(s.is_selection_dirty())
-        s.test_bidi_refresh()
-        self.assertFalse(s.is_selection_dirty())
-
-    def test_latin_paragraph_dirties_only_written_row(self):
-        # with nothing to reorder, a write to one row of a soft-wrapped paragraph
-        # must not redraw the rest of it
-        with setup_for_testing():
-            s = self.screen(cols=10, lines=8)
-            s.draw('x' * 75)
-            test_screen_update_cell_data(s)
-            self.ae(s.linebuf.dirty_lines(), [])
-            s.draw('x')
-            self.ae(s.linebuf.dirty_lines(), [7])
-            s.test_bidi_refresh()
-            self.ae(s.linebuf.dirty_lines(), [7])
-
-    def test_level_change_redraws_paragraph(self):
-        with setup_for_testing():
-            # the paragraph loses its last RTL char: the clean continuation row
-            # was shaped at levels 2,2,1,2,2 (the . is CS between R and EN, so R)
-            # and must be redrawn at level 0. Row 0 keeps its last cell, as
-            # writing it would clear the soft wrap and split the paragraph.
-            s = self.screen(cols=5, lines=5)
-            s.draw('אבגד.')
-            s.draw('12 34')
-            test_screen_update_cell_data(s)
-            self.ae(s.test_bidi_levels(1), (2, 2, 1, 2, 2))
-            self.ae(s.linebuf.dirty_lines(), [])
-            s.cursor_position(1, 1)
-            s.draw('abcd')
-            self.assertTrue(s.linebuf.is_continued(1))
-            self.ae(s.linebuf.dirty_lines(), [0])
-            s.test_bidi_refresh()
-            self.assertIsNone(s.test_bidi_v2l(1))
-            self.ae(s.linebuf.dirty_lines(), [0, 1])
-
-    def test_split_paragraph_redraws_old_continuation(self):
-        # Row 1 holds (12) soft-wrapped after five R letters. N0 makes the brackets
-        # R (EN inside counts as R, R before the opening bracket), so the row is
-        # shaped with levels 1,2,2,1,0 and mirrored brackets. Overwriting the last
-        # cell of row 0 clears its soft wrap: row 1 becomes its own paragraph with
-        # no RTL and no flag, and must be redrawn without levels.
-        with setup_for_testing():
-            s = self.screen(cols=5, lines=5)
-            s.draw('אבגדה')
-            s.draw('(12)')
-            test_screen_update_cell_data(s)
-            self.ae(s.test_bidi_levels(1), (1, 2, 2, 1, 0))
-            self.assertFalse(s.test_bidi_line_flag(1))
-            self.ae(s.linebuf.dirty_lines(), [])
-            s.cursor_position(1, 5)
-            s.draw('x')
-            self.assertFalse(s.linebuf.is_continued(1))
-            self.ae(s.linebuf.dirty_lines(), [0])
-            s.test_bidi_refresh()
-            self.assertIsNone(s.test_bidi_v2l(1))
-            self.ae(s.linebuf.dirty_lines(), [0, 1])
-            row1 = gpu_row(s, test_screen_update_cell_data(s), 1)
-            # the same text rendered on a fresh screen, never bidi
-            f = self.screen(cols=5, lines=5)
-            f.draw('(12)')
-            fresh = gpu_row(f, test_screen_update_cell_data(f), 0)
-            self.assertTrue(any(c.sprite_idx for c in fresh))
-            self.ae([c.sprite_idx for c in row1], [c.sprite_idx for c in fresh])
-
-    def test_split_paragraph_reshapes_lower_part(self):
-        # In the paragraph, searching back from 12 the first strong type is R (ה),
-        # so W7 leaves it EN; ( (ON, unpaired) lies between R and EN (EN counts as
-        # R for N1), so level 1 and mirrored; 12 at level 0 goes to 2 (I1); ב is 1;
-        # the trailing empty cell (WS) is 0 by L1: (1, 2, 2, 1, 0). Overwriting row
-        # 0's last cell clears its soft wrap, so row 1 becomes its own paragraph
-        # with no dirty row: searching back from 12 reaches sos (L), so W7 makes it
-        # L; ( lies between sos and L, level 0, not mirrored; 12 is 0; ב 1; trailing
-        # 0: (0, 0, 0, 1, 0). Row 1 must be reshaped at the new levels, so its
-        # sprites match the same text rendered alone.
-        with setup_for_testing():
-            s = self.screen(cols=5, lines=5)
-            s.draw('אבגדה')
-            s.draw('(12ב')
-            test_screen_update_cell_data(s)
-            self.ae(s.test_bidi_levels(1), (1, 2, 2, 1, 0))
-            self.assertTrue(s.test_bidi_line_flag(1))
-            self.ae(s.linebuf.dirty_lines(), [])
-            s.cursor_position(1, 5)
-            s.draw('ו')
-            self.assertFalse(s.linebuf.is_continued(1))
-            self.ae(s.linebuf.dirty_lines(), [0])
-            row1 = gpu_row(s, test_screen_update_cell_data(s), 1)
-            self.ae(s.test_bidi_levels(1), (0, 0, 0, 1, 0))
-            f = self.screen(cols=5, lines=5)
-            f.draw('(12ב')
-            fresh = gpu_row(f, test_screen_update_cell_data(f), 0)
-            self.assertTrue(any(c.sprite_idx for c in fresh))
-            self.ae([c.sprite_idx for c in row1], [c.sprite_idx for c in fresh])
-
-    def test_split_paragraph_reshapes_after_pause(self):
-        # As test_split_paragraph_reshapes_lower_part, with a paused frame
-        # between the last live frame and the split: the first live frame after
-        # the pause must still see that row 1's levels changed since the last
-        # live frame, as rendering is paused for synchronized output. When the
-        # split comes before the pause, the paused frames resolve the new levels
-        # and reshape row 1, whose levels may have changed since the last live
-        # frame, so the paused upload has glyphs shaped at them; a second paused
-        # frame must not replace the line state the first one kept.
-        def split(s):
-            s.cursor_position(1, 5)
-            s.draw('ו')
-            self.assertFalse(s.linebuf.is_continued(1))
-
-        for split_before_pause in (False, True):
-            for paused_frames in (1, 2):
-                with self.subTest(split_before_pause=split_before_pause, paused_frames=paused_frames), setup_for_testing():
-                    s = self.screen(cols=5, lines=5)
-                    s.draw('אבגדה')
-                    s.draw('(12ב')
-                    test_screen_update_cell_data(s)
-                    self.ae(s.test_bidi_levels(1), (1, 2, 2, 1, 0))
-                    f = self.screen(cols=5, lines=5)
-                    f.draw('(12ב')
-                    fresh = gpu_row(f, test_screen_update_cell_data(f), 0)
-                    self.assertTrue(any(c.sprite_idx for c in fresh))
-                    if split_before_pause:
-                        split(s)
-                    s.pause_rendering(True, 1000)
-                    for i in range(paused_frames):
-                        buf = test_screen_update_cell_data(s)
-                        if split_before_pause:
-                            self.ae(s.test_bidi_levels(1), (0, 0, 0, 1, 0))
-                            self.ae([c.sprite_idx for c in gpu_row(s, buf, 1)], [c.sprite_idx for c in fresh])
-                    if not split_before_pause:
-                        split(s)
-                    s.pause_rendering(False)
-                    row1 = gpu_row(s, test_screen_update_cell_data(s), 1)
-                    self.ae(s.test_bidi_levels(1), (0, 0, 0, 1, 0))
-                    self.ae([c.sprite_idx for c in row1], [c.sprite_idx for c in fresh])
-
-    def test_dirty_row_redraws_only_rows_whose_levels_change(self):
-        # One paragraph of 5 rows, all soft-wrapped. In row 1 the ! (ON) lies
-        # between 3 (EN, counts as R for N1) and a (L) of row 2: N2, embedding
-        # direction, level 0; 12 3 are 2 2 1 2 by I1 (W7 keeps EN, last strong
-        # is R): (2, 2, 1, 2, 0). Writing ב over row 2's first cell puts ! between
-        # R and R: N1, level 1. Rows 0, 3 and 4 keep their levels, so only row 1
-        # (levels) and row 2 (written) are redrawn.
-        text = ('אבגדה', '12 3!', 'abcde', 'fghij', 'klmno')
-        with setup_for_testing():
-            s = self.screen(cols=5, lines=6)
-            for line in text:
-                s.draw(line)
-            test_screen_update_cell_data(s)
-            self.ae(s.test_bidi_levels(1), (2, 2, 1, 2, 0))
-            self.ae(s.linebuf.dirty_lines(), [])
-            count = s.test_bidi_resolve_count()
-            s.cursor_position(3, 1)
-            s.draw('ב')
-            self.ae(s.linebuf.dirty_lines(), [2])
-            s.test_bidi_refresh()
-            self.ae(s.linebuf.dirty_lines(), [1, 2])
-            self.ae(s.historybuf.dirty_lines(), [])
-            self.ae(s.test_bidi_resolve_count() - count, 1)
-            self.ae(s.test_bidi_levels(1), (2, 2, 1, 2, 1))
-            buf = test_screen_update_cell_data(s)
-            f = self.screen(cols=5, lines=6)
-            for line in ('אבגדה', '12 3!', 'בbcde', 'fghij', 'klmno'):
-                f.draw(line)
-            fbuf = test_screen_update_cell_data(f)
-            self.ae(f.test_bidi_levels(1), (2, 2, 1, 2, 1))
-            for y in range(5):
-                fresh = gpu_row(f, fbuf, y)
-                self.assertTrue(any(c.sprite_idx for c in fresh))
-                self.ae([c.sprite_idx for c in gpu_row(s, buf, y)], [c.sprite_idx for c in fresh])
-            # Latin over Latin changes no levels: only the written row is redrawn
-            s.cursor_position(4, 2)
-            s.draw('z')
-            s.test_bidi_refresh()
-            self.ae(s.linebuf.dirty_lines(), [3])
-
-    def test_paused_frame_redraws_only_rows_whose_levels_change(self):
-        # Rows 2 and 3 are one-row paragraphs with levels. Overwriting the last
-        # cell of אבגדה splits it from (12ב: row 1 gets other levels, rows 2 and
-        # 3 keep theirs. A paused frame compares with the last live frame, so
-        # only rows 0 (written) and 1 (levels) are redrawn.
-        # With pixel scroll on the paused snapshot has a leading history row, so
-        # the dirty indices are shifted by one.
-        for pixel_scroll in (False, True):
-            with self.subTest(pixel_scroll=pixel_scroll), setup_for_testing():
-                ps = int(pixel_scroll)
-                s = self.screen(cols=5, lines=5, pixel_scroll=pixel_scroll)
-                s.draw('אבגדה')
-                s.draw('(12ב')
-                parse_bytes(s, '\r\nאב\r\nגד'.encode())
-                test_screen_update_cell_data(s)
-                for y in (1, 2, 3):
-                    self.assertIsNotNone(s.test_bidi_levels(y))
-                s.cursor_position(1, 5)
-                s.draw('ו')
-                s.pause_rendering(True, 1000)
-                s.test_bidi_refresh()
-                self.ae(s.test_bidi_paused_dirty_lines(), [y + ps for y in (0, 1)])
-
-    def test_line_scrolled_into_view_reshaped_after_split(self):
-        # linebuf rows y, אבגדה and (12ב, with x in history. In (12ב, searching
-        # back from 12 the first strong type is R, so W7 leaves it EN; ( lies
-        # between R and EN (as R): level 1; 12 is 2; ב is 1; the trailing cell 0:
-        # (1, 2, 2, 1, 0). Overwriting the last cell of אבגדה clears its soft wrap,
-        # so (12ב becomes its own paragraph: W7 makes 12 L, ( is 0, 12 is 0, ב is
-        # 1: (0, 0, 0, 1, 0). The line was out of view in the last frame and its
-        # paragraph has no dirty row, so it has no state to compare and is
-        # reshaped when it comes back into view.
-        for paused in (False, True):
-            with self.subTest(paused=paused), setup_for_testing():
-                s = self.screen(cols=5, lines=3, scrollback=10)
-                parse_bytes(s, b'x\r\ny\r\n')
-                s.draw('אבגדה')
-                s.draw('(12ב')
-                test_screen_update_cell_data(s)
-                self.ae(s.test_bidi_levels(2), (1, 2, 2, 1, 0))
-                s.scroll(1, True)
-                test_screen_update_cell_data(s)
-                self.ae(s.scrolled_by, 1)
-                s.cursor_position(2, 5)
-                s.draw('ו')
-                self.assertFalse(s.linebuf.is_continued(2))
-                s.scroll(1, False)
-                self.ae(s.scrolled_by, 0)
-                if paused:
-                    s.pause_rendering(True, 1000)
-                row = gpu_row(s, test_screen_update_cell_data(s), 2)
-                self.ae(s.test_bidi_levels(2), (0, 0, 0, 1, 0))
-                f = self.screen(cols=5, lines=3)
-                f.draw('(12ב')
-                fresh = gpu_row(f, test_screen_update_cell_data(f), 0)
-                self.assertTrue(any(c.sprite_idx for c in fresh))
-                self.ae([c.sprite_idx for c in row], [c.sprite_idx for c in fresh])
-
-    def test_paused_frame_row_continuing_from_history(self):
-        # linebuf row 0, (12ב, continues אבגדה in history: levels (1, 2, 2, 1, 0)
-        # as in test_split_paragraph_reshapes_lower_part. The paused snapshot walk
-        # cannot see history, so row 0 resolves alone, as a paragraph of its own:
-        # (0, 0, 0, 1, 0). The paused frame must upload it with glyphs shaped at
-        # those levels, and the next live frame at the paragraph's again. With
-        # pixel scroll on the snapshot has a leading row from history, which this
-        # needs not to see.
-        with setup_for_testing():
-            s = self.screen(cols=5, lines=3, scrollback=10, pixel_scroll=False)
-            s.draw('אבגדה')
-            s.draw('(12ב')
-            parse_bytes(s, b'\r\nx\r\ny')
-            test_screen_update_cell_data(s)
-            self.ae(s.test_bidi_levels(0), (1, 2, 2, 1, 0))
-            s.pause_rendering(True, 1000)
-            buf = test_screen_update_cell_data(s)
-            self.ae(s.test_bidi_levels(0), (0, 0, 0, 1, 0))
-            f = self.screen(cols=5, lines=3)
-            f.draw('(12ב')
-            fresh = gpu_row(f, test_screen_update_cell_data(f), 0)
-            self.assertTrue(any(c.sprite_idx for c in fresh))
-            self.ae([c.sprite_idx for c in gpu_row(s, buf, 0)], [c.sprite_idx for c in fresh])
-            s.pause_rendering(False)
-            buf = test_screen_update_cell_data(s)
-            self.ae(s.test_bidi_levels(0), (1, 2, 2, 1, 0))
-            g = self.screen(cols=5, lines=3)
-            g.draw('אבגדה')
-            g.draw('(12ב')
-            fresh = gpu_row(g, test_screen_update_cell_data(g), 1)
-            self.ae([c.sprite_idx for c in gpu_row(s, buf, 0)], [c.sprite_idx for c in fresh])
-
-    def test_history_slot_reuse_reshapes_line(self):
-        # History line ids are ring slots. X (א2 3( soft-wrapped into W) is
-        # pushed into the slot of O, the oldest history line, which the last
-        # frame showed at row 0 with levels (1, 2, 1, 2, 1). X's new levels are
-        # equal to those, so comparing them as if X were O would skip reshaping
-        # X although its glyphs were shaped at other levels.
-        with setup_for_testing():
-            s = self.screen(cols=5, lines=4, scrollback=0, pixel_scroll=False)
-            s.draw('א2 3ב')  # O
-            parse_bytes(s, b'\r\nh\r\ni\r\nj\r\n')
-            s.draw('א2 3(')  # X
-            s.draw('abcde')  # W
-            parse_bytes(s, b'\r\na\r\nb')
-            test_screen_update_cell_data(s)
-            self.ae(s.test_bidi_levels(0), (1, 2, 1, 2, 0))
-            s.scroll(10, True)
-            test_screen_update_cell_data(s)
-            self.ae(s.test_bidi_levels(0), (1, 2, 1, 2, 1))
-            s.cursor_position(2, 1)
-            s.draw('ב')  # W: the ( of X becomes level 1
-            s.cursor_position(4, 1)
-            parse_bytes(s, b'\n')  # X into the slot of O
-            buf = test_screen_update_cell_data(s)
-            self.ae(s.test_bidi_levels(3), (1, 2, 1, 2, 1))
-            f = self.screen(cols=5, lines=4, pixel_scroll=False)
-            f.draw('א2 3(')
-            f.draw('בbcde')
-            fresh = gpu_row(f, test_screen_update_cell_data(f), 0)
-            self.assertTrue(any(c.sprite_idx for c in fresh))
-            self.ae([c.sprite_idx for c in gpu_row(s, buf, 3)], [c.sprite_idx for c in fresh])
-
-    def test_full_ring_push_reshapes_only_reused_slots(self):
-        # History line ids are ring slots and a push into a full ring reuses
-        # only the oldest slot. The history lines whose slots were not reused
-        # keep their ids and levels, so they are not redrawn.
-        #
-        # The history ring holds 4 lines. Eight lines fill slots 0-3 oldest
-        # first, so the push below reuses slot 0, and the pushed line, history
-        # line 0, is in slot 0. dirty_lines() lists ring slots, so [0] means
-        # the pushed line only. test_bidi_refresh deliberately skips the
-        # scrolled_by bump screen_update_cell_data makes, so the view keeps
-        # the history line numbers of the last frame.
-        def fill():
-            s = self.screen(cols=5, lines=4, scrollback=0, pixel_scroll=False)
-            for i in range(8):
-                s.draw('אב 12')
-                if i < 7:
-                    parse_bytes(s, b'\r\n')
-            self.ae(s.historybuf.count, 4)
-            # apply the history count, then draw every line once so none is
-            # dirty for want of a frame
-            test_screen_update_cell_data(s)
-            self.prerender(s)
-            self.ae(s.scrolled_by, 0)
-            return s
-
-        with setup_for_testing():
-            # the reused slot (the oldest line) is off screen: rows 0-1 show
-            # history lines 1 (slot 2) and 0 (slot 3)
-            s = fill()
-            s.scroll(2, True)
-            test_screen_update_cell_data(s)
-            test_screen_update_cell_data(s)
-            self.ae(s.scrolled_by, 2)
-            self.ae(s.historybuf.dirty_lines(), [])
-            self.ae(s.test_bidi_levels(0), (1, 1, 1, 2, 2))
-            s.cursor_position(4, 1)
-            parse_bytes(s, b'\n')
-            s.test_bidi_refresh()
-            # row 0 now shows slot 3, which keeps its id and levels; row 1
-            # shows the pushed line, new in slot 0
-            self.ae(s.historybuf.dirty_lines(), [0])
-
-            # the reused slot (the oldest line) is on screen at the top: rows
-            # 0-3 show slots 0-3. The pushed line has the levels of the line
-            # it replaces and fill() drew it, so its text is clean and only forgetting
-            # the slot's id marks it dirty: compared with the old line, it would
-            # look unchanged
-            s = fill()
-            s.scroll(10, True)
-            test_screen_update_cell_data(s)
-            test_screen_update_cell_data(s)
-            self.ae(s.scrolled_by, 4)
-            self.ae(s.historybuf.dirty_lines(), [])
-            self.ae(s.test_bidi_levels(0), (1, 1, 1, 2, 2))
-            s.cursor_position(4, 1)
-            parse_bytes(s, b'\n')
-            s.test_bidi_refresh()
-            # rows 0-3 show slots 1, 2, 3, 0: only the pushed line, at row 3
-            # in the reused slot, is dirty
-            self.ae(s.historybuf.dirty_lines(), [0])
-            buf = test_screen_update_cell_data(s)
-            self.ae(s.scrolled_by, 4)
-            f = self.screen(cols=5, lines=4, pixel_scroll=False)
-            f.draw('אב 12')
-            fresh = gpu_row(f, test_screen_update_cell_data(f), 0)
-            self.assertTrue(any(c.sprite_idx for c in fresh))
-            for y in range(4):
-                self.ae([c.sprite_idx for c in gpu_row(s, buf, y)], [c.sprite_idx for c in fresh], f'row {y}')
-
-    def test_history_slot_reuse_reshapes_line_in_paused_frame(self):
-        # A history slot is reused between the last live frame and the pause,
-        # and paused frames compare levels with the last live frame's ids. P is
-        # pushed into the slot of O and X, its continuation, into the slot of H,
-        # which the last frame showed at levels (0, 0, 0, 1, 0). The pause must
-        # forget those ids, otherwise X is compared as if it were H.
-        with setup_for_testing():
-            s = self.screen(cols=5, lines=4, scrollback=0, pixel_scroll=False)
-            parse_bytes(s, b'o\r\n')
-            s.draw('(12ב')  # H
-            parse_bytes(s, b'\r\ni\r\nj\r\n')
-            s.draw('אבגדה')  # P
-            s.draw('(12ב')  # X, continuation of P
-            parse_bytes(s, b'\r\na\r\nb')
-            self.ae(s.historybuf.count, 4)
-            test_screen_update_cell_data(s)
-            self.ae(s.test_bidi_levels(1), (1, 2, 2, 1, 0))
-            s.scroll(10, True)
-            test_screen_update_cell_data(s)
-            self.ae(s.scrolled_by, 4)
-            self.ae(s.test_bidi_levels(1), (0, 0, 0, 1, 0))
-            s.cursor_position(1, 5)
-            s.draw('ו')  # split P from X
-            self.assertFalse(s.linebuf.is_continued(1))
-            s.cursor_position(4, 1)
-            parse_bytes(s, b'\n\n')  # P into the slot of O, X into the slot of H
-            f = self.screen(cols=5, lines=4, pixel_scroll=False)
-            f.draw('(12ב')
-            fresh = gpu_row(f, test_screen_update_cell_data(f), 0)
-            self.assertTrue(any(c.sprite_idx for c in fresh))
-            s.pause_rendering(True, 1000)
-            s.test_bidi_refresh()
-            self.ae(s.test_bidi_paused_dirty_lines(), [2, 3])
-            buf = test_screen_update_cell_data(s)
-            self.ae(s.test_bidi_levels(3), (0, 0, 0, 1, 0))
-            self.ae([c.sprite_idx for c in gpu_row(s, buf, 3)], [c.sprite_idx for c in fresh])
-
-    def test_dirty_row_below_view_redraws_paragraph(self):
-        # scrolled up, a dirty linebuf row of the paragraph below the view
-        # re-resolves the paragraph and redraws the on-screen rows whose levels
-        # change. As in test_dirty_row_redraws_only_rows_whose_levels_change, row
-        # 1 (12 3!) goes from (2, 2, 1, 2, 0) to (2, 2, 1, 2, 1) when ב is
-        # written over the first cell of the next row. Linebuf row 1 (screen row 2)
-        # changes; the two rows above it (linebuf row 0 and the history row of the
-        # same paragraph) keep their levels and are not redrawn.
-        with setup_for_testing():
-            s = self.screen(cols=5, lines=3, scrollback=10)
-            s.draw('אבגדה')
-            s.draw('אבגדה')
-            s.draw('12 3!')
-            s.draw('abcde')
-            self.ae(s.historybuf.count, 1)
-            test_screen_update_cell_data(s)
-            s.scroll(1, True)
-            test_screen_update_cell_data(s)
-            self.ae(s.scrolled_by, 1)
-            self.ae(s.linebuf.dirty_lines(), [])
-            self.ae(s.test_bidi_levels(2), (2, 2, 1, 2, 0))
-            count = s.test_bidi_resolve_count()
-            s.cursor_position(3, 1)
-            s.draw('ב')
-            self.ae(s.scrolled_by, 1)
-            self.ae(s.linebuf.dirty_lines(), [2])
-            s.test_bidi_refresh()
-            self.ae(s.linebuf.dirty_lines(), [1, 2])
-            self.ae(s.historybuf.dirty_lines(), [])
-            self.ae(s.test_bidi_resolve_count() - count, 1)
-            self.ae(s.test_bidi_levels(2), (2, 2, 1, 2, 1))
-
-    def test_tall_paragraph_keeps_uploaded_maps(self):
-        # One paragraph of 400 rows of 'א!' on a 300 line screen, 100 rows in the
-        # history. Each ! (ON) lies between R letters, N1 makes it R (level 1) and
-        # each row maps to (1, 0), except at the end of a resolved window, where the
-        # ! lies between R and eos (L), N2 gives it level 0 and its row maps to
-        # (0, 1). With BIDI_MAX_PARAGRAPH_ROWS = 256:
-        # row 0 resolves [-100, 155], row 156 resolves [28, 283] and row 284
-        # resolves [44, 299]. Later windows must not rewrite the maps of rows
-        # already uploaded with an earlier one, so rows 155 and 283 keep the map
-        # their glyphs were shaped with; 299 is the true end of the paragraph.
-        s = self.screen(cols=2, lines=300, scrollback=200)
-        s.draw('א!' * 400)
-        self.ae(s.historybuf.count, 100)
-        s.test_bidi_refresh()
-        maps = [s.test_bidi_v2l(y) for y in range(s.lines)]
-        self.ae(set(maps), {(0, 1), (1, 0)})
-        self.ae([y for y, m in enumerate(maps) if m == (0, 1)], [155, 283, 299])
-
-    # Paragraph cache. Every trigger starts from a screen warmed until a frame
-    # resolves nothing, then must make the next frame resolve again, and the maps
-    # must equal those of a fresh screen given the same content in one frame.
     def frame(self, s):
         before = s.test_bidi_resolve_count()
         test_screen_update_cell_data(s)
@@ -868,8 +99,7 @@ class TestBidi(BaseTest):
             test_screen_update_cell_data(s)
 
     def plain_maps(self, rows, cols=10, lines=0):
-        # the maps of a screen filled with rows from the top, lines tall
-        # (default: one per row), with nothing pushed into the history
+        # the maps of a screen filled with rows, with nothing pushed into the history
         f = self.screen(cols=cols, lines=lines or len(rows))
         self.fill(f, rows)
         self.ae(f.historybuf.count, 0)
@@ -877,11 +107,8 @@ class TestBidi(BaseTest):
         return self.maps(f)
 
     def trigger_case(self, build, trigger, expect=None, fresh=True):
-        # build() returns a new screen; trigger(s) changes it. Returns the maps
-        # after the trigger frame, equal to those of a fresh screen that sees the
-        # trigger and one frame only (fresh=False when the first frame of a
-        # screen changes the view, as the history count is applied then) and to
-        # expect when given.
+        # maps after the trigger frame, equal to a fresh screen's that sees the trigger and one frame
+        # (fresh=False when a screen's first frame changes the view) and to expect when given
         s = build()
         self.frame(s)
         self.warm(s)
@@ -897,561 +124,776 @@ class TestBidi(BaseTest):
             self.ae(got, expect)
         return got
 
+    def mixed(self, **opts):
+        s = self.screen(**opts)
+        s.draw('abc' + A)
+        return s
+
+    def nsi(self):
+        s = self.screen(cols=5)
+        s.draw(NSI)
+        self.ae(self.refresh(s, 0), NSI_V2L)
+        return s
+
+    def selected_columns(self, s, start, end):
+        # the visual columns lit on row 0 when logical cells start..end are selected; no other row may be lit
+        s.clear_selection()
+        s.start_selection(start, 0)
+        s.update_selection(end, 0)
+        s.test_bidi_refresh()
+        raw = s.current_selections()
+        offset = len(raw) // s.columns - s.lines
+        self.assertIn(offset, (0, 1))
+        rows = [[x for x, b in enumerate(raw[s.columns * (y + offset) : s.columns * (y + offset + 1)]) if b] for y in range(s.lines)]
+        self.ae(rows[1:], [[]] * (s.lines - 1))
+        return rows[0]
+
+    def test_auto_direction_option_default(self):
+        from kitty.options.parse import parse_conf_item
+        from kitty.options.types import defaults
+
+        self.assertIs(defaults.bidi_auto_direction, False)
+        ans = {}
+        parse_conf_item('bidi_auto_direction', 'yes', ans)
+        self.assertIs(ans['bidi_auto_direction'], True)
+
+    def test_levels_and_maps(self):
+        for text, levels, v2l in (
+            ('abc' + A, (0, 0, 0, 1, 1, 1, 0, 0, 0, 0), (0, 1, 2, 5, 4, 3, 6, 7, 8, 9)),
+            ('אב, גד', (1, 1, 1, 1, 1, 1, 0, 0, 0, 0), (5, 4, 3, 2, 1, 0, 6, 7, 8, 9)),
+            ('א好ב', (1, 0, 0, 1, 0, 0, 0, 0, 0, 0), ID10),
+            ('אב好גד', (1, 1, 0, 0, 1, 1, 0, 0, 0, 0), (1, 0, 2, 3, 5, 4, 6, 7, 8, 9)),
+            ('א😀ב', (1, 1, 1, 1, 0, 0, 0, 0, 0, 0), (3, 2, 1, 0, 4, 5, 6, 7, 8, 9)),
+        ):
+            with self.subTest(text=text):
+                s = self.screen()
+                s.draw(text)
+                self.ae((self.refresh(s, 0), s.test_bidi_levels(0)), (v2l, levels))
+        # on the last case's screen: logical cell 1 (span 1) is at visual column 2; the emoji's span of 2 starts at its second cell, column 1
+        self.ae((s.test_bidi_visual_x(1, 0), s.test_bidi_visual_x(1, 0, 2)), (2, 1))
+
+    def test_unflagged_continuation_and_history(self):
+        # the continuation row (levels 2,2,1,2,2) has no RTL character of its own
+        s = self.screen(cols=5, lines=5)
+        s.draw('אבגדה12 34')
+        self.ae((bool(s.line(1).as_ansi()), s.test_bidi_line_flag(1), s.test_bidi_line_flag(0)), (True, False, True))
+        self.ae([self.refresh(s, 0), s.test_bidi_levels(1), self.refresh(s, 1)], [(4, 3, 2, 1, 0), (2, 2, 1, 2, 2), (3, 4, 2, 0, 1)])
+        for lines, texts, rows in (
+            (2, ('אבגדה', 'ובזחט', 'יכלמנ', '12 34'), ((0, (4, 3, 2, 1, 0)), (1, (3, 4, 2, 0, 1)))),
+            (1, ('אבגדה', 'ובזחט', '12 34'), ((0, (3, 4, 2, 0, 1)),)),
+        ):
+            with self.subTest(lines=lines):
+                s = self.screen(cols=5, lines=lines, scrollback=10)
+                s.draw(''.join(texts))
+                self.ae(s.historybuf.count, 2)
+                self.ae([self.refresh(s, y) for y, _ in rows], [v2l for _, v2l in rows])
+
+    def test_no_map_without_reordering(self):
+        for what, text, opts in (('latin only', 'hello world', {}), ('option off', 'abc' + A, {'bidi_reorder': False})):
+            with self.subTest(what):
+                s = self.screen(**opts)
+                s.draw(text)
+                self.ae((s.test_bidi_line_flag(0), self.refresh(s, 0)), (False, None))
+        self.assertIsNone(self.refresh(self.mixed(force_ltr=True), 0))  # force_ltr wins over bidi_reorder
+
+    def test_flag_latch(self):
+        # the flag is set when a reorderable codepoint is drawn and survives erasing it
+        s = self.screen()
+        s.draw('א')
+        flags = [s.test_bidi_line_flag(0)]
+        s.erase_in_line(0)
+        flags.append(s.test_bidi_line_flag(0))
+        s.cursor_position(1, 1)
+        s.erase_in_line(2)
+        self.ae((flags, s.test_bidi_line_flag(0), self.refresh(s, 0)), ([True, True], True, None))  # no map from the stale flag
+
+    def test_flag_range_boundaries(self):
+        # Each side of the classifier's range boundaries; the zero-width U+08FF, U+0900, U+FE00, U+11000 and U+FEFF never reach
+        # the flag test, so the nearest drawable codepoint on that side stands in. RLM is only seen by the leading-mark path.
+        flagged = (0x590, 0x8C9, 0xFB1D, 0xFDFF, 0xFE70, 0xFEFE, 0x10800, 0x10FFF, 0x1E800, 0x1EFFF)
+        unflagged = (0x58F, 0x904, 0xFB1C, 0xFE10, 0xFE6F, 0xFF01, 0x107FF, 0x11003, 0x1E7FF, 0x1F000)
+        for cp, want in [(cp, True) for cp in flagged] + [(cp, False) for cp in unflagged]:
+            with self.subTest(hex(cp)):
+                s = self.screen()
+                s.draw(chr(cp))
+                self.assertGreater(s.cursor.x, 0, 'codepoint did not draw')
+                self.assertIs(s.test_bidi_line_flag(0), want)
+        self.ae(self.screen().test_bidi_flag_misses(), [0x200F])
+
+    def test_flag_named_scripts(self):
+        # FriBidi 14: no assigned R/AL letter lies outside the flag; U+FEFD and U+FEFE are unassigned, AL by default
+        for cp in (0x0710, 0x0784, 0x07CA, 0x0800, 0x0840, 0x08A0, 0x0870, 0xFB2A, 0xFB50, 0xFE8D, 0x10A10, 0x1E900, 0x1EE00, 0xFEFD, 0xFEFE):
+            with self.subTest(hex(cp)):
+                s = self.screen()
+                s.draw('ab ' + chr(cp) + chr(cp))
+                v2l = self.refresh(s, 0)
+                self.assertTrue(v2l and v2l != ID10, f'U+{cp:04X} was not flagged and reordered')
+
+    def test_bypass(self):
+        # a row with an image placeholder or scaled text is not reordered
+        for what, extra, mapped in (
+            ('plain', lambda s: None, True),
+            ('image placeholder', lambda s: s.draw(chr(0x10EEEE)), False),
+            ('scaled text', lambda s: draw_multicell(s, 'x', scale=2), False),
+        ):
+            with self.subTest(what):
+                s = self.screen()
+                s.draw(A)
+                extra(s)
+                self.ae(self.refresh(s, 0) is not None, mapped)
+
+    def test_selection_and_inverse_maps(self):
+        # NSI's map is not its own inverse: a swapped map lights visual 3 for logical 0 and visual 1 for logical 3
+        s = self.nsi()
+        self.ae([self.selected_columns(self.mixed(), 3, 4), self.selected_columns(s, 0, 0), self.selected_columns(s, 3, 3)], [[4, 5], [4], [0]])
+        s = self.screen()
+        s.draw('abc' + A + ' d')
+        v2l = self.refresh(s, 0)
+        levels = s.test_bidi_levels(0)
+        for x in range(s.columns):
+            vx = s.test_bidi_visual_x(x, 0)
+            self.ae(
+                (s.test_bidi_logical_x(vx, 0), vx, s.test_bidi_logical_x(x, 0), s.test_bidi_is_rtl(x, 0)), (x, v2l.index(x), v2l[x], bool(levels[x] & 1)), x
+            )
+        self.ae((s.test_bidi_visual_x(2, 3), s.test_bidi_logical_x(2, 3), s.test_bidi_is_rtl(2, 3)), (2, 2, False))
+        s = self.nsi()
+        self.ae(
+            (s.test_bidi_levels(0), tuple(s.test_bidi_logical_x(x, 0) for x in range(5)), tuple(s.test_bidi_visual_x(x, 0) for x in range(5))),
+            (NSI_LEVELS, NSI_V2L, NSI_L2V),
+        )
+
+    def test_upload_permutes_cells(self):
+        # each visual cell is the logical cell v2l[visual], told apart by fg colour, on a map that is not its own inverse
+        s = self.screen(cols=5)
+        fgs = draw_coloured(s, NSI)
+        self.ae([c.fg for c in self.uploaded(s, 0)], [fgs[NSI_V2L[v]] for v in range(5)])
+        s = self.screen(force_ltr=True)
+        fgs = draw_coloured(s, 'abc' + A)
+        self.ae([c.fg for c in self.uploaded(s, 0)[: len(fgs)]], fgs)
+
+    def test_widen_merges_flag_and_map(self):
+        s = self.screen(cols=5, lines=5)
+        s.draw('abcde' + A)
+        self.ae(([s.test_bidi_line_flag(0), s.test_bidi_line_flag(1)], self.refresh(s, 1)), ([False, True], (2, 1, 0, 3, 4)))
+        s.resize(5, 25)
+        self.ae((s.test_bidi_line_flag(0), self.refresh(s, 0)), (True, tuple(range(5)) + (7, 6, 5) + tuple(range(8, 25))))
+
+    def test_overlay_row_keeps_map(self):
+        # the IME overlay row keeps its map, observed through the real update-cell-data path
+        s = self.mixed(bidi_auto_direction=False)
+        s.cursor_position(1, 9)
+        test_screen_update_cell_data(s)
+        before = s.test_bidi_v2l(0)
+        s.test_update_overlay_text('xy')
+        test_screen_update_cell_data(s)
+        self.ae((before, s.test_bidi_v2l(0)), ((0, 1, 2, 5, 4, 3) + ID10[6:],) * 2)
+
+    def test_option_off_at_runtime(self):
+        # turning bidi off at runtime drops the maps on the next frame; a resize after that must leave the selection clean
+        for opts in ({'bidi_reorder': False}, {'bidi_reorder': True, 'force_ltr': True}):
+            s = self.mixed()
+            self.ae(self.refresh(s, 0), (0, 1, 2, 5, 4, 3) + ID10[6:])
+            self.set_options(opts)
+            s.cursor_position(1, 1)
+            s.erase_in_line(2)
+            s.draw('hello')
+            s.test_bidi_refresh()
+            self.ae((s.test_bidi_v2l(0), [s.test_bidi_logical_x(x, 0) for x in range(s.columns)]), (None, list(ID10)), opts)
+        s = self.mixed()
+        self.refresh(s, 0)
+        s.current_selections()
+        self.set_options({'bidi_reorder': False})
+        s.resize(5, 8)
+        s.test_bidi_refresh()
+        s.current_selections()
+        self.assertFalse(s.is_selection_dirty())
+        s.test_bidi_refresh()
+        self.assertFalse(s.is_selection_dirty())
+
+    def test_resize_narrower_drops_maps(self):
+        # until the next frame, maps sized for the old width must not be used
+        s = self.screen(cols=20, lines=3)
+        s.draw(''.join(chr(0x5D0 + i) for i in range(20)))
+        self.ae(self.refresh(s, 0), tuple(range(19, -1, -1)))
+        s.resize(3, 10)
+        self.ae([(s.test_bidi_logical_x(x, 0), s.test_bidi_visual_x(x, 0)) for x in range(10)], [(x, x) for x in range(10)])
+        self.ae(self.refresh(s, 0), tuple(range(9, -1, -1)))
+
+    def paragraph(self, *rows, lines=5, **opts):
+        # a 5 column screen with each row drawn in turn, so soft-wrapped into one paragraph
+        s = self.screen(cols=5, lines=lines, **opts)
+        for row in rows:
+            s.draw(row)
+        return s
+
+    def split(self, s, row=1, ch='ו'):
+        # overwrite the last cell of the row above linebuf row `row`, which clears its soft wrap
+        s.cursor_position(row, 5)
+        s.draw(ch)
+        self.assertFalse(s.linebuf.is_continued(row))
+
+    def assert_shaped(self, s, y, fresh, buf=None, msg=''):
+        # the glyphs of row y (in buf, or in a new frame) are those of its text shaped alone
+        self.ae(self.sprites(gpu_row(s, test_screen_update_cell_data(s) if buf is None else buf, y)), fresh, msg)
+
+    def test_latin_paragraph_dirties_only_written_row(self):
+        # nothing to reorder: a write to one row of a soft-wrapped paragraph must not redraw the rest of it
+        s = self.screen(cols=10, lines=8)
+        s.draw('x' * 75)
+        test_screen_update_cell_data(s)
+        self.ae(self.dirty(s), [])
+        s.draw('x')
+        s.test_bidi_refresh()
+        self.ae(self.dirty(s), [7])
+
+    def test_level_change_redraws_paragraph(self):
+        # losing the last RTL char: row 1, shaped at 2,2,1,2,2, must redraw at level 0
+        s = self.paragraph('אבגד.', '12 34')
+        test_screen_update_cell_data(s)
+        self.ae((s.test_bidi_levels(1), self.dirty(s)), ((2, 2, 1, 2, 2), []))
+        s.cursor_position(1, 1)
+        s.draw('abcd')  # row 0 keeps its last cell, as writing it would split the paragraph
+        self.ae((s.linebuf.is_continued(1), self.dirty(s)), (True, [0]))
+        s.test_bidi_refresh()
+        self.ae((s.test_bidi_v2l(1), self.dirty(s)), (None, [0, 1]))
+
+    def test_split_paragraph_redraws_old_continuation(self):
+        # once split, row 1 (N0 made the brackets of (12) R) has no RTL and no flag: redraw it plain
+        s = self.paragraph('אבגדה', '(12)')
+        test_screen_update_cell_data(s)
+        self.ae((s.test_bidi_levels(1), s.test_bidi_line_flag(1), self.dirty(s)), ((1, 2, 2, 1, 0), False, []))
+        self.split(s, ch='x')
+        s.test_bidi_refresh()
+        self.ae((s.test_bidi_v2l(1), self.dirty(s)), (None, [0, 1]))
+        self.assert_shaped(s, 1, self.fresh_sprites('(12)'))
+
+    def test_split_paragraph_reshapes_lower_part(self):
+        # split changes row 1 to 0,0,0,1,0; a paused frame sees the change since the last live frame, a second pause keeps it
+        for split_before_pause, paused_frames in ((False, 0), (False, 1), (False, 2), (True, 1), (True, 2)):
+            with self.subTest(split_before_pause=split_before_pause, paused_frames=paused_frames):
+                s = self.paragraph('אבגדה', '(12ב')
+                test_screen_update_cell_data(s)
+                self.ae((s.test_bidi_levels(1), s.test_bidi_line_flag(1), self.dirty(s)), ((1, 2, 2, 1, 0), True, []))
+                fresh = self.fresh_sprites('(12ב')
+                if split_before_pause:
+                    self.split(s)
+                if paused_frames:
+                    s.pause_rendering(True, 1000)
+                for i in range(paused_frames):
+                    buf = test_screen_update_cell_data(s)
+                    if split_before_pause:
+                        self.ae(s.test_bidi_levels(1), (0, 0, 0, 1, 0))
+                        self.assert_shaped(s, 1, fresh, buf)
+                if not split_before_pause:
+                    self.split(s)
+                    if not paused_frames:
+                        self.ae(self.dirty(s), [0])
+                if paused_frames:
+                    s.pause_rendering(False)
+                self.ae((self.sprites(self.uploaded(s, 1)), s.test_bidi_levels(1)), (fresh, (0, 0, 0, 1, 0)))
+
+    def beta_over_a(self, s, y, scrolled_by=0):
+        # ב over row 3 turns the ! ending row 1 from N2 level 0 into N1 level 1: one re-resolve redraws row 1 (levels) and row 2 (written)
+        count = s.test_bidi_resolve_count()
+        s.cursor_position(3, 1)
+        s.draw('ב')
+        self.ae((s.scrolled_by, self.dirty(s)), (scrolled_by, [2]))
+        s.test_bidi_refresh()
+        self.ae((self.dirty(s), s.historybuf.dirty_lines(), s.test_bidi_resolve_count() - count, s.test_bidi_levels(y)), ([1, 2], [], 1, (2, 2, 1, 2, 1)))
+
+    def test_dirty_row_redraws_only_rows_whose_levels_change(self):
+        s = self.paragraph('אבגדה', '12 3!', 'abcde', 'fghij', 'klmno', lines=6)
+        test_screen_update_cell_data(s)
+        self.ae((s.test_bidi_levels(1), self.dirty(s)), ((2, 2, 1, 2, 0), []))
+        self.beta_over_a(s, 1)
+        buf = test_screen_update_cell_data(s)
+        f = self.paragraph('אבגדה', '12 3!', 'בbcde', 'fghij', 'klmno', lines=6)
+        fbuf = test_screen_update_cell_data(f)
+        self.ae(f.test_bidi_levels(1), (2, 2, 1, 2, 1))
+        self.ae([self.sprites(gpu_row(s, buf, y)) for y in range(5)], [self.sprites(gpu_row(f, fbuf, y)) for y in range(5)])
+        s.cursor_position(4, 2)
+        s.draw('z')  # Latin over Latin changes no levels: only the written row redraws
+        s.test_bidi_refresh()
+        self.ae(self.dirty(s), [3])
+
+    def test_paused_frame_redraws_only_rows_whose_levels_change(self):
+        # only rows 0 (written) and 1 redraw; with pixel scroll the snapshot has a leading row, indices shift by one
+        for pixel_scroll in (False, True):
+            with self.subTest(pixel_scroll=pixel_scroll):
+                s = self.paragraph('אבגדה', '(12ב', pixel_scroll=pixel_scroll)
+                parse_bytes(s, '\r\nאב\r\nגד'.encode())
+                test_screen_update_cell_data(s)
+                self.assertTrue(all(s.test_bidi_levels(y) is not None for y in (1, 2, 3)))
+                self.split(s)
+                s.pause_rendering(True, 1000)
+                s.test_bidi_refresh()
+                self.ae(s.test_bidi_paused_dirty_lines(), [y + int(pixel_scroll) for y in (0, 1)])
+
+    def test_line_scrolled_into_view_reshaped_after_split(self):
+        # (12ב split while out of view: no state to compare, so it reshapes when scrolled back in
+        for paused in (False, True):
+            with self.subTest(paused=paused):
+                s = self.screen(cols=5, lines=3, scrollback=10)
+                parse_bytes(s, b'x\r\ny\r\n')
+                s.draw('אבגדה(12ב')
+                test_screen_update_cell_data(s)
+                self.ae(s.test_bidi_levels(2), (1, 2, 2, 1, 0))
+                s.scroll(1, True)
+                test_screen_update_cell_data(s)
+                self.ae(s.scrolled_by, 1)
+                self.split(s, row=2)
+                s.scroll(1, False)
+                self.ae(s.scrolled_by, 0)
+                if paused:
+                    s.pause_rendering(True, 1000)
+                self.ae((self.sprites(self.uploaded(s, 2)), s.test_bidi_levels(2)), (self.fresh_sprites('(12ב'), (0, 0, 0, 1, 0)))
+
+    def test_paused_frame_row_continuing_from_history(self):
+        # row 0 (12ב continues from history; the paused snapshot resolves row 0 alone at 0,0,0,1,0, the next live frame at 1,2,2,1,0
+        s = self.paragraph('אבגדה', '(12ב', lines=3, scrollback=10, pixel_scroll=False)
+        parse_bytes(s, b'\r\nx\r\ny')
+        test_screen_update_cell_data(s)
+        self.ae(s.test_bidi_levels(0), (1, 2, 2, 1, 0))
+        s.pause_rendering(True, 1000)
+        buf = test_screen_update_cell_data(s)
+        self.ae(s.test_bidi_levels(0), (0, 0, 0, 1, 0))
+        self.assert_shaped(s, 0, self.fresh_sprites('(12ב'), buf)
+        s.pause_rendering(False)
+        buf = test_screen_update_cell_data(s)
+        self.assert_shaped(s, 0, self.sprites(self.uploaded(self.paragraph('אבגדה', '(12ב', lines=3), 1)), buf)
+
+    def test_history_slot_reuse_reshapes_line(self):
+        # X (א2 3() is pushed into O's slot; comparing X as O would skip reshaping since X's glyphs were shaped at O's levels
+        s = self.screen(cols=5, lines=4, scrollback=0, pixel_scroll=False)
+        s.draw('א2 3ב')  # O
+        parse_bytes(s, b'\r\nh\r\ni\r\nj\r\n')
+        s.draw('א2 3(abcde')  # X, W
+        parse_bytes(s, b'\r\na\r\nb')
+        test_screen_update_cell_data(s)
+        self.ae(s.test_bidi_levels(0), (1, 2, 1, 2, 0))
+        s.scroll(10, True)
+        test_screen_update_cell_data(s)
+        self.ae(s.test_bidi_levels(0), (1, 2, 1, 2, 1))
+        s.cursor_position(2, 1)
+        s.draw('ב')  # W: the ( of X becomes level 1
+        s.cursor_position(4, 1)
+        parse_bytes(s, b'\n')  # X into the slot of O
+        buf = test_screen_update_cell_data(s)
+        self.ae(s.test_bidi_levels(3), (1, 2, 1, 2, 1))
+        self.assert_shaped(s, 3, self.fresh_sprites('א2 3(בbcde', pixel_scroll=False), buf)
+
+    def test_full_ring_push_reshapes_only_reused_slots(self):
+        # a full ring (4 slots) reuses only slot 0; the other lines keep their ids and levels, so only slot 0 is dirty
+        def ring():
+            s = self.screen(cols=5, lines=4, scrollback=0, pixel_scroll=False)
+            parse_bytes(s, '\r\n'.join(['אב 12'] * 8).encode())
+            test_screen_update_cell_data(s)
+            self.prerender(s)
+            return s
+
+        def push(s, scroll):
+            s.scroll(scroll, True)
+            test_screen_update_cell_data(s)
+            test_screen_update_cell_data(s)
+            self.ae((s.scrolled_by, s.historybuf.dirty_lines(), s.test_bidi_levels(0)), (min(scroll, 4), [], (1, 1, 1, 2, 2)))
+            s.cursor_position(4, 1)
+            parse_bytes(s, b'\n')
+            s.test_bidi_refresh()
+
+        # the reused slot is off screen: row 0 shows slot 3, keeping its id and levels
+        s = ring()
+        push(s, 2)
+        self.ae(s.historybuf.dirty_lines(), [0])
+        # the reused slot is on screen: clean text and same levels, so only forgetting the slot's id marks it dirty
+        s = ring()
+        push(s, 10)
+        self.ae(s.historybuf.dirty_lines(), [0])
+        buf = test_screen_update_cell_data(s)
+        fresh = self.fresh_sprites('אב 12', pixel_scroll=False)
+        for y in range(4):
+            self.assert_shaped(s, y, fresh, buf, f'row {y}')
+
+    def test_history_slot_reuse_reshapes_line_in_paused_frame(self):
+        # P is pushed into O's slot and X (continuation) into H's slot: the pause must forget those ids, else X is compared as H
+        s = self.screen(cols=5, lines=4, scrollback=0, pixel_scroll=False)
+        parse_bytes(s, b'o\r\n')
+        s.draw('(12ב')  # H
+        parse_bytes(s, b'\r\ni\r\nj\r\n')
+        s.draw('אבגדה(12ב')  # P, X
+        parse_bytes(s, b'\r\na\r\nb')
+        test_screen_update_cell_data(s)
+        self.ae(s.test_bidi_levels(1), (1, 2, 2, 1, 0))
+        s.scroll(10, True)
+        test_screen_update_cell_data(s)
+        self.ae((s.scrolled_by, s.test_bidi_levels(1)), (4, (0, 0, 0, 1, 0)))
+        self.split(s)  # P from X
+        s.cursor_position(4, 1)
+        parse_bytes(s, b'\n\n')  # P into the slot of O, X into the slot of H
+        fresh = self.fresh_sprites('(12ב', pixel_scroll=False)
+        s.pause_rendering(True, 1000)
+        s.test_bidi_refresh()
+        self.ae(s.test_bidi_paused_dirty_lines(), [2, 3])
+        buf = test_screen_update_cell_data(s)
+        self.ae(s.test_bidi_levels(3), (0, 0, 0, 1, 0))
+        self.assert_shaped(s, 3, fresh, buf)
+
+    def test_dirty_row_below_view_redraws_paragraph(self):
+        # scrolled up one row: a dirty row below view re-resolves the paragraph; row 2 redraws, others keep their levels
+        s = self.paragraph('אבגדה', 'אבגדה', '12 3!', 'abcde', lines=3, scrollback=10)
+        test_screen_update_cell_data(s)
+        s.scroll(1, True)
+        test_screen_update_cell_data(s)
+        self.ae((s.scrolled_by, self.dirty(s), s.test_bidi_levels(2)), (1, [], (2, 2, 1, 2, 0)))
+        self.beta_over_a(s, 2, scrolled_by=1)
+
+    def test_tall_paragraph_keeps_uploaded_maps(self):
+        # 400 rows on 300 lines (100 in history): ! between R letters maps (1,0) except at the window end where it is (0,1)
+        s = self.screen(cols=2, lines=300, scrollback=200)
+        s.draw('א!' * 400)
+        self.ae(s.historybuf.count, 100)
+        s.test_bidi_refresh()
+        maps = self.maps(s)
+        self.ae(set(maps), {(0, 1), (1, 0)})
+        self.ae([y for y, m in enumerate(maps) if m == (0, 1)], [155, 283, 299])
+
+    ABC_A = (0, 1, 2, 5, 4, 3, 6, 7, 8, 9)
+    EDGE_PARAGRAPH = 'אבג abאב 12ab'
+    MIXED = 'alpha שלום beta עולם (12) gamma'[:30]
+    MIXED_STATE = (  # (maps, levels)
+        ((0, 1, 2, 3, 4, 5, 9, 8, 7, 6),) * 2 + ((4, 2, 3, 1, 0, 5, 6, 7, 8, 9), None),
+        ((0,) * 6 + (1,) * 4,) * 2 + ((1, 1, 2, 2, 1, 0, 0, 0, 0, 0), None),
+    )
+
+    def state(self, s):
+        return self.maps(s), tuple(s.test_bidi_levels(y) for y in range(s.lines))
+
+    def filled(self, rows, **opts):
+        s = self.screen(**opts)
+        self.fill(s, rows)
+        return s
+
+    def drawn(self, text, **opts):
+        s = self.screen(**opts)
+        s.draw(text)
+        return s
+
+    def put(self, s, y, x, text):
+        s.cursor_position(y, x)
+        s.draw(text)
+
+    def warmed(self, text, **opts):
+        s = self.drawn(text, **opts)
+        self.frame(s)
+        self.warm(s)
+        return s
+
+    def history(self, rows, up=0):
+        # 5x3 screen, one row per line, every history line rendered once
+        s = self.screen(cols=5, lines=3, scrollback=10)
+        for r in rows:
+            parse_bytes(s, r.encode() + b'\r\n')
+        self.prerender(s)
+        if up:
+            s.scroll(up, True)
+        return s
+
+    def stacked(self, lines):
+        s = self.screen(cols=5, lines=3, scrollback=10)
+        for line in lines:
+            s.draw(line)
+        return s
+
+    def same_as(self, s, f):
+        # s has the maps and levels of a fresh screen f that only saw the final text
+        self.frame(f)
+        self.ae(self.state(s), self.state(f))
+
+    def toggle_drops_maps(self, text, v2l, rtl, **opts):
+        # bidi_reorder off then on, force_ltr on then off: either drops the maps, undoing it must resolve again
+        on = {'bidi_reorder': True, 'force_ltr': False, **opts}
+        for off in ({**on, 'bidi_reorder': False}, {**on, 'force_ltr': True}):
+            with self.subTest(off=off):
+                s = self.warmed(text, **opts)
+                self.ae(s.test_bidi_v2l(0), v2l)
+                self.set_options(off)
+                self.frame(s)
+                self.assertIsNone(s.test_bidi_v2l(0), off)
+                self.set_options(on)
+                self.assertGreater(self.frame(s), 0, off)
+                self.ae((s.test_bidi_v2l(0), s.test_bidi_paragraph_rtl(0), self.frame(s)), (v2l, rtl, 0), off)
+
     def test_cache_reuses_unchanged_paragraphs(self):
-        # Unchanged rows reuse their maps and resolve nothing; one written cell
-        # makes only its own paragraph resolve again (trigger: a dirty row).
-        # 'אבג abc' at the forced paragraph level 0: the letters are level 1,
-        # the space (between R and L, N2) and abc level 0, so every row has the
-        # non-trivial map (2, 1, 0, 3, 4, ...).
-        with setup_for_testing():
-            s = self.screen()
-            rows = ['אבג abc'] * 3
-            self.fill(s, rows)
-            self.ae(self.frame(s), 3)
-            self.ae(self.frame(s), 0)
-            before = self.maps(s)
-            self.assertTrue(all(before[y] is not None for y in range(3)))
-            self.assertIsNone(before[3])
-            s.current_selections()
-            self.assertFalse(s.is_selection_dirty())
-            s.cursor_position(2, 10)
-            s.draw('z')
-            self.ae(self.frame(s), 1)
-            after = self.maps(s)
-            self.ae(after[0], before[0])
-            self.ae(after[2], before[2])
-            f = self.screen()
-            self.fill(f, rows)
-            f.cursor_position(2, 10)
-            f.draw('z')
-            self.frame(f)
-            self.ae(after, self.maps(f))
-            self.ae(self.frame(s), 0)
+        # trigger: one dirty row makes only its own paragraph resolve again
+        rows = ['אבג abc'] * 3
+        s = self.filled(rows)
+        self.ae([self.frame(s), self.frame(s)], [3, 0])
+        before = self.maps(s)
+        self.ae([m is None for m in before], [False] * 3 + [True] * 2)
+        s.current_selections()
+        self.assertFalse(s.is_selection_dirty())
+        self.put(s, 2, 10, 'z')
+        self.ae(self.frame(s), 1)
+        after = self.maps(s)
+        self.ae((after[0], after[2]), (before[0], before[2]))
+        f = self.filled(rows)
+        self.put(f, 2, 10, 'z')
+        self.frame(f)
+        self.ae(after, self.maps(f))
+        self.ae(self.frame(s), 0)
 
-    def test_cache_scroll_index(self):
-        # Trigger: the screen scrolls (index at the last row). Every row now
-        # holds another line, so no stamp may be trusted.
-        rows = ['אבג abc', 'abc אבג', 'אב', 'xyz', 'אבגד']
+    def test_cache_view_change_resolves_again(self):
+        # every trigger changes which line a render row shows (or the layout) without a dirty row: no stamp may be trusted
+        rows = ['אבג abc', 'abc אבג', 'אב', 'xyz', 'אבגדה']
+        hist = ['אבג', 'abאב', 'אב12', 'xyz', 'אבגדה', 'a', 'אבג abc']
+        long_row = 'אבגדהוזחטיכלמ'
 
-        def build():
-            s = self.screen()
-            self.fill(s, rows)
-            return s
-
-        def trigger(s):
-            parse_bytes(s, b'\x1b[5;1H\x1bD')
-
-        with setup_for_testing():
-            got = self.trigger_case(build, trigger)
-            f = self.screen()
-            self.fill(f, rows[1:])
-            self.frame(f)
-            self.ae(got, self.maps(f))
-
-    def test_cache_reverse_index(self):
-        # Trigger: reverse index at the top row moves every line down one row.
-        rows = ['אבג abc', 'abc אבג', 'אב', 'xyz', 'אבגד']
-
-        def build():
-            s = self.screen()
-            self.fill(s, rows)
-            return s
-
-        def trigger(s):
-            parse_bytes(s, b'\x1b[1;1H\x1bM')
-
-        with setup_for_testing():
-            got = self.trigger_case(build, trigger)
-            f = self.screen()
-            self.fill(f, [''] + rows[:-1])
-            self.frame(f)
-            self.ae(got, self.maps(f))
-
-    def test_cache_insert_delete_lines_net_zero(self):
-        # Trigger: insert then delete a line at row 0 of the alt screen. The
-        # insert pushes the paragraph's second row off the bottom, the delete
-        # brings the long row back to row 3 with a blank row 4 under it. The
-        # long row keeps its wrap flag, so row 4 still counts as its
-        # continuation: the paragraph is still [3, 4] and matches the stored
-        # bounds, only the linebuf movement generation forces the re-resolve.
-        # 10 R letters at level 1 reverse fully: (9, ..., 0); the blank row 4
-        # is all level 0 and unmapped.
-        def build():
+        def net_zero_build():
             s = self.screen()
             parse_bytes(s, b'\x1b[?1049h')
-            s.cursor_position(4, 1)
-            s.draw('אבגדהוזחטיכלמ')
+            self.put(s, 4, 1, long_row)
             s.cursor_position(1, 1)
             return s
 
-        def trigger(s):
+        def net_zero(s):
+            # the long row comes back to row 3 with blank row 4 still its continuation: only the linebuf movement generation differs
             parse_bytes(s, b'\x1b[L\x1b[M')
             self.assertTrue(s.linebuf.is_continued(4))
 
-        with setup_for_testing():
-            rev = tuple(range(9, -1, -1))
-            self.trigger_case(build, trigger, (None, None, None, rev, None))
-
-    def test_cache_scrollback_view(self):
-        # Trigger: scrolling the view up one line shows other lines on every row
-        rows = ['אבג', 'abאב', 'אב12', 'xyz', 'אבגדה', 'a', 'אבג abc']
-
-        def build():
-            s = self.screen(cols=5, lines=3, scrollback=10)
-            for r in rows:
-                parse_bytes(s, r.encode() + b'\r\n')
-            self.prerender(s)
-            return s
-
-        def trigger(s):
-            s.scroll(1, True)
-
-        with setup_for_testing():
-            # the last line soft-wraps onto two rows, then comes a blank row: the
-            # view showed 'אבג a', 'bc' and the blank row, one line up it shows
-            # 'a' and the wrapped paragraph. The paragraph fits in the view both
-            # times, so its stamps no longer match its render rows.
-            self.trigger_case(build, trigger, self.plain_maps(rows[5:], 5, lines=3), fresh=False)
-
-    # A soft-wrapped paragraph of three rows on 5 columns, of which one row is
-    # out of view after the scroll. Its range-y bounds are the same before and
-    # after, and the render rows it keeps on screen held two of its own rows last
-    # frame, so their stamps still match: only the scroll in the frame key makes
-    # it resolve again. The expected maps are those of the paragraph alone at the
-    # top of a fresh screen.
-    EDGE_PARAGRAPH = 'אבג abאב 12ab'
-
-    def edge_paragraph_maps(self):
-        f = self.screen(cols=5, lines=5)
-        f.draw(self.EDGE_PARAGRAPH)
-        self.ae(f.historybuf.count, 0)
-        self.frame(f)
-        m = self.maps(f)
-        self.assertTrue(all(m[y] is not None for y in range(3)))
-        self.ae(m[3:], (None, None))
-        return m
-
-    def test_cache_scrollback_view_crossing_bottom_edge(self):
-        # Trigger: scrolling the view up one line. One Latin line in the
-        # history, two on screen, then the paragraph on screen rows 2-4. After
-        # the scroll the view shows the history line, the two Latin lines and
-        # the paragraph's first two rows; its third row is below the view. The
-        # extra leading render row of pixel scroll is above the history line,
-        # where there is no line.
-        def build():
+        def bottom_build():
             s = self.screen(cols=5, lines=5, scrollback=10)
             parse_bytes(s, b'x0\r\nx1\r\nx2\r\n')
             s.draw(self.EDGE_PARAGRAPH)
-            self.assertTrue(s.linebuf.is_continued(4))
             self.prerender(s)
-            self.ae(s.historybuf.count, 1)
             return s
 
-        def trigger(s):
-            s.scroll(1, True)
-
-        with setup_for_testing():
-            m = self.edge_paragraph_maps()
-            self.trigger_case(build, trigger, (None, None, None, m[0], m[1]), fresh=False)
-
-    def test_cache_scrollback_view_crossing_top_edge(self):
-        # Trigger: scrolling the view down one line. The paragraph then four
-        # Latin lines and a blank row: the paragraph is the whole history.
-        # Scrolled up 3 the view shows the paragraph on rows 0-2; one line down
-        # its first row is above the view and its other two on rows 0-1. Pixel
-        # scroll is off, as its extra leading render row would still show the
-        # first row.
-        def build():
+        def top_build():
             s = self.screen(cols=5, lines=5, scrollback=10, pixel_scroll=False)
             s.draw(self.EDGE_PARAGRAPH)
             parse_bytes(s, b'\r\nx1\r\nx2\r\nx3\r\nx4\r\n')
             self.prerender(s)
-            self.ae(s.historybuf.count, 3)
             s.scroll(3, True)
             return s
 
-        def trigger(s):
-            s.scroll(1, False)
-
-        with setup_for_testing():
-            m = self.edge_paragraph_maps()
-            self.trigger_case(build, trigger, (m[1], m[2], None, None, None), fresh=False)
-
-    def test_cache_history_add_while_scrolled(self):
-        # Trigger: scrolled up, a line enters the history; the view follows it
-        # and every row shows another line than before
-        rows = ['אבג', 'abאב', 'אב12', 'xyz', 'אבגדה', 'a']
-
-        def build():
-            s = self.screen(cols=5, lines=3, scrollback=10)
-            for r in rows:
-                parse_bytes(s, r.encode() + b'\r\n')
-            # render every history line once (they stay dirty until first shown),
-            # which also applies the history count, then scroll up 2
-            self.prerender(s)
-            s.scroll(2, True)
-            return s
-
-        def trigger(s):
-            parse_bytes(s, '\x1b[3;1H\nאב'.encode())
-
-        with setup_for_testing():
-            # the view follows its lines into the history and shows the same text
-            self.trigger_case(build, trigger, self.plain_maps(rows[2:5], 5), fresh=False)
-
-    def test_cache_resize_rewrap(self):
-        # Trigger: a wider screen rewraps the paragraph. 13 R letters on one row
-        # reverse fully: (12, ..., 0).
-        def build():
-            s = self.screen()
-            s.draw('אבגדהוזחטיכלמ')
-            return s
-
-        def trigger(s):
-            s.resize(5, 13)
-
-        with setup_for_testing():
-            rev = tuple(range(12, -1, -1))
-            self.trigger_case(build, trigger, (rev, None, None, None, None))
+        m = self.plain_maps([self.EDGE_PARAGRAPH], 5, lines=5)
+        self.ae([x is not None for x in m], [True] * 3 + [False] * 2)
+        up, down = (lambda s: s.scroll(1, True)), (lambda s: s.scroll(1, False))
+        rev = tuple(range(12, -1, -1))
+        add_line = lambda s: parse_bytes(s, '\x1b[3;1H\nאב'.encode())  # noqa: E731
+        # (name, build, trigger, expected maps, compare with a fresh screen)
+        cases = (
+            ('index', lambda: self.filled(rows), lambda s: parse_bytes(s, b'\x1b[5;1H\x1bD'), self.plain_maps(rows[1:], lines=5), True),
+            ('reverse index', lambda: self.filled(rows), lambda s: parse_bytes(s, b'\x1b[1;1H\x1bM'), self.plain_maps([''] + rows[:-1]), True),
+            ('insert then delete line', net_zero_build, net_zero, (None, None, None, rev[3:], None), True),
+            ('scrollback view', lambda: self.history(hist), up, self.plain_maps(hist[5:], 5, lines=3), False),
+            ('view crossing bottom edge', bottom_build, up, (None, None, None, m[0], m[1]), False),
+            ('view crossing top edge', top_build, down, (m[1], m[2], None, None, None), False),
+            ('history add while scrolled', lambda: self.history(hist[:6], 2), add_line, self.plain_maps(hist[2:5], 5), False),
+            ('resize rewrap', lambda: self.drawn(long_row), lambda s: s.resize(5, 13), (rev, None, None, None, None), True),
+        )
+        for name, build, trigger, expect, fresh in cases:
+            with self.subTest(name):
+                self.trigger_case(build, trigger, expect, fresh)
 
     def test_cache_option_toggle(self):
-        # Trigger: bidi_reorder off then on, force_ltr on then off. Either change
-        # drops the maps, undoing it must resolve again.
-        # 'abc' + three R letters: L L L R R R, maps (0, 1, 2, 5, 4, 3, ...).
-        want = (0, 1, 2, 5, 4, 3, 6, 7, 8, 9)
-        with setup_for_testing():
-            try:
-                for off in ({'bidi_reorder': False}, {'bidi_reorder': True, 'force_ltr': True}):
-                    s = self.screen()
-                    s.draw('abc' + A)
-                    self.frame(s)
-                    self.warm(s)
-                    self.ae(s.test_bidi_v2l(0), want)
-                    self.set_options(off)
-                    self.frame(s)
-                    self.assertIsNone(s.test_bidi_v2l(0), off)
-                    self.set_options({'bidi_reorder': True, 'force_ltr': False})
-                    self.assertGreater(self.frame(s), 0, off)
-                    self.ae(s.test_bidi_v2l(0), want, off)
-                    self.ae(self.frame(s), 0)
-            finally:
-                self.set_options({'bidi_reorder': True, 'force_ltr': False})
+        self.toggle_drops_maps('abc' + A, self.ABC_A, False)
 
     def test_cache_losing_and_gaining_rtl(self):
-        # Trigger: a dirty row. Overwriting the only RTL run leaves a Latin row,
-        # which resolves nothing, writing Hebrew into a Latin row resolves it.
-        with setup_for_testing():
-            s = self.screen()
-            s.draw('abc' + A)
-            self.frame(s)
-            self.warm(s)
-            s.cursor_position(1, 4)
-            s.draw('xyz')
-            self.frame(s)
-            self.assertIsNone(s.test_bidi_v2l(0))
-            self.warm(s)
-            s.cursor_position(1, 4)
-            s.draw(A)
-            self.ae(self.frame(s), 1)
-            self.ae(s.test_bidi_v2l(0), (0, 1, 2, 5, 4, 3, 6, 7, 8, 9))
-            self.ae(self.frame(s), 0)
+        # trigger: a dirty row. Overwriting the only RTL run leaves a Latin row (nothing to resolve); Hebrew written into it resolves
+        s = self.warmed('abc' + A)
+        self.put(s, 1, 4, 'xyz')
+        self.frame(s)
+        self.assertIsNone(s.test_bidi_v2l(0))
+        self.warm(s)
+        self.put(s, 1, 4, A)
+        self.ae((self.frame(s), s.test_bidi_v2l(0), self.frame(s)), (1, self.ABC_A, 0))
 
     def test_cache_tall_paragraph_always_resolves(self):
-        # A paragraph cut by the row cap is never cached, as its bounds depend on
-        # the row it is entered from: unchanged frames still resolve it.
-        with setup_for_testing():
-            s = self.screen(cols=2, lines=300, scrollback=200)
-            s.draw('א!' * 400)
+        # a paragraph cut by the row cap is never cached: unchanged frames still resolve it
+        s = self.screen(cols=2, lines=300, scrollback=200)
+        s.draw('א!' * 400)
+        seen = []
+        for _ in range(3):
             self.assertGreater(self.frame(s), 0)
-            first = self.maps(s)
-            self.assertGreater(self.frame(s), 0)
-            self.ae(self.maps(s), first)
-            self.assertGreater(self.frame(s), 0)
+            seen.append(self.maps(s))
+        self.ae(seen, seen[:1] * 3)
 
     def test_cache_paused_rendering(self):
-        # Trigger: rendering is paused, then resumed. Paused frames read a
-        # snapshot and are not cached, the live frame after must resolve again.
-        def build():
-            s = self.screen()
-            self.fill(s, ['אבג abc', 'abc אבג'])
-            return s
-
-        with setup_for_testing():
-            s = build()
-            self.frame(s)
-            self.warm(s)
-            s.pause_rendering(True, 1000)
-            self.frame(s)
-            s.pause_rendering(False)
-            self.assertGreater(self.frame(s), 0)
-            f = build()
-            self.frame(f)
-            self.ae(self.maps(s), self.maps(f))
+        # trigger: rendering paused, then resumed. Paused frames read a snapshot and are not cached
+        rows = ['אבג abc', 'abc אבג']
+        s = self.filled(rows)
+        self.frame(s)
+        self.warm(s)
+        s.pause_rendering(True, 1000)
+        self.frame(s)
+        s.pause_rendering(False)
+        self.assertGreater(self.frame(s), 0)
+        f = self.filled(rows)
+        self.frame(f)
+        self.ae(self.maps(s), self.maps(f))
 
     def test_cache_overlay_row(self):
-        # An overlay line on a Hebrew row, then removed. The row keeps its map
-        # while the overlay shows, so the cache holds throughout.
-        want = (0, 1, 2, 5, 4, 3, 6, 7, 8, 9)
-        with setup_for_testing():
-            s = self.screen(bidi_auto_direction=False)
-            s.draw('abc' + A)
-            s.cursor_position(1, 9)
-            self.frame(s)
-            self.warm(s)
-            self.ae(s.test_bidi_v2l(0), want)
-            s.test_update_overlay_text('xy')
-            for i in range(3):
-                self.ae(self.frame(s), 0)
-                self.ae(s.test_bidi_v2l(0), want)
-            s.test_update_overlay_text('')
-            self.ae(self.frame(s), 0)
-            self.ae(s.test_bidi_v2l(0), want)
+        # an overlay line on a Hebrew row, then removed: the row keeps its map, so the cache holds throughout
+        s = self.screen(bidi_auto_direction=False)
+        s.draw('abc' + A)
+        s.cursor_position(1, 9)
+        self.frame(s)
+        self.warm(s)
+        seen = []
+        for overlay, n in (('xy', 3), ('', 1)):
+            s.test_update_overlay_text(overlay)
+            seen += [(self.frame(s), s.test_bidi_v2l(0)) for _ in range(n)]
+        self.ae(seen, [(0, self.ABC_A)] * 4)
 
     def test_cache_reset(self):
-        # Trigger: RIS. Cleared rows take the plain row path whatever the cache
-        # says, so this checks the maps, not that the reset invalidated the cache.
-        want = (0, 1, 2, 5, 4, 3, 6, 7, 8, 9)
-        with setup_for_testing():
-            s = self.screen()
-            s.draw('abc' + A)
-            self.frame(s)
-            self.warm(s)
-            parse_bytes(s, b'\x1bc')
-            self.frame(s)
-            self.ae(self.maps(s), (None,) * 5)
-            s.draw('abc' + A)
-            self.assertGreater(self.frame(s), 0)
-            self.ae(s.test_bidi_v2l(0), want)
-
-    # Cache shortcut: a paragraph whose dirty rows still feed FriBidi the same
-    # class, bracket and cell layout keeps its maps without resolving; any other
-    # edit resolves. One paragraph over rows 0-2 of a 10x4 screen at paragraph
-    # level 0: 'alpha שלום' / ' beta עולם' / ' (12) gamm'. A space between L and
-    # R takes level 0 (N2). The brackets enclose EN (R for N0) and the strong
-    # type before them is R (עולם), so N0 makes them R; the space before ( then
-    # lies between R and R (N1, level 1). W2/W7 keep 12 as EN (last strong is R),
-    # level 2 by I1. L2 reverses each run at level 1 or more, highest first.
-    MIXED = 'alpha שלום beta עולם (12) gamma'[:30]
-    MIXED_LEVELS = ((0,) * 6 + (1,) * 4,) * 2 + ((1, 1, 2, 2, 1, 0, 0, 0, 0, 0), None)
-    MIXED_V2L = ((0, 1, 2, 3, 4, 5, 9, 8, 7, 6),) * 2 + ((4, 2, 3, 1, 0, 5, 6, 7, 8, 9), None)
-
-    def levels(self, s):
-        return tuple(s.test_bidi_levels(y) for y in range(s.lines))
+        # trigger: RIS. Cleared rows take the plain row path whatever the cache says, so this checks the maps, not the invalidation
+        s = self.warmed('abc' + A)
+        parse_bytes(s, b'\x1bc')
+        self.frame(s)
+        self.ae(self.maps(s), (None,) * 5)
+        s.draw('abc' + A)
+        self.assertGreater(self.frame(s), 0)
+        self.ae(s.test_bidi_v2l(0), self.ABC_A)
 
     def test_cache_same_class_edit_skips_resolve(self):
-        # x over the a at row 0 col 0: L for L, no bracket, same cell. Every
-        # FriBidi input is unchanged, so the maps stay MIXED's and only the
-        # written row is reshaped.
-        with setup_for_testing():
-            s = self.screen(lines=4, scrollback=0)
-            s.draw(self.MIXED)
-            self.ae(self.frame(s), 1)
-            self.ae(self.frame(s), 0)
-            self.ae(self.maps(s), self.MIXED_V2L)
-            self.ae(self.levels(s), self.MIXED_LEVELS)
-            self.ae(s.linebuf.dirty_lines(), [])
-            count = s.test_bidi_resolve_count()
-            s.cursor_position(1, 1)
-            s.draw('x')
-            s.test_bidi_refresh()
-            self.ae(s.test_bidi_resolve_count() - count, 0)
-            self.ae(s.linebuf.dirty_lines(), [0])
-            buf = test_screen_update_cell_data(s)
-            self.ae(s.test_bidi_resolve_count() - count, 0)
-            self.ae(self.maps(s), self.MIXED_V2L)
-            self.ae(self.levels(s), self.MIXED_LEVELS)
-            f = self.screen(lines=4, scrollback=0)
-            f.draw('x' + self.MIXED[1:])
-            fbuf = test_screen_update_cell_data(f)
-            self.ae(self.maps(s), self.maps(f))
-            self.ae(self.levels(s), self.levels(f))
-            for y in range(3):
-                fresh = gpu_row(f, fbuf, y)
-                self.assertTrue(any(c.sprite_idx for c in fresh))
-                self.ae([c.sprite_idx for c in gpu_row(s, buf, y)], [c.sprite_idx for c in fresh], f'row {y}')
+        # a dirty row that feeds FriBidi the same classes, brackets and cell layout keeps its paragraph's maps without resolving
+        s = self.screen(lines=4, scrollback=0)
+        s.draw(self.MIXED)
+        self.ae([self.frame(s), self.frame(s)], [1, 0])
+        self.ae((self.state(s), self.dirty(s)), (self.MIXED_STATE, []))
+        count = s.test_bidi_resolve_count()
+        self.put(s, 1, 1, 'x')
+        s.test_bidi_refresh()
+        self.ae((s.test_bidi_resolve_count() - count, self.dirty(s)), (0, [0]))
+        buf = test_screen_update_cell_data(s)
+        self.ae((s.test_bidi_resolve_count() - count, self.state(s)), (0, self.MIXED_STATE))
+        f = self.drawn('x' + self.MIXED[1:], lines=4, scrollback=0)
+        fbuf = test_screen_update_cell_data(f)
+        self.ae(self.state(s), self.state(f))
+        want = [self.sprites(gpu_row(f, fbuf, y)) for y in range(3)]
+        self.assertTrue(all(map(any, want)), 'a blank fresh row')
+        self.ae([self.sprites(gpu_row(s, buf, y)) for y in range(3)], want)
 
     def test_cache_level_changing_edits_resolve(self):
-        # An edit that changes a class, a bracket or the layout must resolve
-        # again and give a fresh screen's maps. Row 0, paragraph level 0.
+        # an edit that changes a class, a bracket or the layout resolves again and gives a fresh screen's levels and maps
+        wide = {'lines': 1, 'scrollback': 0}
+        # (name, screen options, text, col of the edit, edit, text after, levels before, levels after)
         cases = (
-            # (i) א(ב)c: ( and ) pair and enclose R with R before them, N0 makes
-            # both R: levels 1 1 1 1 0. [ for ( keeps class ON but ends the pair:
-            # [ lies between R and R (N1, 1), ) between R and L (N2, 0).
-            ('i bracket', 10, 'א(ב)c', 2, '[', (1, 1, 1, 1, 0) + (0,) * 5, (3, 2, 1, 0) + ID10[4:], (1, 1, 1, 0, 0) + (0,) * 5, (2, 1, 0) + ID10[3:]),
-            # (ii) אa!ב: ! between L and R (N2, 0), each R alone, so v2l is the
-            # identity. ג for a: ! between R and R (N1, 1), cols 0-3 reverse.
-            ('ii class', 10, 'אa!ב', 2, 'ג', (1, 0, 0, 1) + (0,) * 6, ID10, (1, 1, 1, 1) + (0,) * 6, (3, 2, 1, 0) + ID10[4:]),
-            # (iii) 中בגd (cells 0-1, 2, 3, 4) to aבג中 (0, 1, 2, 3-4): the fed
-            # classes are L R R L both times, only the cells they start in move.
-            # The R pair reverses in place: v2l 0 1 3 2 4, then 0 2 1 3 4.
-            ('iii layout', 5, '中בגd', 1, 'aבג中', (0, 0, 1, 1, 0), (0, 1, 3, 2, 4), (0, 1, 1, 0, 0), (0, 2, 1, 3, 4)),
+            ('i bracket', {}, 'א(ב)c', 2, '[', 'א[ב)c', (1, 1, 1, 1, 0) + (0,) * 5, (1, 1, 1, 0, 0) + (0,) * 5),
+            ('ii class', {}, 'אa!ב', 2, 'ג', 'אג!ב', (1, 0, 0, 1) + (0,) * 6, (1, 1, 1, 1) + (0,) * 6),
+            ('iii layout', {'cols': 5}, '中בגd', 1, 'aבג中', 'aבג中', (0, 0, 1, 1, 0), (0, 1, 1, 0, 0)),
+            ('vi interior continuation', wide, 'א!aב', 2, '😀', 'א😀ב', (1, 0, 0, 1) + (0,) * 6, (1, 1, 1, 1) + (0,) * 6),
+            ('vii trailing continuation', {**wide, 'cols': 5}, 'אבג!ד', 4, '😀', 'אבג😀', (1, 1, 1, 1, 1), (1, 1, 1, 0, 0)),
         )
-        with setup_for_testing():
-            for name, cols, text, col, new, levels0, v2l0, levels1, v2l1 in cases:
-                with self.subTest(name):
-                    s = self.screen(cols=cols)
-                    s.draw(text)
-                    self.frame(s)
-                    self.warm(s)
-                    self.ae((s.test_bidi_levels(0), s.test_bidi_v2l(0)), (levels0, v2l0))
-                    s.cursor_position(1, col)
-                    s.draw(new)
-                    self.ae(self.frame(s), 1)
-                    self.ae((s.test_bidi_levels(0), s.test_bidi_v2l(0)), (levels1, v2l1))
-                    f = self.screen(cols=cols)
-                    f.draw(text[: col - 1] + new + text[col - 1 + len(new) :])
-                    self.frame(f)
-                    self.ae(self.maps(s), self.maps(f))
-                    self.ae(self.levels(s), self.levels(f))
-            with self.subTest('iv dirty row below the view'):
-                # As in test_dirty_row_below_view_redraws_paragraph: one paragraph
-                # over a history row and linebuf rows 0-2, scrolled up by one, so
-                # linebuf row 2 is below the view. z for b there keeps class L and
-                # no bracket, but a row that is not on screen never skips the
-                # resolve. Screen row 2 (12 3!) stays (2, 2, 1, 2, 0): ! lies
-                # between 3 (EN, R for N1) and a (L), N2.
-                def build():
-                    s = self.screen(cols=5, lines=3, scrollback=10)
-                    for line in ('אבגדה', 'אבגדה', '12 3!', 'abcde'):
-                        s.draw(line)
-                    self.ae(s.historybuf.count, 1)
-                    return s
-
-                s = build()
-                self.frame(s)
-                s.scroll(1, True)
-                self.frame(s)
-                self.warm(s)
-                self.ae(s.scrolled_by, 1)
-                s.cursor_position(3, 2)
-                s.draw('z')
-                self.ae(s.scrolled_by, 1)
-                self.ae(s.linebuf.dirty_lines(), [2])
-                self.ae(self.frame(s), 1)
-                self.ae(s.test_bidi_levels(2), (2, 2, 1, 2, 0))
-                s.scroll(1, False)
-                self.frame(s)
-                f = self.screen(cols=5, lines=3, scrollback=10)
-                for line in ('אבגדה', 'אבגדה', '12 3!', 'azcde'):
-                    f.draw(line)
-                self.frame(f)
-                self.ae(self.maps(s), self.maps(f))
-                self.ae(self.levels(s), self.levels(f))
-
-            with self.subTest('v explicit embedding then a blank'):
-                # ב/, an OSC 66 cell holding RLO, then EM SPACE (WS, not a blank,
-                # so not trimmed). A blank for EM SPACE keeps class WS, so the
-                # shortcut keeps the maps: they must be those of a resolve over
-                # the final text, so the trim must not drop the blank.
-                def rlo(s, last):
-                    s.draw('ב/')
-                    parse_bytes(s, '\x1b]66;w=1;\u202e\x07'.encode())
-                    s.draw(last)
-                    self.ae(str(s.linebuf.line(0))[2], '\u202e')
-
+        for name, opts, text, col, new, final, levels0, levels1 in cases:
+            with self.subTest(name):
+                s = self.warmed(text, **opts)
+                self.ae(s.test_bidi_levels(0), levels0)
+                self.put(s, 1, col, new)
+                self.ae((str(s.linebuf.line(0)), self.frame(s), s.test_bidi_levels(0)), (final, 1, levels1))
+                self.same_as(s, self.drawn(final, **opts))
+        with self.subTest('iv dirty row below the view'):
+            # one paragraph over a history row and linebuf rows 0-2, scrolled up by one: z on row 2 is below the view
+            s = self.stacked(('אבגדה', 'אבגדה', '12 3!', 'abcde'))
+            self.ae(s.historybuf.count, 1)
+            self.frame(s)
+            s.scroll(1, True)
+            self.frame(s)
+            self.warm(s)
+            self.put(s, 3, 2, 'z')
+            self.ae((s.scrolled_by, self.dirty(s), self.frame(s), s.test_bidi_levels(2)), (1, [2], 1, (2, 2, 1, 2, 0)))
+            s.scroll(1, False)
+            self.frame(s)
+            self.same_as(s, self.stacked(('אבגדה', 'אבגדה', '12 3!', 'azcde')))
+        with self.subTest('v explicit embedding then a blank'):
+            # ב/, an OSC 66 cell holding RLO, then EM SPACE (WS, not a blank): a blank for it keeps class WS, so the trim must not drop it
+            def rlo(last):
                 s = self.screen(cols=4, lines=1, scrollback=0)
-                rlo(s, '\u2003')
-                self.frame(s)
-                self.warm(s)
-                s.cursor_position(1, 4)
-                s.draw(' ')
-                self.frame(s)
-                f = self.screen(cols=4, lines=1, scrollback=0)
-                rlo(f, ' ')
-                self.frame(f)
-                self.ae((s.test_bidi_levels(0), s.test_bidi_v2l(0)), ((1, 1, 0, 0), (1, 0, 2, 3)))
-                self.ae(self.maps(s), self.maps(f))
-                self.ae(self.levels(s), self.levels(f))
+                s.draw('ב/')
+                parse_bytes(s, '\x1b]66;w=1;‮\x07'.encode())
+                s.draw(last)
+                self.ae(str(s.linebuf.line(0))[2], '‮')
+                return s
 
-            # A wide character over a cell whose class it keeps: the fed classes
-            # match at every cell a character starts in, only a cell that used
-            # to start one is now a continuation. (vi) אa!ב, 😀 over !a: the
-            # fed R ON R match R ON . R at cols 0, 1, 3; the old a at col 2 is
-            # now a continuation. 😀 lies between R and R (N1, 1). (vii) אבג!ד
-            # on 5 cols, 😀 over !ד: the old ד at col 4, past the last fed
-            # character, is now a continuation. 😀 lies between R and eos (N2, 0).
-            continuation_cases = (
-                ('vi interior continuation', 10, 'א!aב', 2, 'א😀ב', (1, 0, 0, 1) + (0,) * 6, (1, 1, 1, 1) + (0,) * 6),
-                ('vii trailing continuation', 5, 'אבג!ד', 4, 'אבג😀', (1, 1, 1, 1, 1), (1, 1, 1, 0, 0)),
-            )
-            for name, cols, text, col, final, levels0, levels1 in continuation_cases:
-                with self.subTest(name):
-                    s = self.screen(cols=cols, lines=1, scrollback=0)
-                    s.draw(text)
-                    self.frame(s)
-                    self.warm(s)
-                    self.ae(s.test_bidi_levels(0), levels0)
-                    s.cursor_position(1, col)
-                    s.draw('😀')
-                    self.ae(str(s.linebuf.line(0)), final)
-                    self.ae(self.frame(s), 1)
-                    self.ae(s.test_bidi_levels(0), levels1)
-                    f = self.screen(cols=cols, lines=1, scrollback=0)
-                    f.draw(final)
-                    self.frame(f)
-                    self.ae(self.maps(s), self.maps(f))
-                    self.ae(self.levels(s), self.levels(f))
+            s = rlo(' ')
+            self.frame(s)
+            self.warm(s)
+            self.put(s, 1, 4, ' ')
+            self.frame(s)
+            self.ae((s.test_bidi_levels(0), s.test_bidi_v2l(0)), ((1, 1, 0, 0), (1, 0, 2, 3)))
+            self.same_as(s, rlo(' '))
 
     def test_cache_bypass_between_resolves(self):
-        # Frame A resolves MIXED. Frame B draws a scale-2 multicell over rows
-        # 0-1, cols 0-1: the bypass makes the paragraph inactive under valid
-        # stamps. Frame C restores the four cells; the rows feed FriBidi what
-        # they fed in frame A, but the maps are frame B's inactive ones, so C
-        # must resolve and give MIXED's maps. The paragraph keeps its bounds in
-        # every frame, so only the signatures can tell B's maps from A's.
-        with setup_for_testing():
-            s = self.screen(lines=4, scrollback=0)
-            s.draw(self.MIXED)
-            cont = [s.linebuf.is_continued(y) for y in range(4)]
-            self.ae(cont, [False, True, True, False])
-            self.ae(self.frame(s), 1)
-            self.warm(s)
-            self.ae(self.maps(s), self.MIXED_V2L)
-            s.cursor_position(1, 1)
-            draw_multicell(s, 'x', scale=2)
-            self.ae([s.linebuf.is_continued(y) for y in range(4)], cont)
-            self.frame(s)
-            self.ae(self.maps(s), (None,) * 4)
-            s.cursor_position(1, 1)
-            s.draw(self.MIXED[:2])
-            s.cursor_position(2, 1)
-            s.draw(self.MIXED[10:12])
-            self.ae([s.linebuf.is_continued(y) for y in range(4)], cont)
-            self.ae(str(s.linebuf.line(0)) + str(s.linebuf.line(1)), self.MIXED[:20])
-            self.ae(self.frame(s), 1)
-            self.ae(self.maps(s), self.MIXED_V2L)
-            self.ae(self.levels(s), self.MIXED_LEVELS)
+        # frame A resolves MIXED. B draws a scale-2 multicell over rows 0-1, cols 0-1: the paragraph is inactive under valid stamps.
+        # C restores the four cells: the rows feed FriBidi what they fed in A but the maps are B's, so C must resolve to MIXED's
+        s = self.screen(lines=4, scrollback=0)
+        s.draw(self.MIXED)
+        self.ae(self.frame(s), 1)
+        self.warm(s)
+        self.ae(self.maps(s), self.MIXED_STATE[0])
+        s.cursor_position(1, 1)
+        draw_multicell(s, 'x', scale=2)
+        self.ae([s.linebuf.is_continued(y) for y in range(4)], [False, True, True, False])
+        self.frame(s)
+        self.ae(self.maps(s), (None,) * 4)
+        self.put(s, 1, 1, self.MIXED[:2])
+        self.put(s, 2, 1, self.MIXED[10:12])
+        self.ae(str(s.linebuf.line(0)) + str(s.linebuf.line(1)), self.MIXED[:20])
+        self.ae(self.frame(s), 1)
+        self.ae(self.state(s), self.MIXED_STATE)
 
     def test_pointed_hebrew_shaping(self):
-        # (n) shin + qamats + shin dot, lamed, vav + holam, final mem: 4 cells
-        # (marks join their base cell). Shaped RTL with the test font, every
-        # group must cover exactly one cell.
-        text = 'שָׁלוֹם'
+        # shin + qamats + shin dot, lamed, vav + holam, final mem: 4 cells (marks join their base cell), every group covers one cell
         with tempfile.TemporaryDirectory() as tdir:
             path = os.path.join(tdir, 'LiberationMono-Regular.ttf')
             with open(path, 'wb') as f:
                 f.write(testing_font_data('LiberationMono-Regular.ttf'))
-            groups = shape_string(text, path=path, rtl=True)
-        self.ae(len(groups), 4, groups)
+            groups = shape_string('שָׁלוֹם', path=path, rtl=True)
         self.ae([g[0] for g in groups], [1, 1, 1, 1], groups)
 
+    RTL_WRAPPED = (((4, 3, 2, 1, 0), (4, 0, 1, 2, 3), None, None), ((1,) * 5, (2, 2, 2, 2, 1), None, None))  # (maps, levels)
+    LTR_WRAPPED = (((0, 4, 3, 2, 1), None, None, None), ((0, 1, 1, 1, 1), None, None, None))
+
+    def wrapped_rtl_screen(self, first='א'):
+        s = self.screen(cols=5, lines=4, scrollback=0, bidi_auto_direction=True)
+        s.draw(first + 'בגדה')
+        s.draw('ab 1')
+        return s
+
+    def upload_sprites(self, s, rows=(0, 1)):
+        buf = test_screen_update_cell_data(s)
+        return [self.sprites(gpu_row(s, buf, y)) for y in rows]
+
+    def edit_first(self, s, ch, resolves, dirty, rtl, want):
+        # draws ch over the first cell, checks the refresh resolve count and dirty list, then uploads and returns sprites
+        s.cursor_position(1, 1)
+        s.draw(ch)
+        count = s.test_bidi_resolve_count()
+        s.test_bidi_refresh()
+        self.ae(s.test_bidi_resolve_count() - count, resolves)
+        self.ae((self.dirty(s), [s.test_bidi_paragraph_rtl(y) for y in (0, 1)]), (dirty, [rtl, rtl]))
+        got = self.upload_sprites(s)
+        self.ae((s.test_bidi_resolve_count() - count, self.state(s)), (resolves, want))
+        return got
+
+    def matches_fresh(self, s, got, f, rows=(0, 1)):
+        # s, whose upload was got, has the maps, levels and sprites of a fresh screen f that only saw the final text
+        want = self.upload_sprites(f, rows)
+        self.ae(self.state(s), self.state(f))
+        self.assertTrue(all(map(any, want)), 'a blank fresh row')
+        self.ae(got, want)
+
     def test_trailing_blank_trim_keeps_maps(self):
-        # Dropping the blanks at a paragraph's end before resolving must not
-        # change any row's maps (L1 resets them to the paragraph level)
+        # dropping the blanks at a paragraph's end before resolving must not change any row's maps
         def wrapped_blank(s):
             s.draw('א' * 10)
             s.draw('ב')
             s.cursor_position(2, 1)
             s.erase_characters(1)
-            self.assertTrue(s.linebuf.is_continued(1))
 
-        def rlo_cell(s):
-            # draw drops a zero-width Cf, an OSC 66 cell keeps it. Untrimmed, the
-            # blanks after the RLO sit at its level and set the eos of the run
-            # before them (X10), so trimming would change the maps.
+        def rlo_cell(s):  # draw drops a zero-width Cf, an OSC 66 cell keeps it; untrimmed, blanks after the RLO set the eos of the run before
             s.draw('ב/')
-            parse_bytes(s, '\x1b]66;w=1;\u202e\x07'.encode())
-            self.ae(str(s.linebuf.line(0))[2], '\u202e')
+            parse_bytes(s, '\x1b]66;w=1;‮\x07'.encode())
+            self.ae(str(s.linebuf.line(0))[2], '‮')
 
         cases = {
             'neutral then blanks': lambda s: s.draw('אבג!'),
@@ -1465,649 +907,319 @@ class TestBidi(BaseTest):
             'LTR start': lambda s: s.draw('abc אב'),
             'RLO cell': rlo_cell,
         }
-        with setup_for_testing():
-            for auto in (False, True):
-                for name, build in cases.items():
-                    with self.subTest(name, auto=auto):
-                        screens = []
-                        for trim in (True, False):
-                            s = self.screen(bidi_auto_direction=auto)
-                            s.test_bidi_trim(trim)
-                            build(s)
-                            screens.append(s)
-                        counts = [self.frame(s) for s in screens]
-                        for s in screens:
-                            self.warm(s)
-                        # with auto on, only the LTR start gives an LTR paragraph
-                        rtl = auto and name != 'LTR start'
-                        for s in screens:
-                            self.assertIs(s.test_bidi_paragraph_rtl(0), rtl)
-                        for y in range(5):
-                            self.ae(screens[0].test_bidi_v2l(y), screens[1].test_bidi_v2l(y), f'v2l row {y}')
-                            self.ae(screens[0].test_bidi_levels(y), screens[1].test_bidi_levels(y), f'levels row {y}')
-                        if name == 'ES next to EN':
-                            self.ae(counts, [1, 1])
-
-    # Right-to-left paragraphs (bidi_auto_direction). Creating a screen resets
-    # the global options, so every screen sets the mode, and each is read before
-    # a screen of the other mode is created.
-    def direction_maps(self, text, auto, cols=10):
-        # the maps, levels and paragraph direction of each row of a screen
-        # given text, in one frame
-        s = self.screen(cols=cols, bidi_auto_direction=auto)
-        s.draw(text)
-        s.test_bidi_refresh()
-        return self.maps(s), self.levels(s), tuple(s.test_bidi_paragraph_rtl(y) for y in range(s.lines))
+        for auto in (False, True):
+            for name, build in cases.items():
+                with self.subTest(name, auto=auto):
+                    screens = []
+                    for trim in (True, False):
+                        s = self.screen(bidi_auto_direction=auto)
+                        s.test_bidi_trim(trim)
+                        build(s)
+                        screens.append(s)
+                    counts = [self.frame(s) for s in screens]
+                    for s in screens:
+                        self.warm(s)
+                    rtl = auto and name != 'LTR start'
+                    self.ae([s.test_bidi_paragraph_rtl(0) for s in screens], [rtl, rtl])
+                    self.ae(self.state(screens[0]), self.state(screens[1]))
+                    if name == 'ES next to EN':
+                        self.ae(counts, [1, 1])
 
     def test_rtl_paragraph_right_aligned(self):
-        with setup_for_testing():
-            # אבג, auto: the first strong character is R (P2-P3), so the
-            # paragraph level is 1. R at an odd level stays 1 (I2), and the
-            # trailing blanks take the paragraph level (L1). All level 1, so
-            # L2 reverses the whole row and the word is right-aligned.
-            s = self.screen(bidi_auto_direction=True)
-            fgs = draw_coloured(s, A)
-            row = gpu_row(s, test_screen_update_cell_data(s), 0)
-            self.ae(s.test_bidi_levels(0), (1,) * 10)
-            self.ae(s.test_bidi_v2l(0), ID10[::-1])
-            self.assertIs(s.test_bidi_paragraph_rtl(0), True)
-            self.ae([c.fg for c in row[7:]], fgs[::-1])
-            self.assertTrue(all(c.sprite_idx for c in row[7:]))
-            self.ae([c.sprite_idx for c in row[:7]], [0] * 7)
-            # the cursor, after the text, is on logical 3: visual 9 - 3
-            self.ae(s.cursor.x, 3)
-            self.ae(s.test_bidi_visual_x(3, 0), 6)
-            # auto off: paragraph level 0, the letters 1, the blanks 0 (L1)
-            f = self.screen(bidi_auto_direction=False)
-            draw_coloured(f, A)
-            frow = gpu_row(f, test_screen_update_cell_data(f), 0)
-            self.ae(f.test_bidi_levels(0), (1, 1, 1) + (0,) * 7)
-            self.ae(f.test_bidi_v2l(0), (2, 1, 0) + ID10[3:])
-            self.assertIs(f.test_bidi_paragraph_rtl(0), False)
-            self.ae(row[9].sprite_idx, frow[2].sprite_idx)
-        # שלום!, auto: the ! lies between R and eos, which is R at paragraph
-        # level 1, so N1 makes it R: all level 1, the ! (logical 4) at visual 5,
-        # left of the word
-        maps, levels, rtl = self.direction_maps('שלום!', True)
-        self.ae((levels[0], maps[0], rtl[0]), ((1,) * 10, ID10[::-1], True))
-        # auto off: eos is L at level 0, so N2 gives the ! level 0, right of the word
-        maps, levels, rtl = self.direction_maps('שלום!', False)
-        self.ae((levels[0], maps[0], rtl[0]), ((1, 1, 1, 1) + (0,) * 6, (3, 2, 1, 0) + ID10[4:], False))
+        # auto: the first strong R sets paragraph level 1, the blanks take it (L1): all level 1; auto off: paragraph level 0
+        s = self.screen(bidi_auto_direction=True)
+        fgs = draw_coloured(s, A)
+        row = self.uploaded(s, 0)
+        self.ae((s.test_bidi_levels(0), s.test_bidi_v2l(0), s.test_bidi_paragraph_rtl(0)), ((1,) * 10, ID10[::-1], True))
+        self.ae(([c.fg for c in row[7:]], all(c.sprite_idx for c in row[7:]), self.sprites(row[:7])), (fgs[::-1], True, [0] * 7))
+        self.ae((s.cursor.x, s.test_bidi_visual_x(3, 0)), (3, 6))
+        f = self.screen(bidi_auto_direction=False)
+        draw_coloured(f, A)
+        frow = self.uploaded(f, 0)
+        self.ae((f.test_bidi_levels(0), f.test_bidi_v2l(0), f.test_bidi_paragraph_rtl(0)), ((1, 1, 1) + (0,) * 7, (2, 1, 0) + ID10[3:], False))
+        self.ae(row[9].sprite_idx, frow[2].sprite_idx)
 
-    def test_rtl_paragraph_direction_from_first_strong(self):
-        # אבג abc: R first, paragraph level 1. The space between R and L takes
-        # the embedding direction, R (N2): 1. L at an odd level is 2 (I2), the
-        # blanks 1 (L1). L2 reverses cols 4-6, then the whole row.
-        maps, levels, rtl = self.direction_maps('אבג abc', True)
-        self.ae(levels[0], (1, 1, 1, 1, 2, 2, 2, 1, 1, 1))
-        self.ae(maps[0], (9, 8, 7, 4, 5, 6, 3, 2, 1, 0))
-        self.assertIs(rtl[0], True)
-        # abc אבג: L first, LTR, so the same as auto off. The space between L
-        # and R takes the embedding direction, L (N2): 0. Only cols 4-6 reverse.
-        on = self.direction_maps('abc אבג', True)
-        off = self.direction_maps('abc אבג', False)
-        self.ae(on[:2], off[:2])
-        self.ae((on[1][0], on[0][0]), ((0, 0, 0, 0, 1, 1, 1, 0, 0, 0), (0, 1, 2, 3, 6, 5, 4, 7, 8, 9)))
-        self.assertIs(on[2][0], False)
-        # 12 אב ab: EN is weak, so R is the first strong, level 1. W2 and W7
-        # keep EN (sos is R). The first space lies between EN (R for N1) and R:
-        # 1. The second between R and L: e, 1 (N2). EN and L at an odd level
-        # are 2 (I2), the blanks 1 (L1). L2 reverses cols 0-1 and 6-7, then
-        # the whole row: 1 0 2 3 4 5 7 6 8 9 reversed.
-        maps, levels, rtl = self.direction_maps('12 אב ab', True)
-        self.ae(levels[0], (2, 2, 1, 1, 1, 1, 2, 2, 1, 1))
-        self.ae(maps[0], (9, 8, 6, 7, 5, 4, 3, 2, 0, 1))
-        self.assertIs(rtl[0], True)
-        # (12 a soft-wrapped into אבגדה on 5 columns: the first strong is the
-        # a on row 0, so LTR. W7 makes 12 L (sos L), ( and the space lie
-        # between Ls (N1): row 0 is all 0, inactive. Row 1 is R at level 1.
-        on = self.direction_maps('(12 aאבגדה', True, cols=5)
-        off = self.direction_maps('(12 aאבגדה', False, cols=5)
-        self.ae((on[0][:2], on[1][:2]), ((None, (4, 3, 2, 1, 0)), (None, (1,) * 5)))
-        self.ae((on[0][:2], on[1][:2]), (off[0][:2], off[1][:2]))
-        self.ae(on[2][:2], (False, False))
-        # אבגדה soft-wrapped into abcde on 5 columns: RTL. Row 0 is R at level
-        # 1. Row 1 is L at an odd level, 2 (I2), with no blank: active, and L2
-        # reverses it twice, so its map is the identity.
-        maps, levels, rtl = self.direction_maps('אבגדהabcde', True, cols=5)
-        self.ae(levels[:2], ((1,) * 5, (2,) * 5))
-        self.ae(maps[:2], ((4, 3, 2, 1, 0), (0, 1, 2, 3, 4)))
-        self.ae(rtl[:2], (True, True))
-        # مرحبا! (Arabic letters): AL is a strong R-type character, so P2 finds
-        # it first and the paragraph level is 1. W3 turns AL to R, so the word
-        # is R like Hebrew. The ! (ON) lies between R and the blanks (eos at
-        # level 1, R): N1 gives it R, 1. The blanks are 1 (L1): all level 1,
-        # L2 reverses the whole row, the ! lands at visual 4, left of the word.
-        maps, levels, rtl = self.direction_maps('مرحبا!', True)
-        self.ae(levels[0], (1,) * 10)
-        self.ae(maps[0], tuple(range(9, -1, -1)))
-        self.assertIs(rtl[0], True)
-
-    def test_rtl_weak_only_paragraph_stays_ltr(self):
-        # Guard. ١٢٣ 45! has no strong character (AN, WS, EN, ON): FriBidi
-        # leaves the direction ON, which is LTR at level 0. W7 makes 45 L
-        # (sos L), the space lies between AN (R for N1) and L, so e, 0 (N2),
-        # the ! between L and eos (N1): 0. AN at an even level is 2 (I1). L2
-        # reverses cols 0-2 twice: the identity, on an active row.
-        text = '١٢٣ 45!'
-        on = self.direction_maps(text, True)
-        off = self.direction_maps(text, False)
-        self.ae(on[:2], off[:2])
-        self.ae((on[1][0], on[0][0]), ((2, 2, 2) + (0,) * 7, ID10))
-        self.assertIs(on[2][0], False)
-
-    # אבגדה soft-wrapped into ab 1 on 5 columns, auto: R first, paragraph level
-    # 1. Row 0 is R at level 1. Row 1: W7 makes the 1 L (the last strong is
-    # the b), the space lies between Ls (N1), and L at an odd level is 2 (I2);
-    # the blank in col 4 is 1 (L1). L2 reverses cols 0-3, then 0-4: 4 0 1 2 3.
-    RTL_WRAPPED_V2L = ((4, 3, 2, 1, 0), (4, 0, 1, 2, 3), None, None)
-    RTL_WRAPPED_LEVELS = ((1,) * 5, (2, 2, 2, 2, 1), None, None)
-    # x for the א: L first, paragraph level 0. Row 0: R at an even level is 1
-    # (I1), cols 1-4 reverse. Row 1 resolves as above, all L: level 0, inactive.
-    LTR_WRAPPED_V2L = ((0, 4, 3, 2, 1), None, None, None)
-    LTR_WRAPPED_LEVELS = ((0, 1, 1, 1, 1), None, None, None)
-
-    def wrapped_rtl_screen(self, first='א'):
-        s = self.screen(cols=5, lines=4, scrollback=0, bidi_auto_direction=True)
-        s.draw(first + 'בגדה')
-        s.draw('ab 1')
-        return s
-
-    def assert_same_upload(self, s, buf, f, fbuf, rows):
-        for y in rows:
-            fresh = gpu_row(f, fbuf, y)
-            self.assertTrue(any(c.sprite_idx for c in fresh))
-            self.ae([c.sprite_idx for c in gpu_row(s, buf, y)], [c.sprite_idx for c in fresh], f'row {y}')
-
-    def test_rtl_first_strong_edit_flips_direction(self):
-        # Writing the first strong character, R to L and back, flips the whole
-        # paragraph. Row 1 is not written, but its levels change, so it must be
-        # reshaped.
-        with setup_for_testing():
-            s = self.wrapped_rtl_screen()
-            self.ae(self.frame(s), 1)
-            self.warm(s)
-            self.ae((self.maps(s), self.levels(s)), (self.RTL_WRAPPED_V2L, self.RTL_WRAPPED_LEVELS))
-            self.ae([s.test_bidi_paragraph_rtl(y) for y in (0, 1)], [True, True])
-            steps = (('x', False, self.LTR_WRAPPED_V2L, self.LTR_WRAPPED_LEVELS), ('א', True, self.RTL_WRAPPED_V2L, self.RTL_WRAPPED_LEVELS))
-            for ch, rtl, v2l, levels in steps:
-                with self.subTest(ch):
-                    s.cursor_position(1, 1)
-                    s.draw(ch)
-                    count = s.test_bidi_resolve_count()
+    def test_rtl_paragraph_direction(self):
+        # P2-P3: the first strong character (R, AL or L; not EN or AN) sets the paragraph direction. Per row, in each auto mode
+        # listed, after one refresh: (levels, map, paragraph_rtl)
+        rev, rev5 = ID10[::-1], (4, 3, 2, 1, 0)
+        cases = (
+            ('שלום!', 10, (True,), [((1,) * 10, rev, True)]),
+            ('שלום!', 10, (False,), [((1, 1, 1, 1) + (0,) * 6, (3, 2, 1, 0) + ID10[4:], False)]),
+            ('אבג abc', 10, (True,), [((1, 1, 1, 1, 2, 2, 2, 1, 1, 1), (9, 8, 7, 4, 5, 6, 3, 2, 1, 0), True)]),
+            ('abc אבג', 10, (True, False), [((0, 0, 0, 0, 1, 1, 1, 0, 0, 0), (0, 1, 2, 3, 6, 5, 4, 7, 8, 9), False)]),
+            ('12 אב ab', 10, (True,), [((2, 2, 1, 1, 1, 1, 2, 2, 1, 1), (9, 8, 6, 7, 5, 4, 3, 2, 0, 1), True)]),
+            ('(12 aאבגדה', 5, (True, False), [(None, None, False), ((1,) * 5, rev5, False)]),
+            ('אבגדהabcde', 5, (True,), [((1,) * 5, rev5, True), ((2,) * 5, (0, 1, 2, 3, 4), True)]),
+            ('مرحبا!', 10, (True,), [((1,) * 10, rev, True)]),
+            ('١٢٣ 45!', 10, (True, False), [((2, 2, 2) + (0,) * 7, ID10, False)]),
+        )
+        for text, cols, autos, rows in cases:
+            for auto in autos:
+                with self.subTest(text, auto=auto):
+                    s = self.screen(cols=cols, bidi_auto_direction=auto)
+                    s.draw(text)
                     s.test_bidi_refresh()
-                    self.ae(s.test_bidi_resolve_count() - count, 1)
-                    self.ae([s.test_bidi_paragraph_rtl(y) for y in (0, 1)], [rtl, rtl])
-                    self.ae(s.linebuf.dirty_lines(), [0, 1])
-                    buf = test_screen_update_cell_data(s)
-                    self.ae((self.maps(s), self.levels(s)), (v2l, levels))
-                    f = self.wrapped_rtl_screen(ch)
-                    fbuf = test_screen_update_cell_data(f)
-                    self.ae((self.maps(s), self.levels(s)), (self.maps(f), self.levels(f)))
-                    self.assert_same_upload(s, buf, f, fbuf, (0, 1))
+                    self.ae([(s.test_bidi_levels(y), s.test_bidi_v2l(y), s.test_bidi_paragraph_rtl(y)) for y in range(len(rows))], rows)
 
-    def test_rtl_first_strong_same_class_edit_skips_resolve(self):
-        # Guard. ב over the first strong א: R for R, no bracket, same cell. The
-        # direction is a function of the classes alone (P2-P3), so the
-        # signatures match, the shortcut keeps the maps, and they stay RTL.
-        with setup_for_testing():
-            s = self.wrapped_rtl_screen()
-            self.frame(s)
-            self.warm(s)
-            count = s.test_bidi_resolve_count()
-            s.cursor_position(1, 1)
-            s.draw('ב')
-            s.test_bidi_refresh()
-            self.ae(s.test_bidi_resolve_count() - count, 0)
-            self.ae(s.linebuf.dirty_lines(), [0])
-            buf = test_screen_update_cell_data(s)
-            self.ae(s.test_bidi_resolve_count() - count, 0)
-            self.ae((self.maps(s), self.levels(s)), (self.RTL_WRAPPED_V2L, self.RTL_WRAPPED_LEVELS))
-            self.ae([s.test_bidi_paragraph_rtl(y) for y in (0, 1)], [True, True])
-            f = self.wrapped_rtl_screen('ב')
-            fbuf = test_screen_update_cell_data(f)
-            self.ae((self.maps(s), self.levels(s)), (self.maps(f), self.levels(f)))
-            self.assert_same_upload(s, buf, f, fbuf, (0, 1))
-
-    def test_rtl_option_toggle_reresolves(self):
-        # Toggling bidi_auto_direction changes every paragraph's direction
-        # without dirtying a row, so the frame must re-resolve and reshape
-        with setup_for_testing():
-            expect = {}
-            for auto in (False, True):
-                f = self.screen(bidi_auto_direction=auto)
-                f.draw(A)
-                fbuf = test_screen_update_cell_data(f)
-                expect[auto] = (self.maps(f), [c.sprite_idx for c in gpu_row(f, fbuf, 0)])
-            self.assertNotEqual(expect[False][0], expect[True][0])
-            s = self.screen(bidi_auto_direction=True)
-            s.draw(A)
-            self.ae(self.frame(s), 1)
-            self.warm(s)
-            self.ae(self.maps(s), expect[True][0])
-            self.assertIs(s.test_bidi_paragraph_rtl(0), True)
-            for auto in (False, True):
-                with self.subTest(auto=auto):
-                    self.set_options({'bidi_reorder': True, 'bidi_auto_direction': auto})
-                    self.ae(s.linebuf.dirty_lines(), [])
-                    count = s.test_bidi_resolve_count()
-                    s.test_bidi_refresh()
-                    self.assertGreater(s.test_bidi_resolve_count() - count, 0)
-                    self.ae(s.linebuf.dirty_lines(), [0])
-                    buf = test_screen_update_cell_data(s)
-                    self.ae(self.maps(s), expect[auto][0])
-                    self.ae([c.sprite_idx for c in gpu_row(s, buf, 0)], expect[auto][1])
-                    self.assertIs(s.test_bidi_paragraph_rtl(0), auto)
+    def test_rtl_first_strong_edit(self):
+        # writing the first strong character flips the paragraph; row 1 is not written but its levels change, so it must be reshaped
+        s = self.wrapped_rtl_screen()
+        self.ae(self.frame(s), 1)
+        self.warm(s)
+        self.ae((self.state(s), [s.test_bidi_paragraph_rtl(y) for y in (0, 1)]), (self.RTL_WRAPPED, [True, True]))
+        for ch, rtl, want, resolves, dirty, new_screen in (
+            ('x', False, self.LTR_WRAPPED, 1, [0, 1], False),
+            ('א', True, self.RTL_WRAPPED, 1, [0, 1], False),
+            ('ב', True, self.RTL_WRAPPED, 0, [0], True),  # R for R: direction depends on classes alone, same-class skips resolve
+        ):
+            with self.subTest(ch):
+                if new_screen:
+                    s = self.wrapped_rtl_screen()
+                    self.frame(s)
                     self.warm(s)
+                got = self.edit_first(s, ch, resolves, dirty, rtl, want)
+                self.matches_fresh(s, got, self.wrapped_rtl_screen(ch))
+
+    def test_rtl_option_toggles_reresolve(self):
+        # toggling bidi_auto_direction changes every paragraph's direction without dirtying a row: the frame must re-resolve and reshape
+        expect = {}
+        for auto, v2l in ((False, (2, 1, 0) + ID10[3:]), (True, ID10[::-1])):
+            f = self.drawn(A, bidi_auto_direction=auto)
+            expect[auto] = (v2l, self.upload_sprites(f, (0,))[0])
+        s = self.drawn(A, bidi_auto_direction=True)
+        self.ae(self.frame(s), 1)
+        self.warm(s)
+        self.ae((s.test_bidi_v2l(0), s.test_bidi_paragraph_rtl(0)), (expect[True][0], True))
+        for auto in (False, True):
+            with self.subTest(auto=auto):
+                self.set_options({'bidi_reorder': True, 'bidi_auto_direction': auto})
+                self.ae(self.dirty(s), [])
+                count = s.test_bidi_resolve_count()
+                s.test_bidi_refresh()
+                self.assertGreater(s.test_bidi_resolve_count() - count, 0)
+                self.ae(self.dirty(s), [0])
+                self.ae((s.test_bidi_v2l(0), self.upload_sprites(s, (0,))[0], s.test_bidi_paragraph_rtl(0)), (*expect[auto], auto))
+                self.warm(s)
+        self.toggle_drops_maps(A, ID10[::-1], True, bidi_auto_direction=True)
 
     def test_rtl_paragraph_cache_triggers(self):
-        # Cache triggers on RTL paragraphs (auto direction on): a dirty row,
-        # index, reverse index, insert then delete line, view scroll at both
-        # edges, resize with rewrap and a paused frame (the paragraph split has
-        # its own test). Each re-resolves and equals a fresh screen, a quiet
-        # frame resolves 0.
-        # The expected maps are the right-aligned ones, worked out by hand:
-        # 'אבג' and ten or fewer letters reverse fully (L1 gives the trailing
-        # blanks level 1), 'אבג abc' has abc at level 2: (9, 8, 7, 4, 5, 6, 3, 2, 1, 0).
-        # A blank continuation row of an RTL paragraph is all level 1: reversed.
-        rev = ID10[::-1]
-        mix = (9, 8, 7, 4, 5, 6, 3, 2, 1, 0)
-        rev5 = (4, 3, 2, 1, 0)
+        # cache triggers on RTL paragraphs (auto on): each re-resolves and equals a fresh screen. Maps are right-aligned
+        rev, rev5, mix = ID10[::-1], (4, 3, 2, 1, 0), (9, 8, 7, 4, 5, 6, 3, 2, 1, 0)
         long = 'אבגדהוזחטיכלמ'
-        para = 'אבגדהוזחטיכלמנ'
+        para = long + 'נ'
         base = (rev, mix, rev, rev, None)
 
-        def basic():
-            # two rows, then a Hebrew-first paragraph soft-wrapped onto rows 2-3,
-            # whose first row ends in a blank (L1 keeps it at level 1: map start)
-            s = self.screen(bidi_auto_direction=True)
-            parse_bytes(s, 'אבג\r\nאבג abc\r\nאבגדהוזחט אבג'.encode())
-            self.assertTrue(s.linebuf.is_continued(3))
-            s.cursor_position(1, 1)
+        def scr(text, **kw):
+            s = self.screen(bidi_auto_direction=True, **kw)
+            parse_bytes(s, text.encode())
             return s
+
+        def basic():  # a Hebrew-first paragraph soft-wrapped onto rows 2-3, whose first row ends in a blank (map start)
+            return scr('אבג\r\nאבג abc\r\nאבגדהוזחט אבג\x1b[1;1H')
 
         def alt():
-            s = self.screen(bidi_auto_direction=True)
-            parse_bytes(s, b'\x1b[?1049h')
-            self.fill(s, ['אבג', 'אבג abc'])
-            s.cursor_position(4, 1)
-            s.draw(long)
-            s.cursor_position(1, 1)
-            return s
+            return scr('\x1b[?1049hאבג\r\nאבג abc\x1b[4;1H' + long + '\x1b[1;1H')
 
-        def edge_bottom():
-            s = self.screen(cols=5, lines=5, scrollback=10, bidi_auto_direction=True)
-            parse_bytes(s, b'x0\r\nx1\r\nx2\r\n')
-            s.draw(para)
+        def edge(text, **kw):
+            s = scr(text, cols=5, scrollback=10, **kw)
             self.prerender(s)
-            self.ae(s.historybuf.count, 1)
             return s
 
         def edge_top():
-            s = self.screen(cols=5, lines=5, scrollback=10, pixel_scroll=False, bidi_auto_direction=True)
-            s.draw(para)
-            parse_bytes(s, b'\r\nx1\r\nx2\r\nx3\r\nx4\r\n')
-            self.prerender(s)
-            self.ae(s.historybuf.count, 3)
+            s = edge(para + '\r\nx1\r\nx2\r\nx3\r\nx4\r\n', pixel_scroll=False)
             s.scroll(3, True)
             return s
 
-        def resized():
-            s = self.screen(bidi_auto_direction=True)
-            s.draw(long)
-            return s
-
-        def paused(s):
-            s.pause_rendering(True, 1000)
-            self.frame(s)
-            s.pause_rendering(False)
-
-        def dirty(s):
-            s.cursor_position(4, 4)
-            s.draw('ד')
-
+        paused = lambda s: (s.pause_rendering(True, 1000), self.frame(s), s.pause_rendering(False))  # noqa: E731
         cases = (
-            ('dirty row', basic, dirty, base),
+            ('dirty row', basic, lambda s: parse_bytes(s, b'\x1b[4;4H\xd7\x93'), base),
             ('index', basic, lambda s: parse_bytes(s, b'\x1b[5;1H\x1bD'), (mix, rev, rev, None, None)),
             ('reverse index', basic, lambda s: parse_bytes(s, b'\x1b[1;1H\x1bM'), (None, rev, mix, rev, rev)),
             ('insert then delete line', alt, lambda s: parse_bytes(s, b'\x1b[L\x1b[M'), (rev, mix, None, rev, rev)),
-            ('view scroll, bottom edge', edge_bottom, lambda s: s.scroll(1, True), (None, None, None, rev5, rev5)),
+            ('view scroll, bottom edge', lambda: edge('x0\r\nx1\r\nx2\r\n' + para), lambda s: s.scroll(1, True), (None, None, None, rev5, rev5)),
             ('view scroll, top edge', edge_top, lambda s: s.scroll(1, False), (rev5, rev5, None, None, None)),
-            ('resize with rewrap', resized, lambda s: s.resize(5, 13), (tuple(range(12, -1, -1)), None, None, None, None)),
+            ('resize with rewrap', lambda: scr(long), lambda s: s.resize(5, 13), (tuple(range(12, -1, -1)), None, None, None, None)),
             ('pause', basic, paused, base),
         )
-        with setup_for_testing():
-            for name, build, trigger, expect in cases:
-                with self.subTest(name):
-                    built = []
-
-                    def tracked():
-                        built.append(build())
-                        return built[-1]
-
-                    self.trigger_case(tracked, trigger, expect, fresh=not name.startswith('view'))
-                    for s in built:
-                        self.assertTrue(any(s.test_bidi_paragraph_rtl(y) for y in range(s.lines)), 'no RTL row')
-            s = basic()
-            self.frame(s)
-            self.warm(s)
-            self.ae(self.frame(s), 0)
-            self.ae(self.maps(s), base)
-            self.assertTrue(all(s.test_bidi_paragraph_rtl(y) for y in range(4)))
+        for name, build, trigger, expect in cases:
+            with self.subTest(name):
+                screens = []
+                self.trigger_case(lambda: screens.append(build()) or screens[-1], trigger, expect, fresh=not name.startswith('view'))
+                self.assertTrue(all(any(s.test_bidi_paragraph_rtl(y) for y in range(s.lines)) for s in screens), 'no RTL row')
+        s = basic()
+        self.warm(s)
+        self.ae((self.maps(s), [s.test_bidi_paragraph_rtl(y) for y in range(4)]), (base, [True] * 4))
 
     def test_rtl_paragraph_split_changes_direction(self):
-        # Overwriting the last cell of row 0 clears its soft wrap, so row 1
-        # becomes its own paragraph with its own first strong character. Row 1
-        # is not written, but its direction changes, so it must be reshaped.
-        rev5 = (4, 3, 2, 1, 0)
-        cases = (
-            # abcde + אבג: one LTR paragraph, row 1 is R at level 1 (L1: the
-            # blanks 0). After the split row 1 starts with R: RTL, all level 1
-            ('abcde', 'אבג', True, rev5),
-            # אבגדה + abc: one RTL paragraph, row 1 is L at level 2. After the
-            # split row 1 starts with L: LTR, all level 0, so no map
-            ('אבגדה', 'abc', False, None),
-        )
-        with setup_for_testing():
-            for first, second, rtl_after, map_after in cases:
-                with self.subTest(first):
+        # overwriting the last cell of row 0 clears its soft wrap, so row 1 becomes its own paragraph with its own first strong
+        # character. Row 1 is not written, but its direction changes, so it must be reshaped
+        def build(first, second):
+            s = self.screen(cols=5, lines=5, bidi_auto_direction=True)
+            s.draw(first)
+            s.draw(second)
+            return s
 
-                    def build():
-                        s = self.screen(cols=5, lines=5, bidi_auto_direction=True)
-                        s.draw(first)
-                        s.draw(second)
-                        self.assertTrue(s.linebuf.is_continued(1))
-                        return s
-
-                    def split(s):
-                        s.cursor_position(1, 5)
-                        s.draw('x')
-                        self.assertFalse(s.linebuf.is_continued(1))
-
-                    s = build()
-                    self.frame(s)
-                    self.warm(s)
-                    before = s.test_bidi_paragraph_rtl(1)
-                    self.assertIs(before, not rtl_after)
-                    split(s)
-                    count = s.test_bidi_resolve_count()
-                    s.test_bidi_refresh()
-                    self.assertGreater(s.test_bidi_resolve_count() - count, 0)
-                    self.assertIn(1, s.linebuf.dirty_lines())
-                    buf = test_screen_update_cell_data(s)
-                    self.ae(s.test_bidi_v2l(1), map_after)
-                    self.assertIs(bool(s.test_bidi_paragraph_rtl(1)), rtl_after)
-                    f = build()
-                    split(f)
-                    fbuf = test_screen_update_cell_data(f)
-                    self.ae(self.maps(s), self.maps(f))
-                    self.ae(self.levels(s), self.levels(f))
-                    self.assert_same_upload(s, buf, f, fbuf, (1,))
-                    self.warm(s)
-                    self.ae(self.frame(s), 0)
-
-    def test_rtl_paragraph_reorder_option_toggle(self):
-        # Trigger: bidi_reorder off then on, force_ltr on then off, with auto
-        # direction on. Either change drops the maps, undoing it must resolve
-        # again and give the right-aligned RTL maps.
-        on = {'bidi_reorder': True, 'force_ltr': False, 'bidi_auto_direction': True}
-        offs = ({'bidi_reorder': False, 'bidi_auto_direction': True}, {'bidi_reorder': True, 'force_ltr': True, 'bidi_auto_direction': True})
-        want = tuple(range(9, -1, -1))
-        with setup_for_testing():
-            try:
-                for off in offs:
-                    with self.subTest(off=off):
-                        s = self.screen(bidi_auto_direction=True)
-                        s.draw(A)
-                        self.frame(s)
-                        self.warm(s)
-                        self.ae(s.test_bidi_v2l(0), want)
-                        self.set_options(off)
-                        self.frame(s)
-                        self.assertIsNone(s.test_bidi_v2l(0), off)
-                        self.set_options(on)
-                        self.assertGreater(self.frame(s), 0, off)
-                        self.ae(s.test_bidi_v2l(0), want, off)
-                        self.assertIs(s.test_bidi_paragraph_rtl(0), True)
-                        self.ae(self.frame(s), 0)
-            finally:
-                self.set_options(on)
+        for first, second, rtl_after, map_after in (('abcde', 'אבג', True, (4, 3, 2, 1, 0)), ('אבגדה', 'abc', False, None)):
+            with self.subTest(first):
+                s = build(first, second)
+                self.warm(s)
+                self.put(s, 1, 5, 'x')
+                count = s.test_bidi_resolve_count()
+                s.test_bidi_refresh()
+                self.assertGreater(s.test_bidi_resolve_count() - count, 0)
+                self.assertIn(1, self.dirty(s))
+                got = self.upload_sprites(s, (1,))
+                self.ae((s.test_bidi_v2l(1), bool(s.test_bidi_paragraph_rtl(1))), (map_after, rtl_after))
+                f = build(first, second)
+                self.put(f, 1, 5, 'x')
+                self.matches_fresh(s, got, f, (1,))
+                self.warm(s)
 
     def test_rtl_paragraph_selection_and_mouse(self):
-        # אבג, auto: v2l 9..0 (test_rtl_paragraph_right_aligned)
-        s = self.screen(bidi_auto_direction=True)
-        s.draw(A)
-        self.ae(self.selected_columns(s, 0, 2), [7, 8, 9])
-        self.assertIs(s.test_bidi_paragraph_rtl(0), True)
-        # a click at visual 0, left of the text, is on logical 9, a trailing
-        # blank at the paragraph level, 1: the half is flipped
-        self.ae(s.test_bidi_logical_x(0, 0), 9)
-        self.assertIs(s.test_bidi_is_rtl(9, 0), True)
-        # a click at visual 9, right of the text, lands on logical 0, the first
-        # character (א): the half is flipped, so it is the start of that character
-        self.ae(s.test_bidi_logical_x(9, 0), 0)
+        s = self.drawn(A, bidi_auto_direction=True)
+        self.ae((self.selected_columns(s, 0, 2), s.test_bidi_paragraph_rtl(0)), ([7, 8, 9], True))
+        # a click at visual 0, left of the text, is a trailing blank at paragraph level 1, logical 9: the half is flipped
+        self.ae((s.test_bidi_logical_x(0, 0), s.test_bidi_is_rtl(9, 0), s.test_bidi_logical_x(9, 0)), (9, True, 0))
+
+    LTR_MIXED = (0, 1, 2, 3, 6, 5, 4, 7, 8, 9)  # 'abc אבג' at level 0
+    RTL_MIXED = (9, 8, 7, 6, 5, 4, 3, 0, 1, 2)  # the same at level 1
+    LRM, RLM, ALM = '‎', '‏', '؜'
+    RTL_PLAIN = (9, 8, 7) + ID10[:7]  # 'abc def' at level 2 in an RTL paragraph
+
+    def bases(self, s, *seqs):
+        ans = []
+        for seq in seqs:
+            parse_bytes(s, seq)
+            ans.append('NONE LTR RTL AUTO'.split()[s.test_bidi_base()])
+        return ' '.join(ans)
+
+    def replies(self, s, *seqs):
+        ans = []
+        for seq in seqs:
+            s.callbacks.clear()
+            parse_bytes(s, seq)
+            ans.append(s.callbacks.wtcbuf)
+        return ans
+
+    def refreshed(self, s):
+        s.test_bidi_refresh()
+        return self.maps(s)
+
+    def marked(self, mark=RLM, **opts):
+        s = self.screen(bidi_auto_direction=True, **opts)
+        parse_bytes(s, f'{mark}abc def'.encode())
+        return s
 
     def test_bidi_control_parse(self):
-        NONE, LTR, RTL, AUTO = range(4)
+        # SCP 0 and no parameter give AUTO back; extra parameters, SCP 3 and a private SCP are ignored
+        self.ae(self.bases(self.screen(bidi_auto_direction=False), b'', b'\x1b[8l', b'\x1b[8h'), 'LTR NONE LTR')
+        # fmt: off
+        seqs = (b'', b'\x1b[8l', b'\x1b[8h', b'\x1b[2 k', b'\x1b[1 k', b'\x1b[0 k', b'\x1b[2 k', b'\x1b[ k',
+                b'\x1b[2 k', b'\x1b[1;0 k', b'\x1b[1;2;3 k', b'\x1b[3 k', b'\x1b[?1 k', b'\x1b[0 k', b'\x1b[?2501l', b'\x1b[?2501h')
+        # fmt: on
+        self.ae(self.bases(self.screen(bidi_auto_direction=True), *seqs), 'AUTO NONE AUTO RTL LTR AUTO RTL AUTO RTL LTR LTR LTR LTR AUTO LTR AUTO')
+        self.ae(self.bases(self.screen(bidi_auto_direction=False), b'\x1b[?2501h', b'\x1b[?2501l', b'\x1b[2 k'), 'AUTO LTR RTL')
         s = self.screen(bidi_auto_direction=False)
-        c = s.callbacks
-        self.ae(s.test_bidi_base(), LTR)
-        parse_bytes(s, b'\x1b[8l')
-        self.ae(s.test_bidi_base(), NONE)
-        parse_bytes(s, b'\x1b[8h')
-        self.ae(s.test_bidi_base(), LTR)
-        s = self.screen(bidi_auto_direction=True)
-        self.ae(s.test_bidi_base(), AUTO)
-        parse_bytes(s, b'\x1b[8l')
-        self.ae(s.test_bidi_base(), NONE)
-        parse_bytes(s, b'\x1b[8h')
-        self.ae(s.test_bidi_base(), AUTO)
-        for seq, want in ((b'\x1b[2 k', RTL), (b'\x1b[1 k', LTR), (b'\x1b[0 k', AUTO), (b'\x1b[2 k', RTL), (b'\x1b[ k', AUTO)):
-            with self.subTest(seq=seq):
-                parse_bytes(s, seq)
-                self.ae(s.test_bidi_base(), want)
-        parse_bytes(s, b'\x1b[2 k')
-        parse_bytes(s, b'\x1b[1;0 k')
-        self.ae(s.test_bidi_base(), LTR)
-        for seq in (b'\x1b[1;2;3 k', b'\x1b[3 k', b'\x1b[?1 k'):
-            with self.subTest(seq=seq):
-                parse_bytes(s, seq)
-                self.ae(s.test_bidi_base(), LTR)
-        parse_bytes(s, b'\x1b[0 k')
-        self.ae(s.test_bidi_base(), AUTO)
-        parse_bytes(s, b'\x1b[?2501l')
-        self.ae(s.test_bidi_base(), LTR)
-        parse_bytes(s, b'\x1b[?2501h')
-        self.ae(s.test_bidi_base(), AUTO)
-        s = self.screen(bidi_auto_direction=False)
-        parse_bytes(s, b'\x1b[?2501h')
-        self.ae(s.test_bidi_base(), AUTO)
-        parse_bytes(s, b'\x1b[?2501l')
-        self.ae(s.test_bidi_base(), LTR)
-        parse_bytes(s, b'\x1b[2 k')
-        self.ae(s.test_bidi_base(), RTL)
-        s = self.screen(bidi_auto_direction=False)
-        c = s.callbacks
-        parse_bytes(s, b'\x1b[4;8l')
-        self.ae(s.test_bidi_base(), NONE)
-        parse_bytes(s, b'\x1b[4$p')
-        self.ae(c.wtcbuf, b'\x1b[4;2$y')
-        c.clear()
-        parse_bytes(s, b'\x1b[4;8h')
-        self.ae(s.test_bidi_base(), LTR)
-        parse_bytes(s, b'\x1b[4$p')
-        self.ae(c.wtcbuf, b'\x1b[4;1$y')
-        c.clear()
-        for seq, want in (
-            (b'\x1b[8$p', b'\x1b[8;1$y'),
-            (b'\x1b[8l\x1b[8$p', b'\x1b[8;2$y'),
-            (b'\x1b[8h\x1b[8$p', b'\x1b[8;1$y'),
-            (b'\x1b[?2501$p', b'\x1b[?2501;2$y'),
-            (b'\x1b[?2501h\x1b[?2501$p', b'\x1b[?2501;1$y'),
-            (b'\x1b[?2501l\x1b[?2501$p', b'\x1b[?2501;2$y'),
-        ):
-            with self.subTest(seq=seq):
-                parse_bytes(s, seq)
-                self.ae(c.wtcbuf, want)
-                c.clear()
-        s = self.screen(bidi_auto_direction=True)
-        c = s.callbacks
-        parse_bytes(s, b'\x1b[?2501$p')
-        self.ae(c.wtcbuf, b'\x1b[?2501;1$y')
-        # bidi_reorder off is the master switch: nothing is reordered, so BDSM
-        # reports reset (explicit) whatever was set
+        self.ae(
+            (self.bases(s, b'\x1b[4;8l'), self.replies(s, b'\x1b[4$p'), self.bases(s, b'\x1b[4;8h'), self.replies(s, b'\x1b[4$p')),
+            ('NONE', [b'\x1b[4;2$y'], 'LTR', [b'\x1b[4;1$y']),
+        )
+        seqs = (b'\x1b[8$p', b'\x1b[8l\x1b[8$p', b'\x1b[8h\x1b[8$p', b'\x1b[?2501$p', b'\x1b[?2501h\x1b[?2501$p', b'\x1b[?2501l\x1b[?2501$p')
+        want = [b'\x1b[8;1$y', b'\x1b[8;2$y', b'\x1b[8;1$y', b'\x1b[?2501;2$y', b'\x1b[?2501;1$y', b'\x1b[?2501;2$y']
+        self.ae(self.replies(s, *seqs), want)
+        self.ae(self.replies(self.screen(bidi_auto_direction=True), b'\x1b[?2501$p'), [b'\x1b[?2501;1$y'])
+        # bidi_reorder off is the master switch: BDSM reports reset (explicit) whatever was set
         s = self.screen(bidi_reorder=False, bidi_auto_direction=False)
-        c = s.callbacks
-        for seq in (b'\x1b[8$p', b'\x1b[8h\x1b[8$p', b'\x1b[8l\x1b[8$p'):
-            with self.subTest(bidi_reorder=False, seq=seq):
-                parse_bytes(s, seq)
-                self.ae(c.wtcbuf, b'\x1b[8;2$y')
-                c.clear()
+        self.ae(self.replies(s, b'\x1b[8$p', b'\x1b[8h\x1b[8$p', b'\x1b[8l\x1b[8$p'), [b'\x1b[8;2$y'] * 3)
 
     def test_bidi_control_change_marks_dirty(self):
-        # The cell data is rebuilt only for a dirty screen, so a change of base
-        # with no output after it must mark the screen dirty; setting the value
-        # it already has must not
-        with setup_for_testing():
-            s = self.screen(bidi_auto_direction=False)
-            s.draw('abc ' + A)
-            for seq, dirty in (
-                (b'\x1b[8h', False), (b'\x1b[8l', True), (b'\x1b[8l', False), (b'\x1b[8h', True),
-                (b'\x1b[0 k', False), (b'\x1b[1 k', True), (b'\x1b[1 k', False), (b'\x1b[2 k', True), (b'\x1b[0 k', True),
-                (b'\x1b[?2501h', True), (b'\x1b[?2501h', False), (b'\x1b[?2501l', True),
-            ):
-                with self.subTest(seq=seq):
-                    test_screen_update_cell_data(s)
-                    self.assertFalse(s.is_dirty)
-                    parse_bytes(s, seq)
-                    self.assertIs(s.is_dirty, dirty)
+        # a change of base with no output after it must mark the screen dirty, setting the value it already has must not
+        s = self.screen(bidi_auto_direction=False)
+        s.draw('abc ' + A)
+        # fmt: off
+        seqs = (b'\x1b[8h', b'\x1b[8l', b'\x1b[8l', b'\x1b[8h', b'\x1b[0 k', b'\x1b[1 k', b'\x1b[1 k', b'\x1b[2 k', b'\x1b[0 k',
+                b'\x1b[?2501h', b'\x1b[?2501h', b'\x1b[?2501l')
+        # fmt: on
+        got = []
+        for seq in seqs:
+            test_screen_update_cell_data(s)
+            clean = not s.is_dirty
+            parse_bytes(s, seq)
+            got.append((clean, s.is_dirty))
+        self.ae(got, [(True, d) for d in (0, 1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1)])
 
     def test_bidi_control_lifetime(self):
-        NONE, LTR, RTL, AUTO = range(4)
+        # the base survives DECSC/DECRC, resize and erase; a reset or the alternate screen restore it
         s = self.screen(bidi_auto_direction=True)
-        parse_bytes(s, b'\x1b[2 k')
-        parse_bytes(s, b'\x1b7\x1b[8l\x1b8')
-        self.ae(s.test_bidi_base(), NONE)
+        self.ae(self.bases(s, b'\x1b[2 k', b'\x1b7\x1b[8l\x1b8'), 'RTL NONE')
         s.draw(A)
         s.resize(s.lines + 1, s.columns + 3)
         s.resize(s.lines, s.columns - 2)
-        self.ae(s.test_bidi_base(), NONE)
-        parse_bytes(s, b'\x1b[8h')
-        self.ae(s.test_bidi_base(), RTL)
+        self.ae(self.bases(s, b'', b'\x1b[8h'), 'NONE RTL')
         s.draw(A)
-        parse_bytes(s, b'\x1b[2J\x1b[H')
-        self.ae(s.test_bidi_base(), RTL)
-        for seq in (b'\x1bc', b'\x1b[!p'):
-            with self.subTest(seq=seq):
-                s = self.screen(bidi_auto_direction=True)
-                parse_bytes(s, b'\x1b[8l\x1b[2 k\x1b[?2501l')
-                self.ae(s.test_bidi_base(), NONE)
-                parse_bytes(s, b'\x1b[?1049h')
-                parse_bytes(s, b'\x1b[8h\x1b[1 k')
-                self.ae(s.test_bidi_base(), LTR)
-                parse_bytes(s, seq)
-                self.ae(s.test_bidi_base(), AUTO)
-                parse_bytes(s, b'\x1b[?1049l')
-                self.ae(s.test_bidi_base(), AUTO)
+        self.ae(self.bases(s, b'\x1b[2J\x1b[H'), 'RTL')
+        for reset in (b'\x1bc', b'\x1b[!p'):
+            with self.subTest(reset=reset):
+                seqs = (b'\x1b[8l\x1b[2 k\x1b[?2501l', b'\x1b[?1049h', b'\x1b[8h\x1b[1 k', reset, b'\x1b[?1049l')
+                self.ae(self.bases(self.screen(bidi_auto_direction=True), *seqs), 'NONE NONE LTR AUTO AUTO')
         for mode in (b'1049', b'47', b'1047'):
             with self.subTest(mode=mode):
-                s = self.screen(bidi_auto_direction=False)
-                parse_bytes(s, b'\x1b[2 k')
-                parse_bytes(s, b'\x1b[?' + mode + b'h')
-                self.ae(s.test_bidi_base(), RTL)
-                parse_bytes(s, b'\x1b[8l')
-                self.ae(s.test_bidi_base(), NONE)
-                parse_bytes(s, b'\x1b[?' + mode + b'l')
-                self.ae(s.test_bidi_base(), RTL)
-                parse_bytes(s, b'\x1b[8l\x1b[?' + mode + b'h')
-                self.ae(s.test_bidi_base(), NONE)
-                parse_bytes(s, b'\x1b[8h\x1b[1 k')
-                self.ae(s.test_bidi_base(), LTR)
-                parse_bytes(s, b'\x1b[?' + mode + b'l')
-                self.ae(s.test_bidi_base(), NONE)
-
-    # 'abc אבג' at paragraph level 0: the Hebrew run reversed in place. At
-    # level 1: abc is 2 (I2), the space and the blanks 1 (N2, L1); L2 reverses
-    # abc, then the row, so the row ends at the right edge, trailing blanks
-    # first. 'abc' alone at level 1 maps the same way.
-    LTR_MIXED = (0, 1, 2, 3, 6, 5, 4, 7, 8, 9)
-    RTL_MIXED = (9, 8, 7, 6, 5, 4, 3, 0, 1, 2)
+                on, off = b'\x1b[?' + mode + b'h', b'\x1b[?' + mode + b'l'
+                seqs = (b'\x1b[2 k', on, b'\x1b[8l', off, b'\x1b[8l' + on, b'\x1b[8h\x1b[1 k', off)
+                self.ae(self.bases(self.screen(bidi_auto_direction=False), *seqs), 'RTL RTL NONE RTL NONE LTR NONE')
 
     def test_bdsm_explicit_disables_reordering(self):
-        # Row 0, LTR paragraph: אב(ג) at level 1, the brackets R by N0 (R inside,
-        # R before), so shaped mirrored. Row 1, RTL paragraph (auto, R first):
-        # (1) is R by N0 (EN counts as R), 1 is 2, every other cell 1, so the row
-        # is reversed. CSI 8 l stops reordering on the next frame with no config
-        # reload, so the rows shaped with levels are reshaped on that frame;
-        # CSI 8 h gives the old maps back.
+        # CSI 8 l stops reordering on the next frame, so the rows shaped with levels are reshaped; CSI 8 h gives the maps back
         rows = ['ab אב(ג)', A + ' (1)']
-        with setup_for_testing():
-            s = self.screen(bidi_auto_direction=True)
-            self.fill(s, rows)
-            test_screen_update_cell_data(s)
-            before = self.maps(s)
-            self.ae(before, ((0, 1, 2, 7, 6, 5, 4, 3, 8, 9), ID10[::-1], None, None, None))
-            self.assertTrue(all(s.test_bidi_line_rendered_with_bidi(y) for y in range(2)))
-            parse_bytes(s, b'\x1b[8l')
-            buf = test_screen_update_cell_data(s)
-            self.ae(self.maps(s), (None,) * s.lines)
-            self.assertFalse(any(s.test_bidi_line_rendered_with_bidi(y) for y in range(2)))
-            parse_bytes(s, b'\x1b[8h')
-            test_screen_update_cell_data(s)
-            self.ae(self.maps(s), before)
-            # made last, as making a screen sets the options
-            f = self.screen(bidi_reorder=False, bidi_auto_direction=True)
-            self.fill(f, rows)
-            self.assert_same_upload(s, buf, f, test_screen_update_cell_data(f), range(2))
+        s = self.screen(bidi_auto_direction=True)
+        self.fill(s, rows)
+        test_screen_update_cell_data(s)
+        before = self.maps(s)
+
+        def state():
+            return self.maps(s), [s.test_bidi_line_rendered_with_bidi(y) for y in range(2)]
+
+        self.ae(state(), (((0, 1, 2, 7, 6, 5, 4, 3, 8, 9), ID10[::-1], None, None, None), [True, True]))
+        parse_bytes(s, b'\x1b[8l')
+        buf = test_screen_update_cell_data(s)
+        self.ae(state(), ((None,) * s.lines, [False, False]))
+        parse_bytes(s, b'\x1b[8h')
+        test_screen_update_cell_data(s)
+        self.ae(self.maps(s), before)
+        f = self.screen(bidi_reorder=False, bidi_auto_direction=True)  # made last, as making a screen sets the options
+        self.fill(f, rows)
+        fbuf = test_screen_update_cell_data(f)
+        for y in range(2):
+            fresh = self.sprites(gpu_row(f, fbuf, y))
+            self.assertTrue(any(fresh))
+            self.ae(self.sprites(gpu_row(s, buf, y)), fresh, f'row {y}')
 
     def test_scp_overrides_auto(self):
-        # SCP 1 and 2 force the paragraph direction whatever the autodetection
-        # says; SCP 0 or no parameter gives the option's behaviour back.
-        # A + ' abc' at level 0: the Hebrew run reversed in place, the space
-        # between R and L at the embedding level (N2).
-        s = self.screen(bidi_auto_direction=True)
-        parse_bytes(s, b'\x1b[1 k')
-        self.fill(s, [A + ' abc'])
-        self.ae(self.refresh(s, 0), (2, 1, 0) + ID10[3:])
-        self.assertIs(s.test_bidi_paragraph_rtl(0), False)
-        # A Latin-first row with Hebrew and a Latin-only row both right-aligned,
-        # and an all-blank row all level 1: the full reversal
+        # SCP 2 forces the paragraph direction whatever the autodetection says; SCP 0 or no parameter gives the option back
         s = self.screen(bidi_auto_direction=False)
         parse_bytes(s, b'\x1b[2 k')
         self.fill(s, ['abc ' + A, 'abc'])
-        s.test_bidi_refresh()
-        self.ae(self.maps(s), (self.RTL_MIXED, self.RTL_MIXED) + (ID10[::-1],) * 3)
-        self.ae(s.test_bidi_levels(1), (2, 2, 2) + (1,) * 7)
-        self.assertTrue(all(s.test_bidi_paragraph_rtl(y) for y in range(2)))
+        self.ae(self.refreshed(s), (self.RTL_MIXED, self.RTL_MIXED) + (ID10[::-1],) * 3)
+        self.ae((s.test_bidi_levels(1), [s.test_bidi_paragraph_rtl(y) for y in range(2)]), ((2, 2, 2) + (1,) * 7, [True, True]))
         rows = [A + ' abc', 'abc ' + A, 'abc']
         for auto in (True, False):
             f = self.screen(bidi_auto_direction=auto)
             self.fill(f, rows)
-            f.test_bidi_refresh()
-            want = self.maps(f)
+            want = self.refreshed(f)
             for seq in (b'\x1b[0 k', b'\x1b[ k'):
                 with self.subTest(auto=auto, seq=seq):
                     s = self.screen(bidi_auto_direction=auto)
                     self.fill(s, rows)
                     parse_bytes(s, b'\x1b[2 k')
-                    s.test_bidi_refresh()
-                    self.assertNotEqual(self.maps(s), want)
+                    self.assertNotEqual(self.refreshed(s), want)
                     parse_bytes(s, seq)
-                    s.test_bidi_refresh()
-                    self.ae(self.maps(s), want)
+                    self.ae(self.refreshed(s), want)
 
     def test_hebrew_first_stays_ltr(self):
-        # A line whose first strong character is Hebrew stays LTR-based when the
-        # program asks for it: שלום reversed in place, the line left-aligned.
-        # Explicit mode shows it in logical order. The default options case
-        # already passed before the direction control: coverage only.
+        # A Hebrew-first line stays LTR-based when the program asks for it (SCP 1, mode 2501 or 8 reset)
         ltr = (3, 2, 1, 0) + ID10[4:]
-        for auto, seq, want in (
-            (True, b'\x1b[1 k', ltr),
-            (True, b'\x1b[?2501l', ltr),
-            (True, b'\x1b[8l', None),
-            (False, b'', ltr),
-        ):
+        for auto, seq, want in ((True, b'\x1b[1 k', ltr), (True, b'\x1b[?2501l', ltr), (True, b'\x1b[8l', None), (False, b'', ltr)):
             with self.subTest(auto=auto, seq=seq):
                 s = self.screen(bidi_auto_direction=auto)
                 parse_bytes(s, seq)
@@ -2118,571 +1230,268 @@ class TestBidi(BaseTest):
                     self.assertIs(s.test_bidi_paragraph_rtl(0), False)
 
     def test_control_change_reresolves(self):
-        # The effective base is in the frame key: a change of base makes the next
-        # frame resolve the cached paragraphs again (explicit mode resolves
-        # nothing and drops the maps), and the same-class shortcut never keeps
-        # maps across it.
-        NONE, LTR, RTL, AUTO = range(4)
+        # The base is in the frame key: a change makes the next frame resolve the cached paragraphs again (explicit mode drops the maps)
         rows = ['abc ' + A, A + ' abc']
-        with setup_for_testing():
+
+        def build():
             s = self.screen(bidi_auto_direction=False)
             self.fill(s, rows)
-            self.frame(s)
-            self.warm(s)
-            # no change: the cache holds
-            self.ae(self.frame(s), 0)
-            sent = b''
-            for seq, base in ((b'\x1b[8l', NONE), (b'\x1b[8h', LTR), (b'\x1b[2 k', RTL), (b'\x1b[0 k', LTR), (b'\x1b[?2501h', AUTO)):
-                with self.subTest(seq=seq):
-                    parse_bytes(s, seq)
-                    sent += seq
-                    self.ae(s.test_bidi_base(), base)
-                    count = self.frame(s)
-                    if base == NONE:
-                        self.ae(self.maps(s), (None,) * s.lines)
-                    else:
-                        self.assertGreater(count, 0)
-                    got = self.maps(s)
-                    f = self.screen(bidi_auto_direction=False)
-                    parse_bytes(f, sent)
-                    self.fill(f, rows)
-                    self.frame(f)
-                    self.ae(got, self.maps(f))
-                    self.warm(s)
-                    self.ae(self.frame(s), 0)
-            # x for a, L for L, in the frame of the base change
-            s = self.screen(bidi_auto_direction=False)
-            self.fill(s, rows)
-            self.frame(s)
-            self.warm(s)
-            s.cursor_position(1, 1)
-            s.draw('x')
-            parse_bytes(s, b'\x1b[2 k')
-            count = self.frame(s)
-            self.ae(self.maps(s)[:2], (self.RTL_MIXED, (9, 8, 7, 4, 5, 6, 3, 2, 1, 0)))
-            self.assertGreater(count, 0)
-            got = self.maps(s)
-            f = self.screen(bidi_auto_direction=False)
-            parse_bytes(f, b'\x1b[2 k')
-            self.fill(f, ['x' + rows[0][1:], rows[1]])
-            self.frame(f)
-            self.ae(got, self.maps(f))
-            # Entering and leaving the alternate screen (47 keeps its content)
-            # resolve again: coverage, as the linebuf was in the key already
-            s = self.screen(bidi_auto_direction=False)
-            self.fill(s, rows)
-            parse_bytes(s, b'\x1b[?47h')
-            self.fill(s, rows[::-1])
-            self.frame(s)
-            self.warm(s)
-            parse_bytes(s, b'\x1b[?47l')
-            self.assertGreater(self.frame(s), 0)
-            self.warm(s)
-            parse_bytes(s, b'\x1b[?47h')
-            self.assertGreater(self.frame(s), 0)
+            return s
+
+        s = build()
+        self.frame(s)
+        self.warm(s)
+        sent = b''
+        for seq, base in ((b'\x1b[8l', 'NONE'), (b'\x1b[8h', 'LTR'), (b'\x1b[2 k', 'RTL'), (b'\x1b[0 k', 'LTR'), (b'\x1b[?2501h', 'AUTO')):
+            with self.subTest(seq=seq):
+                sent += seq
+                self.ae(self.bases(s, seq), base)
+                count = self.frame(s)
+                if base == 'NONE':
+                    self.ae(self.maps(s), (None,) * s.lines)
+                else:
+                    self.assertGreater(count, 0)
+                f = self.screen(bidi_auto_direction=False)
+                parse_bytes(f, sent)
+                self.fill(f, rows)
+                self.frame(f)
+                self.ae(self.maps(s), self.maps(f))
+                self.warm(s)
+        self.trigger_case(build, lambda s: parse_bytes(s, b'\x1b[Hx\x1b[2 k'), (self.RTL_MIXED, (9, 8, 7, 4, 5, 6, 3, 2, 1, 0)) + (ID10[::-1],) * 3)
+        # entering and leaving the alternate screen (47 keeps its content) resolve again
+        s = build()
+        parse_bytes(s, b'\x1b[?47h')
+        self.fill(s, rows[::-1])
+        self.frame(s)
+        self.warm(s)
+        for seq in (b'\x1b[?47l', b'\x1b[?47h'):
+            with self.subTest(seq=seq):
+                parse_bytes(s, seq)
+                self.assertGreater(self.frame(s), 0)
+                self.warm(s)
 
     def test_paused_frame_uses_paused_base(self):
-        # A paused frame renders its snapshot with the base captured when the
-        # pause began; a base sent during the pause applies when it ends.
-        with setup_for_testing():
-            s = self.screen(bidi_auto_direction=False)
-            s.draw('abc ' + A)
-            self.frame(s)
-            self.warm(s)
-            parse_bytes(s, b'\x1b[?2026h')
-            parse_bytes(s, b'\x1b[2 k')
-            self.frame(s)
-            self.ae(s.test_bidi_v2l(0), self.LTR_MIXED)
-            parse_bytes(s, b'\x1b[?2026l')
-            self.frame(s)
-            self.ae(s.test_bidi_v2l(0), self.RTL_MIXED)
-            # sent before the pause with no live frame between: the snapshot
-            # goes with the new base, not with the last live frame's
-            s = self.screen(bidi_auto_direction=False)
-            s.draw('abc ' + A)
-            self.frame(s)
-            self.warm(s)
-            parse_bytes(s, b'\x1b[2 k\x1b[?2026h')
-            self.frame(s)
-            self.ae(s.test_bidi_v2l(0), self.RTL_MIXED)
-            parse_bytes(s, b'\x1b[?2026l')
-            self.frame(s)
-            self.ae(s.test_bidi_v2l(0), self.RTL_MIXED)
+        # A paused frame renders its snapshot with the base captured when the pause began; a base sent during the
+        # pause applies when it ends; sent before it with no live frame between, the snapshot goes with the new base
+        pause, scp = b'\x1b[?2026h', b'\x1b[2 k'
+        for seqs, during in ((pause + scp, self.LTR_MIXED), (scp + pause, self.RTL_MIXED)):
+            with self.subTest(seqs=seqs):
+                s = self.screen(bidi_auto_direction=False)
+                s.draw('abc ' + A)
+                self.frame(s)
+                self.warm(s)
+                parse_bytes(s, seqs)
+                self.frame(s)
+                self.ae(s.test_bidi_v2l(0), during)
+                parse_bytes(s, b'\x1b[?2026l')
+                self.frame(s)
+                self.ae(s.test_bidi_v2l(0), self.RTL_MIXED)
 
     def test_tmux_like_opt_out(self):
-        # A multiplexer's two panes on the alternate screen, the border at
-        # logical column 10. The opt-out is sent on the main screen, which holds
-        # row A too, and carried into the alternate screen on entry.
-        NONE, LTR, RTL, AUTO = range(4)
+        # Two panes on the alternate screen, border at column 10; the opt-out is sent on the main screen and carried into it
         row_a = 'אבג דהו   │ abc def   '  # Hebrew in the left pane only
         row_b = 'אבג       │ שלום      '  # Hebrew on both sides
-        border = 10
-
-        def run(seq):
-            s = self.screen(cols=22, bidi_auto_direction=True)
-            s.draw(row_a)
-            parse_bytes(s, seq + b'\x1b[?1049h')
-            self.fill(s, [row_a, row_b])
-            for y in range(2):
-                self.refresh(s, y)
-            return s, [s.test_bidi_visual_x(border, y) for y in range(2)]
-
-        def leave(s):
-            parse_bytes(s, b'\x1b[?1049l')
-            self.refresh(s, 0)
-            return s.test_bidi_base(), s.test_bidi_visual_x(border, 0)
-
-        # No opt-out: both rows R first, so RTL paragraphs at level 1, every
-        # cell but abc def at level 1, the row reversed: the border moves
-        s, cols = run(b'')
-        self.ae(cols, [11, 11])
-        self.assertTrue(all(s.test_bidi_paragraph_rtl(y) for y in range(2)))
-        self.ae(leave(s), (AUTO, 11))
-        # Explicit mode: nothing is reordered, the borders stay put
-        s, cols = run(b'\x1b[8l')
-        self.ae([s.test_bidi_v2l(y) for y in range(2)], [None, None])
-        self.ae(cols, [border, border])
-        self.ae(leave(s), (NONE, border))
-        self.assertIsNone(s.test_bidi_v2l(0))
-        # LTR: row A's border is between R and L, at the embedding level (N2),
-        # 0, so it stays. Row B's is between R and R, so R (N1) in any paragraph
-        # direction: columns 0-15 form one level 1 run, reversed in place, and
-        # the border moves to 15 - 10. This is a limit of SCP 1.
-        s, cols = run(b'\x1b[1 k')
-        self.ae(cols, [border, 5])
-        self.assertFalse(any(s.test_bidi_paragraph_rtl(y) for y in range(2)))
-        self.ae(leave(s), (LTR, border))
-
-    # Leading marks: an LRM, RLM or ALM at a paragraph's start has no cell to be
-    # stored on, so it is kept on the line and fed to FriBidi in front of the
-    # paragraph's text, mapped to no cell.
-    LRM, RLM, ALM = '‎', '‏', '؜'
-    # abc def at level 2 in an RTL paragraph: in order, right-aligned
-    RTL_PLAIN = (9, 8, 7) + ID10[:7]
+        for seq, cols, rtl, left in (
+            (b'', [11, 11], True, ('AUTO', 11, False)),
+            (b'\x1b[8l', [10, 10], None, ('NONE', 10, True)),
+            (b'\x1b[1 k', [10, 5], False, ('LTR', 10, False)),
+        ):
+            with self.subTest(seq=seq):
+                s = self.screen(cols=22, bidi_auto_direction=True)
+                s.draw(row_a)
+                parse_bytes(s, seq + b'\x1b[?1049h')
+                self.fill(s, [row_a, row_b])
+                for y in range(2):
+                    self.refresh(s, y)
+                dirs = [s.test_bidi_v2l(y) if rtl is None else s.test_bidi_paragraph_rtl(y) for y in range(2)]
+                self.ae(([s.test_bidi_visual_x(10, y) for y in range(2)], dirs), (cols, [rtl, rtl]))
+                parse_bytes(s, b'\x1b[?1049l')
+                self.refresh(s, 0)
+                self.ae((self.bases(s, b''), s.test_bidi_visual_x(10, 0), s.test_bidi_v2l(0) is None), left)
 
     def test_leading_mark_paragraph(self):
-        with setup_for_testing():
-            # RLM is the first strong character (P2-P3): paragraph level 1. L at
-            # an odd level is 2 (I2), the space between two L is L (N1), the
-            # blanks 1 (L1). L2 reverses cols 0-6, then the whole row.
-            s = self.screen(bidi_auto_direction=True)
-            parse_bytes(s, f'{self.RLM}abc def'.encode())
-            self.ae(self.refresh(s, 0), self.RTL_PLAIN)
-            self.ae(s.test_bidi_levels(0), (2,) * 7 + (1,) * 3)
-            self.assertIs(s.test_bidi_paragraph_rtl(0), True)
-            self.ae(s.test_bidi_leading_mark(0), 2)
-            # LRM before Hebrew: LTR paragraph, the letters reversed in place
-            # and the space between R and L at level 0 (N2). Without the mark the
-            # first strong character is R and the paragraph is RTL.
-            s = self.screen(bidi_auto_direction=True)
-            parse_bytes(s, f'{self.LRM}{A} x'.encode())
-            self.ae(self.refresh(s, 0), (2, 1, 0) + ID10[3:])
-            self.assertIs(s.test_bidi_paragraph_rtl(0), False)
-            self.ae(s.test_bidi_leading_mark(0), 1)
-            s = self.screen(bidi_auto_direction=True)
-            parse_bytes(s, f'{A} x'.encode())
-            self.ae(self.refresh(s, 0), ID10[::-1])
-            self.assertIs(s.test_bidi_paragraph_rtl(0), True)
-            self.ae(s.test_bidi_leading_mark(0), 0)
-            # ALM is AL, so the paragraph is RTL and W2 makes the digits after
-            # it AN: AN AN WS AN AN, the space between two AN is R (N1). I1 puts
-            # AN at an odd level on 2: levels 2 2 1 2 2, then the blanks 1. L2
-            # reverses each digit pair, then the whole row.
-            s = self.screen(bidi_auto_direction=True)
-            parse_bytes(s, f'{self.ALM}12 34'.encode())
-            self.ae(self.refresh(s, 0), (9, 8, 7, 6, 5, 3, 4, 2, 0, 1))
-            self.ae(s.test_bidi_levels(0), (2, 2, 1, 2, 2) + (1,) * 5)
-            self.assertIs(s.test_bidi_paragraph_rtl(0), True)
-            self.ae(s.test_bidi_leading_mark(0), 3)
+        # A leading mark has no cell: RLM or ALM make the paragraph RTL, LRM LTR, and ALM turns the digits after it AN
+        for name, text, v2l, levels, rtl, mark in (
+            ('RLM', f'{self.RLM}abc def', self.RTL_PLAIN, (2,) * 7 + (1,) * 3, True, 2),
+            ('LRM', f'{self.LRM}{A} x', (2, 1, 0) + ID10[3:], None, False, 1),
+            ('none', f'{A} x', ID10[::-1], None, True, 0),
+            ('ALM', f'{self.ALM}12 34', (9, 8, 7, 6, 5, 3, 4, 2, 0, 1), (2, 2, 1, 2, 2) + (1,) * 5, True, 3),
+        ):
+            with self.subTest(name):
+                s = self.screen(bidi_auto_direction=True)
+                parse_bytes(s, text.encode())
+                self.ae((self.refresh(s, 0), s.test_bidi_paragraph_rtl(0), s.test_bidi_leading_mark(0)), (v2l, rtl, mark))
+                if levels:
+                    self.ae(s.test_bidi_levels(0), levels)
 
     def test_leading_mark_erase_in_line(self):
-        # EL 1 and EL 2 erase the start of the line, taking the mark with it; EL 0
-        # at column 0 erases only cells, and the mark sits before cell 0
-        with setup_for_testing():
-            for seq, at_start, kept in ((b'\x1b[2K', False, False), (b'\x1b[1K', False, False), (b'\x1b[0K', True, True)):
-                with self.subTest(seq=seq):
-                    s = self.screen(bidi_auto_direction=True)
-                    parse_bytes(s, f'{self.RLM}abc def'.encode())
-                    self.ae(self.refresh(s, 0), self.RTL_PLAIN)
-                    self.ae(s.test_bidi_leading_mark(0), 2)
-                    if at_start:
-                        s.cursor_position(1, 1)
-                    parse_bytes(s, seq)
-                    self.ae(s.test_bidi_leading_mark(0), 2 if kept else 0)
-                    s.test_bidi_refresh()
-                    self.assertIs(s.test_bidi_paragraph_rtl(0), kept)
+        # EL 1 and EL 2 take the mark with the start of the line; EL 0 at column 0 erases only cells, the mark sits before cell 0
+        for seq, at_start in ((b'\x1b[2K', False), (b'\x1b[1K', False), (b'\x1b[0K', True)):
+            with self.subTest(seq=seq):
+                s = self.marked()
+                self.ae((self.refresh(s, 0), s.test_bidi_leading_mark(0)), (self.RTL_PLAIN, 2))
+                if at_start:
+                    s.cursor_position(1, 1)
+                parse_bytes(s, seq)
+                self.ae(s.test_bidi_leading_mark(0), 2 if at_start else 0)
+                s.test_bidi_refresh()
+                self.assertIs(s.test_bidi_paragraph_rtl(0), at_start)
 
     def test_leading_mark_history_and_reflow(self):
-        with setup_for_testing():
-            # The mark moves with the line into the history
-            s = self.screen(cols=10, lines=3, scrollback=5, bidi_auto_direction=True)
-            parse_bytes(s, f'{self.RLM}abc def'.encode())
-            s.cursor_position(3, 1)
-            s.index()
-            self.ae(s.historybuf.count, 1)
-            s.scroll(1, True)
-            self.ae(self.refresh(s, 0), self.RTL_PLAIN)
-            self.assertIs(s.test_bidi_paragraph_rtl(0), True)
-            # Narrower: the marked row wraps into two. Only the first keeps the
-            # mark; both rows are of one RTL paragraph. Level 2 for every letter
-            # and the space; the blanks of the last row 1 (L1): row 0 reverses
-            # twice, row 1 puts its blanks, reversed, on the left.
-            s = self.screen(cols=10, lines=3, scrollback=5, bidi_auto_direction=True)
-            parse_bytes(s, f'{self.RLM}abc def'.encode())
-            self.ae(self.refresh(s, 0), self.RTL_PLAIN)
-            s.resize(3, 5)
-            self.ae(s.test_bidi_leading_mark(0), 2)
-            self.ae(s.test_bidi_leading_mark(1), 0)
-            self.ae((self.refresh(s, 0), self.refresh(s, 1)), (ID10[:5], (4, 3, 2, 0, 1)))
-            self.assertTrue(all(s.test_bidi_paragraph_rtl(y) for y in range(2)))
-            # Wider again: one row, the mark kept
-            s.resize(3, 10)
-            self.ae(s.test_bidi_leading_mark(0), 2)
-            self.ae(s.test_bidi_leading_mark(1), 0)
-            self.ae(self.refresh(s, 0), self.RTL_PLAIN)
-            self.assertIs(s.test_bidi_paragraph_rtl(0), True)
+        # The mark moves with the line into the history; a narrower screen wraps the marked row, only its first row keeps the mark
+        s = self.marked(cols=10, lines=3)
+        s.cursor_position(3, 1)
+        s.index()
+        self.ae(s.historybuf.count, 1)
+        s.scroll(1, True)
+        self.ae((self.refresh(s, 0), s.test_bidi_paragraph_rtl(0)), (self.RTL_PLAIN, True))
+        s = self.marked(cols=10, lines=3)
+        self.ae(self.refresh(s, 0), self.RTL_PLAIN)
+        s.resize(3, 5)
+        marks = [s.test_bidi_leading_mark(y) for y in (0, 1)]
+        self.ae(
+            (marks, self.refresh(s, 0), self.refresh(s, 1), [s.test_bidi_paragraph_rtl(y) for y in range(2)]), ([2, 0], ID10[:5], (4, 3, 2, 0, 1), [True, True])
+        )
+        s.resize(3, 10)
+        self.ae(([s.test_bidi_leading_mark(y) for y in (0, 1)], self.refresh(s, 0), s.test_bidi_paragraph_rtl(0)), ([2, 0], self.RTL_PLAIN, True))
 
     def test_leading_mark_only_change_reresolves(self):
-        # The mark is the only difference between these rows: the classes and
-        # cells FriBidi sees after it are the same, so a signature that ignores
-        # it would keep the old maps
-        text = 'abc def'
-        with setup_for_testing():
-            marked = self.screen(bidi_auto_direction=True)
-            parse_bytes(marked, f'{self.RLM}{text}'.encode())
-            marked.test_bidi_refresh()
-            want_marked = self.maps(marked)
-            self.ae(want_marked[0], self.RTL_PLAIN)
-            plain = self.screen(bidi_auto_direction=True)
-            parse_bytes(plain, text.encode())
-            plain.test_bidi_refresh()
-            want_plain = self.maps(plain)
-            self.assertNotEqual(want_plain, want_marked)
-            s = self.screen(bidi_auto_direction=True)
-            parse_bytes(s, f'{self.RLM}{text}'.encode())
-            self.frame(s)
-            self.warm(s)
-            self.ae(self.maps(s), want_marked)
-            for mark, want in (('', want_plain), (self.RLM, want_marked), ('', want_plain)):
-                with self.subTest(mark=mark):
-                    s.cursor_position(1, 1)
-                    parse_bytes(s, b'\x1b[2K')
-                    parse_bytes(s, f'{mark}{text}'.encode())
-                    self.assertGreater(self.frame(s), 0, 'the mark changed, so the paragraph must resolve again')
-                    self.ae(self.maps(s), want)
-                    self.ae(s.test_bidi_leading_mark(0), 2 if mark else 0)
-                    self.warm(s)
+        # The mark is the only difference between the rows: a signature that ignores it would keep the old maps
+        marked, plain = self.refreshed(self.marked()), self.refreshed(self.marked(''))
+        self.assertNotEqual(plain, marked)
+        s = self.marked()
+        self.frame(s)
+        self.warm(s)
+        self.ae(self.maps(s), marked)
+        for mark, want in (('', plain), (self.RLM, marked), ('', plain)):
+            with self.subTest(mark=mark):
+                s.cursor_position(1, 1)
+                parse_bytes(s, b'\x1b[2K' + f'{mark}abc def'.encode())
+                self.assertGreater(self.frame(s), 0, 'the mark changed, so the paragraph must resolve again')
+                self.ae((self.maps(s), s.test_bidi_leading_mark(0)), (want, 2 if mark else 0))
+                self.warm(s)
 
-    def cursor_cells(self, s, x, y=0):
-        # what the shader draws for the cursor cell (x, y), for each shape
-        s.test_bidi_refresh()
-        return {
-            'beam': s.test_cursor_visual(x, y, CURSOR_BEAM),
-            'block': s.test_cursor_visual(x, y, CURSOR_BLOCK),
-            'underline': s.test_cursor_visual(x, y, CURSOR_UNDERLINE),
-            'hollow': s.test_cursor_visual(x, y, CURSOR_HOLLOW),
-        }
-
-    def test_beam_mirrored_in_rtl_cell(self):
-        # RTL paragraph (auto): אבג is level 1 in a level 1 row, v2l = 9..0, so
-        # logical x is at visual 9 - x. On the first letter there is no
-        # preceding character: the beam goes in the cell's own column, mirrored
-        # so that it is on the right edge, the leading edge of an RTL cell.
-        s = self.screen(bidi_auto_direction=True)
-        s.draw(A)
-        got = self.cursor_cells(s, 0)
-        self.ae(s.test_bidi_visual_x(0, 0), 9)
-        self.ae(got['beam'], (9, True))
-        # block, underline and hollow never mirror
-        self.ae((got['block'], got['underline'], got['hollow']), ((9, False),) * 3)
-        # in the RTL paragraph a letter after a Hebrew one is level 2: its beam
-        # is on the Hebrew letter's left edge, and a Hebrew letter after it has an
-        # LTR character before it
-        s = self.screen(bidi_auto_direction=True)
-        s.draw('אaב')
-        self.ae(self.refresh(s, 0), ID10[::-1])
-        self.ae(s.test_bidi_levels(0)[:3], (1, 2, 1))
-        self.ae(self.cursor_cells(s, 1)['beam'], (8, True))
-        self.ae(self.cursor_cells(s, 2)['beam'], (7, True))
-        # an LTR cell after an LTR one is not mirrored
-        s = self.screen(bidi_auto_direction=True)
-        s.draw('אab')
-        self.refresh(s, 0)
-        self.ae(s.test_bidi_levels(0)[:3], (1, 2, 2))
-        self.ae(s.test_bidi_visual_x(2, 0), 8)
-        self.ae(self.cursor_cells(s, 2)['beam'], (8, False))
-        # LTR paragraph (auto off): abc then אב at cols 3 and 4, reversed to 4, 3
-        s = self.screen(bidi_auto_direction=False)
-        s.draw('abcאב')
-        self.ae(self.refresh(s, 0), (0, 1, 2, 4, 3) + ID10[5:])
-        # Latin cells: never mirrored
-        for x in range(3):
-            self.ae(self.cursor_cells(s, x)['beam'], (x, False))
-        # the first Hebrew cell, after a Latin letter, mirrored
-        got = self.cursor_cells(s, 3)
-        self.ae((got['beam'], got['block'], got['underline']), ((4, True), (4, False), (4, False)))
-        # the second, after a Hebrew letter: the beam goes on the left
-        # edge of the preceding one (visual 4), in the cell left of it
-        self.ae(self.cursor_cells(s, 4)['beam'], (3, True))
-        # a wide char at level 1: אבג after 😀 in an RTL paragraph, the emoji
-        # is between sos (R) and R, so N1 makes it level 1. Its two cells are
-        # at visual 8 and 9. There is no preceding character: the beam is in
-        # the rightmost column of the span, mirrored; a block starts at the left
-        s = self.screen(bidi_auto_direction=True)
-        s.draw('😀' + A)
-        self.refresh(s, 0)
-        self.ae(s.test_bidi_levels(0)[:2], (1, 1))
-        self.ae(s.test_bidi_visual_x(0, 0, 2) + 1, 9)
-        got = self.cursor_cells(s, 0)
-        self.ae((got['beam'], got['block'], got['underline']), ((9, True), (8, False), (8, False)))
-        # a wide preceding character: אב then 😀 at cells 2 and 3, all
-        # level 1 in the RTL paragraph, so the emoji is at visual 7 and 6 and the
-        # blank after it (x=4) is drawn just left of it, at 5
-        s = self.screen(bidi_auto_direction=True)
-        s.draw('אב😀')
-        self.refresh(s, 0)
-        self.ae(s.test_bidi_levels(0)[:4], (1, 1, 1, 1))
-        self.ae(s.test_bidi_visual_x(2, 0, 2), 6)
-        got = self.cursor_cells(s, 4)
-        self.ae((got['beam'], got['block'], got['underline'], got['hollow']), ((5, True), (5, False), (5, False), (5, False)))
-
-    def test_cursor_after_rtl_char(self):
-        # ls שלום in an LTR paragraph (auto off). The Hebrew
-        # run is level 1 at cols 3..6 and is drawn reversed, v2l 0 1 2 6 5 4 3.
-        # The cursor, in the blank at logical 7, is where the next Hebrew letter
-        # will appear: left of the run.
-        s = self.screen(bidi_auto_direction=False)
-        s.draw('ls שלום')
-        self.ae(self.refresh(s, 0), (0, 1, 2, 6, 5, 4, 3) + ID10[7:])
-        self.ae(s.cursor.x, 7)
-        self.ae(s.test_bidi_visual_x(6, 0), 3)
-        got = self.cursor_cells(s, 7)
-        self.ae(got['block'], (2, False))
-        self.ae(got['underline'], (2, False))
-        self.ae(got['hollow'], (2, False))
-        self.ae(got['beam'], (2, True))
-        # after Latin: the cursor stays on its own cell
-        s = self.screen(bidi_auto_direction=False)
-        s.draw('ls abc')
-        self.ae(self.cursor_cells(s, 6), {k: (6, False) for k in ('beam', 'block', 'underline', 'hollow')})
-        # after digits inside an RTL run: the digits are level 2, which is
-        # LTR, so the cursor is drawn at its own cell
-        s = self.screen(bidi_auto_direction=False)
-        s.draw(A + ' 12')
-        self.refresh(s, 0)
-        self.ae(s.test_bidi_levels(0)[:6], (1, 1, 1, 1, 2, 2))
-        self.ae(s.test_bidi_visual_x(6, 0), 6)
-        self.ae(self.cursor_cells(s, 6), {k: (6, False) for k in ('beam', 'block', 'underline', 'hollow')})
-        # RTL paragraph (auto): the text is at 7..9; the blank after it is at 6
-        # whether or not the preceding character counts, the beam is on the
-        # text's left edge, that is, in the cell left of it, mirrored
-        s = self.screen(bidi_auto_direction=True)
-        s.draw(A)
-        self.refresh(s, 0)
-        self.ae(s.test_bidi_visual_x(3, 0), 6)
-        got = self.cursor_cells(s, 3)
-        self.ae((got['block'], got['underline'], got['beam']), ((6, False), (6, False), (6, True)))
-        # a run at the left edge of the row: nothing to its left, the cursor
-        # is on column 0 and not mirrored
-        s = self.screen(bidi_auto_direction=False)
-        s.draw(A)
-        self.ae(self.refresh(s, 0), (2, 1, 0) + ID10[3:])
-        self.ae(self.cursor_cells(s, 3), {k: (0, False) for k in ('beam', 'block', 'underline', 'hollow')})
-        # an inactive row has no map: the cursor is at x
-        s = self.screen(bidi_auto_direction=False)
-        s.draw('abc')
-        self.ae(self.cursor_cells(s, 3), {k: (3, False) for k in ('beam', 'block', 'underline', 'hollow')})
+    def test_cursor_visual_in_bidi_rows(self):
+        # The beam goes to the left edge of an RTL run it follows; block, underline and hollow stay on the cell's own column unless blank
+        L, R = False, True
+        cases = (
+            ('rtl letters, blank after', R, A, None, ID10[::-1], (((0, 0), 9), ((3, 0), 6)), [(0, 9, R, 9), (3, 6, R, 6)]),
+            ('latin after hebrew in rtl', R, 'אaב', (1, 2, 1), ID10[::-1], (), [(1, 8, R), (2, 7, R)]),
+            ('latin after latin in rtl', R, 'אab', (1, 2, 2), None, (((2, 0), 8),), [(2, 8, L)]),
+            ('ltr paragraph', L, 'abcאב', None, (0, 1, 2, 4, 3) + ID10[5:], (), [(0, 0, L), (1, 1, L), (2, 2, L), (3, 4, R, 4), (4, 3, R)]),
+            ('wide first, n1 level 1', R, '😀' + A, (1, 1), None, (((0, 0, 2), 8),), [(0, 9, R, 8)]),
+            ('wide before the blank', R, 'אב😀', (1, 1, 1, 1), None, (((2, 0, 2), 6),), [(4, 5, R, 5)]),
+            ('blank after hebrew run', L, 'ls שלום', None, (0, 1, 2, 6, 5, 4, 3) + ID10[7:], (((6, 0), 3),), [(7, 2, R, 2)]),
+            ('blank after latin', L, 'ls abc', None, None, (), [(6, 6, L, 6)]),
+            ('blank after digits in rtl run', L, A + ' 12', (1, 1, 1, 1, 2, 2), None, (((6, 0), 6),), [(6, 6, L, 6)]),
+            ('run at the left edge', L, A, None, (2, 1, 0) + ID10[3:], (), [(3, 0, L, 0)]),
+            ('block over latin after run', L, 'שלום' + 'd', None, (3, 2, 1, 0, 4) + ID10[5:], (), [(4, 0, L, 4)]),
+            ('block over latin after run, prefix', L, 'ab' + 'שלום' + 'd', None, (0, 1, 5, 4, 3, 2, 6) + ID10[7:], (), [(6, 1, R, 6)]),
+            ('block over blank after run', L, 'ab' + 'שלום' + ' d', None, None, (), [(6, 1, R, 1)]),
+            ('pending wrap, hebrew last', L, 'abcdef' + 'אבגד', None, (0, 1, 2, 3, 4, 5, 9, 8, 7, 6), (), [(10, 5, R, 5)]),
+            ('pending wrap, latin last', L, 'אבגד' + 'abcdef', None, None, (), [(10, 10, L, 10)]),
+            ('pending wrap, no rtl', L, 'abcdefghij', None, None, (), [(10, 10, L, 10)]),
+        )
+        for name, auto, text, levels, v2l, vx, cursors in cases:
+            with self.subTest(name):
+                s = self.screen(bidi_auto_direction=auto)
+                s.draw(text)
+                got = self.refresh(s, 0)
+                self.ae(got, v2l or got)
+                if levels:
+                    self.ae(s.test_bidi_levels(0)[: len(levels)], levels)
+                self.ae([s.test_bidi_visual_x(*args) for args, _ in vx], [want for _, want in vx])
+                for x, beam, mirrored, *other in cursors:
+                    beam_got, *others = [s.test_cursor_visual(x, 0, k) for k in (CURSOR_BEAM, CURSOR_BLOCK, CURSOR_UNDERLINE, CURSOR_HOLLOW)]
+                    self.ae(beam_got, (beam, mirrored))
+                    if other:
+                        self.ae(others, [(other[0], False)] * 3)
 
     def test_cursor_after_rtl_char_paused_pixel_scroll(self):
-        # With pixel scroll the paused snapshot has a leading row, so its row
-        # y + 1 is screen row y. The cursor is in the blank after the Hebrew run
-        # of row 1, with a letter above it in row 0: a block read from the wrong
-        # row sees the letter and stays at 6 instead of moving left of the run.
-        with setup_for_testing():
-            s = self.screen(pixel_scroll=True, bidi_auto_direction=False)
-            parse_bytes(s, f'abcdefgh\r\nls {A}'.encode())
-            self.ae((s.cursor.x, s.cursor.y), (6, 1))
-            self.frame(s)
-            live = s.test_cursor_render_x(CURSOR_BLOCK)
-            self.ae(live, (2, False))
-            parse_bytes(s, b'\x1b[?2026h')
-            self.frame(s)
-            self.ae(s.test_cursor_render_x(CURSOR_BLOCK), live)
-            self.ae(s.test_cursor_visual(6, 1, CURSOR_BLOCK), live)
-
-    def test_cursor_block_over_char_after_rtl(self):
-        # שלומd, auto off: with the cursor on the d the block must keep covering
-        # it, at its visual column. A beam is an insertion point, so it goes to
-        # the run's left edge, which is column 0: not mirrored.
-        s = self.screen(bidi_auto_direction=False)
-        s.draw('שלום' + 'd')
-        self.ae(self.refresh(s, 0), (3, 2, 1, 0, 4) + ID10[5:])
-        got = self.cursor_cells(s, 4)
-        self.ae((got['block'], got['underline'], got['hollow']), ((4, False),) * 3)
-        self.ae(got['beam'], (0, False))
-        # with a prefix the run's left edge has a cell to its left to mirror in
-        s = self.screen(bidi_auto_direction=False)
-        s.draw('ab' + 'שלום' + 'd')
-        self.ae(self.refresh(s, 0), (0, 1, 5, 4, 3, 2, 6) + ID10[7:])
-        got = self.cursor_cells(s, 6)
-        self.ae((got['block'], got['underline'], got['hollow']), ((6, False),) * 3)
-        self.ae(got['beam'], (1, True))
-        # a space is blank: the block moves
-        s = self.screen(bidi_auto_direction=False)
-        s.draw('ab' + 'שלום' + ' d')
-        self.refresh(s, 0)
-        got = self.cursor_cells(s, 6)
-        self.ae((got['block'], got['underline'], got['beam']), ((1, False), (1, False), (1, True)))
-
-    def test_cursor_pending_wrap_after_rtl(self):
-        # The row is full: the cursor is at x == columns, no cell of its own.
-        # Hebrew last: the run is at 6..9, so the cursor is left of it, at 5.
-        s = self.screen(bidi_auto_direction=False)
-        s.draw('abcdef' + 'אבגד')
-        self.ae(s.cursor.x, 10)
-        self.ae(self.refresh(s, 0), (0, 1, 2, 3, 4, 5, 9, 8, 7, 6))
-        got = self.cursor_cells(s, 10)
-        self.ae((got['block'], got['underline'], got['hollow']), ((5, False),) * 3)
-        self.ae(got['beam'], (5, True))
-        # Latin last: unchanged, the cursor is at the pending column
-        s = self.screen(bidi_auto_direction=False)
-        s.draw('אבגד' + 'abcdef')
-        self.ae(s.cursor.x, 10)
-        self.refresh(s, 0)
-        self.ae(self.cursor_cells(s, 10), {k: (10, False) for k in ('beam', 'block', 'underline', 'hollow')})
-        # no RTL on the row: unchanged
-        s = self.screen(bidi_auto_direction=False)
-        s.draw('abcdefghij')
-        self.ae(s.cursor.x, 10)
-        self.ae(self.cursor_cells(s, 10), {k: (10, False) for k in ('beam', 'block', 'underline', 'hollow')})
+        # The paused snapshot has a leading row with pixel scroll: a block read from row y instead of y + 1 sees the row above
+        s = self.screen(pixel_scroll=True, bidi_auto_direction=False)
+        parse_bytes(s, f'abcdefgh\r\nls {A}'.encode())
+        self.frame(s)
+        self.ae(s.test_cursor_render_x(CURSOR_BLOCK), (2, False))
+        parse_bytes(s, b'\x1b[?2026h')
+        self.frame(s)
+        self.ae((s.test_cursor_render_x(CURSOR_BLOCK), s.test_cursor_visual(6, 1, CURSOR_BLOCK)), ((2, False), (2, False)))
 
     def preedit_reference(self, text, x, preedit='xy'):
-        # The rows a bidi-off screen uploads for text, each cell coloured to
-        # tell them apart, with the cursor at x, without and with the pre-edit.
-        # Called before the screen under test is made, as making a screen sets
-        # the options.
+        # Rows a bidi-off screen uploads for text, cursor at x, without and with the pre-edit; call before making the screen under test
         f = self.screen(bidi_reorder=False, bidi_auto_direction=False)
         draw_coloured(f, text)
         f.cursor_position(1, x + 1)
-        plain = gpu_row(f, test_screen_update_cell_data(f), 0)
-        self.assertTrue(any(c.sprite_idx for c in plain))
+        plain = self.uploaded(f, 0)
+        self.assertTrue(any(self.sprites(plain)))
         f.test_update_overlay_text(preedit)
-        return plain, gpu_row(f, test_screen_update_cell_data(f), 0)
+        return plain, self.uploaded(f, 0)
 
     def test_preedit_rtl_paragraph(self):
-        # RTL paragraph (auto): A + ' ' + A is all level 1 (the space between
-        # two R runs is R by N1, the trailing blanks 1 by L1), so v2l = 9..0.
-        # The cursor, in the blank after the text (x=7), follows an RTL letter:
-        # its beam is on the text's left edge, column 2, mirrored. The pre-edit
-        # block of n=2 cells ends there and extends left, over columns 1 and 2.
-        # It shows the overlay cells drawn at x0 = 7 (screen_overlay_line_start),
-        # left to right, and its caret, after the pre-edit (x0 + 2), is at 1 + 2.
-        text = A + ' ' + A
-        with setup_for_testing():
-            plain_ref, preedit_ref = self.preedit_reference(text, 7)
-            s = self.screen(bidi_auto_direction=True)
-            draw_coloured(s, text)
-            self.ae(s.cursor.x, 7)
-            row0 = gpu_row(s, test_screen_update_cell_data(s), 0)
-            maps0 = self.maps(s)
-            self.ae(maps0[0], ID10[::-1])
-            self.ae(s.test_cursor_visual(7, 0, CURSOR_BEAM), (2, True))
-            self.assertTrue(s.test_bidi_line_rendered_with_bidi(0))
-            # no pre-edit: the IME anchor is the right side of the mirrored beam
-            self.ae(s.test_ime_anchor_x(), 3)
-            self.warm(s)
-            count = s.test_bidi_resolve_count()
-            # before any frame draws the pre-edit: the cursor info is collected
-            # before the upload
-            s.test_update_overlay_text('xy')
-            self.ae(s.test_ime_anchor_x(), 1)
-            self.ae(s.test_cursor_render_x(CURSOR_BEAM), (3, False))
-            # through deactivate_overlay_line: n=3, the block is 0..2, the caret
-            # after it at 0 + 3
-            s.test_update_overlay_text('xyz')
-            self.ae(s.test_ime_anchor_x(), 0)
-            self.ae(s.test_cursor_render_x(CURSOR_BEAM), (3, False))
-            s.test_update_overlay_text('xy')
-            row = gpu_row(s, test_screen_update_cell_data(s), 0)
-            self.ae(s.test_bidi_v2l(0), maps0[0])
-            self.assertTrue(s.test_bidi_line_rendered_with_bidi(0))
-            block = range(1, 3)
-            self.ae([c for v, c in enumerate(row) if v not in block], [c for v, c in enumerate(row0) if v not in block])
-            self.ae(row[1:3], preedit_ref[7:9])
-            # recomputed after the upload, from the same maps
-            self.ae(s.test_cursor_render_x(CURSOR_BEAM), (3, False))
-            self.ae(s.test_ime_anchor_x(), 1)
-            for i in range(3):
-                test_screen_update_cell_data(s)
-            self.ae(s.test_bidi_resolve_count(), count)
-            self.assertTrue(s.test_bidi_line_rendered_with_bidi(0))
-            s.test_update_overlay_text('')
-            after = gpu_row(s, test_screen_update_cell_data(s), 0)
-            self.ae(self.maps(s), maps0)
-            self.ae(after, row0)
-            parse_bytes(s, b'\x1b[8l')
-            row = gpu_row(s, test_screen_update_cell_data(s), 0)
-            self.ae([c.sprite_idx for c in row], [c.sprite_idx for c in plain_ref])
+        # The cursor in the blank at x=7 is left of the text; the pre-edit of n cells ends there and extends left (IME anchor at 3 - n)
+        plain_ref, preedit_ref = self.preedit_reference(A + ' ' + A, 7)
+        s = self.screen(bidi_auto_direction=True)
+        draw_coloured(s, A + ' ' + A)
+        row0, maps0 = self.uploaded(s, 0), self.maps(s)
 
-    def test_preedit_ltr_cell(self):
-        # abc + A in an LTR paragraph (auto off): A reversed in place at 3..5.
-        # The cursor on b (x=1) follows a Latin letter, so it is at its own
-        # column, not mirrored: the block starts there and extends right, over
-        # columns 1 and 2. x0 = 1, the caret after the pre-edit at 1 + 2.
-        text = 'abc' + A
+        def caret():
+            return s.test_ime_anchor_x(), s.test_cursor_render_x(CURSOR_BEAM)
+
+        self.ae(
+            (maps0[0], s.test_cursor_visual(7, 0, CURSOR_BEAM), s.test_bidi_line_rendered_with_bidi(0), s.test_ime_anchor_x()), (ID10[::-1], (2, True), True, 3)
+        )
+        self.warm(s)
+        count = s.test_bidi_resolve_count()
+        s.test_update_overlay_text('xy')
+        self.ae(caret(), (1, (3, False)))
+        s.test_update_overlay_text('xyz')
+        self.ae(caret(), (0, (3, False)))
+        s.test_update_overlay_text('xy')
+        row = self.uploaded(s, 0)
+        self.ae(
+            (s.test_bidi_v2l(0), s.test_bidi_line_rendered_with_bidi(0), row[:1] + row[3:], row[1:3]), (maps0[0], True, row0[:1] + row0[3:], preedit_ref[7:9])
+        )
+        self.ae(caret(), (1, (3, False)))
+        for i in range(3):
+            self.frame(s)
+        self.ae((s.test_bidi_resolve_count(), s.test_bidi_line_rendered_with_bidi(0)), (count, True))
+        s.test_update_overlay_text('')
+        self.ae((self.maps(s), self.uploaded(s, 0)), (maps0, row0))
+        parse_bytes(s, b'\x1b[8l')
+        self.ae(self.sprites(self.uploaded(s, 0)), self.sprites(plain_ref))
+
+    def test_preedit_in_other_rows(self):
+        # LTR cell: the cursor on b follows a Latin letter, the pre-edit block starts at column 1 and extends right
         want = (0, 1, 2, 5, 4, 3) + ID10[6:]
-        with setup_for_testing():
-            _, preedit_ref = self.preedit_reference(text, 1)
-            s = self.screen(bidi_auto_direction=False)
-            draw_coloured(s, text)
-            s.cursor_position(1, 2)
-            row0 = gpu_row(s, test_screen_update_cell_data(s), 0)
-            self.ae(s.test_bidi_v2l(0), want)
-            self.ae(s.test_cursor_visual(1, 0, CURSOR_BEAM), (1, False))
-            s.test_update_overlay_text('xy')
-            self.ae(s.test_ime_anchor_x(), 1)
-            self.ae(s.test_cursor_render_x(CURSOR_BEAM), (3, False))
-            row = gpu_row(s, test_screen_update_cell_data(s), 0)
-            self.ae(s.test_bidi_v2l(0), want)
-            self.ae(row[:1] + row[3:], row0[:1] + row0[3:])
-            self.ae(row[1:3], preedit_ref[1:3])
-
-    def test_preedit_leading_mark_leaves_row(self):
-        # The overlay is drawn into the real row and its cells are put back
-        # after; a pre-edit starting with RLM at column 0 must not leave the
-        # mark, or the has_bidi flag, on the row once it is cancelled
-        with setup_for_testing():
-            s = self.screen(bidi_auto_direction=True)
-            s.draw('abc def')
-            s.cursor_position(1, 1)
-            test_screen_update_cell_data(s)
-            s.test_update_overlay_text(f'{self.RLM}xy')
-            test_screen_update_cell_data(s)
-            s.test_update_overlay_text('')
-            test_screen_update_cell_data(s)
-            self.ae(s.test_bidi_leading_mark(0), 0)
-            self.assertFalse(s.test_bidi_line_flag(0))
-            got = self.maps(s)
-            f = self.screen(bidi_auto_direction=True)
-            f.draw('abc def')
-            test_screen_update_cell_data(f)
-            self.ae(got, self.maps(f))
-
-    def test_preedit_unmapped_row_unchanged(self):
-        # A Latin row has no map: the pre-edit row is uploaded as before, the
-        # overlay cells as drawn, byte for byte what a bidi-off screen uploads.
-        # The reference goes through the same upload, so the pre-edit cells
-        # (with the underline colour the draw gives them) are checked on their own.
-        with setup_for_testing():
-            plain_ref, preedit_ref = self.preedit_reference('abc def', 7)
-            self.ae(preedit_ref[:7] + preedit_ref[9:], plain_ref[:7] + plain_ref[9:])
-            self.assertTrue(all(c.decoration_fg and not p.decoration_fg for c, p in zip(preedit_ref[7:9], plain_ref[7:9])))
-            s = self.screen(bidi_auto_direction=True)
-            draw_coloured(s, 'abc def')
-            test_screen_update_cell_data(s)
-            s.test_update_overlay_text('xy')
-            self.ae(s.test_ime_anchor_x(), 7)
-            self.ae(s.test_cursor_render_x(CURSOR_BEAM), (9, False))
-            row = gpu_row(s, test_screen_update_cell_data(s), 0)
-            self.assertIsNone(s.test_bidi_v2l(0))
-            self.ae(row, preedit_ref)
+        _, preedit_ref = self.preedit_reference('abc' + A, 1)
+        s = self.screen(bidi_auto_direction=False)
+        draw_coloured(s, 'abc' + A)
+        s.cursor_position(1, 2)
+        row0 = self.uploaded(s, 0)
+        self.ae((s.test_bidi_v2l(0), s.test_cursor_visual(1, 0, CURSOR_BEAM)), (want, (1, False)))
+        s.test_update_overlay_text('xy')
+        self.ae((s.test_ime_anchor_x(), s.test_cursor_render_x(CURSOR_BEAM)), (1, (3, False)))
+        row = self.uploaded(s, 0)
+        self.ae((s.test_bidi_v2l(0), row[:1] + row[3:], row[1:3]), (want, row0[:1] + row0[3:], preedit_ref[1:3]))
+        # The overlay is drawn into the real row: an RLM pre-edit at column 0 must not leave the mark or the flag on it
+        s = self.screen(bidi_auto_direction=True)
+        self.fill(s, ['abc def'])
+        self.frame(s)
+        for text in ('\u200fxy', ''):
+            s.test_update_overlay_text(text)
+            self.frame(s)
+        self.ae((s.test_bidi_leading_mark(0), s.test_bidi_line_flag(0)), (0, False))
+        f = self.screen(bidi_auto_direction=True)
+        f.draw('abc def')
+        self.frame(f)
+        self.ae(self.maps(s), self.maps(f))
+        # A Latin row has no map: the pre-edit row is uploaded as a bidi-off screen uploads it (underline colour checked on its own)
+        plain_ref, preedit_ref = self.preedit_reference('abc def', 7)
+        self.ae(preedit_ref[:7] + preedit_ref[9:], plain_ref[:7] + plain_ref[9:])
+        self.assertTrue(all(c.decoration_fg and not p.decoration_fg for c, p in zip(preedit_ref[7:9], plain_ref[7:9])))
+        s = self.screen(bidi_auto_direction=True)
+        draw_coloured(s, 'abc def')
+        self.frame(s)
+        s.test_update_overlay_text('xy')
+        self.ae((s.test_ime_anchor_x(), s.test_cursor_render_x(CURSOR_BEAM)), (7, (9, False)))
+        self.ae((self.uploaded(s, 0), s.test_bidi_v2l(0)), (preedit_ref, None))
