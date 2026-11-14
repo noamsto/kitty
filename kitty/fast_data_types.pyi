@@ -1084,6 +1084,9 @@ def test_shape(line: Line, path: Optional[str] = None, index: int = 0, rtl: bool
 def test_render_line(line: Line) -> None:
     pass
 
+def test_render_line_levels(line: Line, levels: bytes) -> None:
+    pass
+
 def sprite_map_set_limits(w: int, h: int) -> None:
     pass
 
