@@ -741,169 +741,6 @@ class Rendering(FontBaseTest):
             for text in texts + tuple(reversed(texts)):
                 self.ae(cold[text], shape(text), f'cached shaping differs for: {text!r}')
 
-    def render_cells(self, line, levels=None):
-        if levels is None:
-            test_render_line(line)
-        else:
-            test_render_line_levels(line, bytes(levels))
-        idx = [line.sprite_at(x) for x in range(len(line))]
-        pixels = [bytes(self.sprites[sprite_idx_to_pos(i, setup_for_testing.xnum, setup_for_testing.ynum)]) for i in idx]
-        return idx, pixels
-
-    def render_text(self, text, cols=None, levels=None):
-        s = self.create_screen(cols=cols or len(text), lines=1, scrollback=0)
-        s.draw(text)
-        return self.render_cells(s.line(0), levels)
-
-    def pua_ligature_char(self):
-        # a private use codepoint whose fallback font renders it spanning the spaces after it
-        for cp in range(0xE000, 0x100 + 0xE000):
-            if self.render_text(chr(cp) + '  ')[0][1]:
-                return chr(cp)
-        self.fail('no private use codepoint forms a symbol-plus-space ligature')
-
-    def test_pointed_hebrew_shaping(self):
-        shaped = shape_string('\u05e9\u05b8\u05c1\u05dc\u05d5\u05b9\u05dd', path=self.path_for_font('LiberationMono-Regular.ttf'), rtl=True)
-        self.ae([g[0] for g in shaped], [1, 1, 1, 1])
-
-    def test_explicit_rtl_shaping_is_logical(self):
-        lm = self.path_for_font('LiberationMono-Regular.ttf')
-        for units in (
-            ('\u05e9', '\u05dc', '\u05d5', '\u05dd'),
-            ('\u05e9\u05b8\u05c1', '\u05dc', '\u05d5\u05b9', '\u05dd'),
-            ('\u05e9\u05b8\u05c1', '\u05dc', '\u05d5\u05b9', '\u05dd', ' ', 'a', 'b'),
-        ):
-            word = ''.join(units)
-            shaped = shape_string(word, path=lm, rtl=True)
-            self.ae([g[0] for g in shaped], [1] * len(units), f'cells per group for: {word!r}')
-            expected = [shape_string(u, path=lm)[0][3] for u in units]
-            self.ae([g[3] for g in shaped], expected, f'glyphs per group for: {word!r}')
-        pointed = '\u05e9\u05b8\u05c1\u05dc\u05d5\u05b9\u05dd'
-        iosevka = self.path_for_font('iosevka-regular.ttf')
-        self.ae([g[:2] for g in shape_string(pointed, path=iosevka, rtl=True)], [(1, 3), (1, 1), (1, 2), (1, 1)])
-
-    def test_guessed_and_explicit_runs_do_not_share_cache(self):
-        word = '\u05e9\u05dc\u05d5\u05dd'
-        alone = [self.render_text(ch)[1][0] for ch in word]
-        guessed = self.render_text(word)[1]
-        self.assertNotEqual(guessed, alone)
-        self.ae(self.render_text(word, levels=[1] * 4)[1], alone)
-        self.ae(self.render_text(word, levels=[0] * 4)[1], alone)
-        self.ae(self.render_text(word)[1], guessed)
-
-        pointed = '\u05e9\u05b8\u05c1\u05dc\u05d5\u05b9\u05dd'
-        ctx = partial(setup_for_testing, size=self.font_size, dpi=self.dpi, main_face_path=self.path_for_font(self.font_name))
-
-        def shape(rtl):
-            s = Screen(None, 1, len(pointed) * 2)
-            s.draw(pointed)
-            return test_shape(s.line(0), None, 0, rtl)
-
-        with ctx():
-            cold_guessed = shape(False)
-        with ctx():
-            cold_rtl = shape(True)
-        self.assertNotEqual(cold_guessed, cold_rtl)
-        with ctx():  # one cache for all of them
-            for rtl in (False, True, False, True, True, False):
-                self.ae(shape(rtl), cold_rtl if rtl else cold_guessed, f'{rtl=}')
-
-    def test_render_line_unchanged_by_levels_path(self):
-        pua = self.pua_ligature_char()
-
-        def plain(text):
-            def make():
-                s = self.create_screen(cols=len(text) + 2, lines=1, scrollback=0)
-                s.draw(text)
-                return s
-            return make
-
-        def scaled():
-            s = self.create_screen(cols=6, lines=2, scrollback=0)
-            draw_multicell(s, 'ab', scale=2)
-            return s
-
-        corpus = [plain(t) for t in ('abcdef', 'a==>b', '\u05e9\u05b8\u05c1\u05dc\u05d5\u05b9\u05dd', '\u4f60\u597d', pua + '  ')]
-        corpus.append(scaled)
-        for make in corpus:
-            s = make()
-            lines = [s.line(y) for y in range(s.lines)]
-            for line in lines:
-                n = len(line)
-                first = self.render_cells(line)
-                mixed = [(i // 2) % 2 for i in range(n)]
-                for levels in ([1] * n, mixed):
-                    self.render_cells(line, levels)
-                    self.ae(self.render_cells(line), first, f'{levels=}')
-        self.ae(self.render_text('abcdef', levels=[0] * 6), self.render_text('abcdef'))
-
-    def test_rtl_wide_char_mirrored(self):
-        guessed_idx, guessed = self.render_text('\u4f60', cols=2)
-        self.assertNotIn(1, guessed_idx, 'no font renders the wide character')
-        self.assertNotEqual(guessed[0], guessed[1])
-        self.ae(self.render_text('\u4f60', cols=2, levels=[1, 1])[1], [guessed[1], guessed[0]])
-        self.ae(self.render_text('\u4f60', cols=2, levels=[0, 0])[1], guessed)
-
-    def test_rtl_narrow_glyph_right_aligned(self):
-        # No bundled font covers Arabic, so the narrow glyph in a two cell group is a multicell 'a'. It takes the
-        # same path as lam-alef: one glyph, one whole unused cell.
-        s = self.create_screen(cols=2, lines=1, scrollback=0)
-        draw_multicell(s, 'a', width=2)
-        line = s.line(0)
-        guessed_idx, guessed = self.render_cells(line)
-        self.assertNotEqual(guessed[0], guessed[1])
-        rtl_idx, rtl = self.render_cells(line, [1, 1])
-        self.ae(rtl, guessed)
-        self.assertNotEqual(rtl_idx[0], guessed_idx[0])
-        self.ae(self.render_cells(line), (guessed_idx, guessed))
-
-    def test_rtl_scaled_box_cell(self):
-        def render(levels=None, **kw):
-            s = self.create_screen(cols=2, lines=2, scrollback=0)
-            draw_multicell(s, kw.pop('text'), **kw)
-            return [self.render_cells(s.line(y), levels) for y in range(2)]
-
-        s = self.create_screen(cols=2, lines=2, scrollback=0)
-        full_block, empty_block, *_ = block_helpers(s, self.sprites, self.cell_width, self.cell_height)
-
-        guessed = render(text='\u258c', scale=2)
-        for y in range(2):
-            self.assertNotEqual(guessed[y][1][0], guessed[y][1][1])
-        self.ae([row[1] for row in render([1, 1], text='\u258c', scale=2)], [[p[1], p[0]] for p in (r[1] for r in guessed)])
-
-        def check_unaligned():
-            kw = dict(text='\u2588', scale=2, subscale_n=1, subscale_d=2)
-            expected = [[full_block(), empty_block()], [empty_block(), empty_block()]]
-            guessed = render(**kw)
-            self.ae([row[1] for row in guessed], expected)
-            rtl = render([1, 1], **kw)
-            self.ae([row[1] for row in rtl], expected)
-            self.assertNotEqual(rtl[0][0][0], guessed[0][0][0])
-
-        check_unaligned()
-        set_allow_use_of_box_fonts(False)
-        try:
-            check_unaligned()
-        finally:
-            set_allow_use_of_box_fonts(True)
-
-    def test_symbol_space_ligature_stops_at_level_change(self):
-        text = self.pua_ligature_char() + '  '
-        idx0, px0 = self.render_text(text, levels=[0, 0, 0])
-        self.assertTrue(idx0[1])
-        idx1, px1 = self.render_text(text, levels=[1, 1, 1])
-        self.assertTrue(idx1[1])
-        self.assertNotEqual(px0[0], px0[1])
-        self.ae(px1[:2], [px0[1], px0[0]])
-        self.ae(self.render_text(text, levels=[0, 1, 1])[0][1], 0)
-
-    def test_render_line_levels_length(self):
-        s = self.create_screen(cols=4, lines=1, scrollback=0)
-        s.draw('abcd')
-        for n in (3, 5):
-            with self.assertRaises(ValueError):
-                test_render_line_levels(s.line(0), bytes(n))
-
     def test_shaping_with_many_combining_chars(self):
         # cells can hold more codepoints than MAX_NUM_CODEPOINTS_PER_CELL when
         # built via the Python API, which must not overflow the shaped run cache key
@@ -1058,6 +895,182 @@ class Rendering(FontBaseTest):
         self.ae(coalesce_symbol_maps(q), {(1, 4): 'a', (5, 5): 'b'})
         q = {(0, 30): 'a', (10, 10): 'b', (11, 11): 'b', (2, 2): 'c', (1, 1): 'c'}
         self.ae(coalesce_symbol_maps(q), {(0, 0): 'a', (1, 2): 'c', (3, 9): 'a', (10, 11): 'b', (12, 30): 'a'})
+
+
+class BidiRendering(FontBaseTest):
+    font_name = 'LiberationMono-Regular.ttf'
+
+    def render_cells(self, line, levels=None):
+        if levels is None:
+            test_render_line(line)
+        else:
+            test_render_line_levels(line, bytes(levels))
+        idx = [line.sprite_at(x) for x in range(len(line))]
+        pixels = [bytes(self.sprites[sprite_idx_to_pos(i, setup_for_testing.xnum, setup_for_testing.ynum)]) for i in idx]
+        return idx, pixels
+
+    def render_text(self, text, cols=None, levels=None):
+        s = self.create_screen(cols=cols or len(text), lines=1, scrollback=0)
+        s.draw(text)
+        return self.render_cells(s.line(0), levels)
+
+    def pua_ligature_char(self):
+        # a private use codepoint whose fallback font renders it spanning the space after it
+        for cp in range(0xE000, 0x100 + 0xE000):
+            if self.render_text(chr(cp) + ' ')[0][1]:
+                return chr(cp)
+        self.fail('no private use codepoint forms a symbol-plus-space ligature')
+
+    def test_pointed_hebrew_shaping(self):
+        shaped = shape_string('\u05e9\u05b8\u05c1\u05dc\u05d5\u05b9\u05dd', path=self.path_for_font('LiberationMono-Regular.ttf'), rtl=True)
+        self.ae([g[0] for g in shaped], [1, 1, 1, 1])
+
+    def test_explicit_rtl_shaping_is_logical(self):
+        lm = self.path_for_font('LiberationMono-Regular.ttf')
+        for units in (
+            ('\u05e9', '\u05dc', '\u05d5', '\u05dd'),
+            ('\u05e9\u05b8\u05c1', '\u05dc', '\u05d5\u05b9', '\u05dd'),
+            ('\u05e9\u05b8\u05c1', '\u05dc', '\u05d5\u05b9', '\u05dd', ' ', 'a', 'b'),
+        ):
+            word = ''.join(units)
+            shaped = shape_string(word, path=lm, rtl=True)
+            self.ae([g[0] for g in shaped], [1] * len(units), f'cells per group for: {word!r}')
+            expected = [shape_string(u, path=lm)[0][3] for u in units]
+            self.ae([g[3] for g in shaped], expected, f'glyphs per group for: {word!r}')
+        pointed = '\u05e9\u05b8\u05c1\u05dc\u05d5\u05b9\u05dd'
+        iosevka = self.path_for_font('iosevka-regular.ttf')
+        self.ae([g[:2] for g in shape_string(pointed, path=iosevka, rtl=True)], [(1, 3), (1, 1), (1, 2), (1, 1)])
+
+    def test_guessed_and_explicit_runs_do_not_share_cache(self):
+        word = '\u05e9\u05dc\u05d5\u05dd'
+        alone = [self.render_text(ch)[1][0] for ch in word]
+        guessed = self.render_text(word)[1]
+        self.assertNotEqual(guessed, alone)
+        self.ae(self.render_text(word, levels=[1] * 4)[1], alone)
+        self.ae(self.render_text(word, levels=[0] * 4)[1], alone)
+        self.ae(self.render_text(word)[1], guessed)
+
+        pointed = '\u05e9\u05b8\u05c1\u05dc\u05d5\u05b9\u05dd'
+        ctx = partial(setup_for_testing, size=self.font_size, dpi=self.dpi, main_face_path=self.path_for_font(self.font_name))
+
+        def shape(rtl):
+            s = Screen(None, 1, len(pointed) * 2)
+            s.draw(pointed)
+            return test_shape(s.line(0), None, 0, rtl)
+
+        with ctx():
+            cold_guessed = shape(False)
+        with ctx():
+            cold_rtl = shape(True)
+        self.assertNotEqual(cold_guessed, cold_rtl)
+        with ctx():  # one cache for all of them
+            for rtl in (False, True, False, True, True, False):
+                self.ae(shape(rtl), cold_rtl if rtl else cold_guessed, f'{rtl=}')
+
+    def test_render_line_unchanged_by_levels_path(self):
+        pua = self.pua_ligature_char()
+
+        def plain(text):
+            def make():
+                s = self.create_screen(cols=len(text) + 2, lines=1, scrollback=0)
+                s.draw(text)
+                return s
+            return make
+
+        def scaled():
+            s = self.create_screen(cols=6, lines=2, scrollback=0)
+            draw_multicell(s, 'ab', scale=2)
+            return s
+
+        corpus = [plain(t) for t in ('abcdef', 'a==>b', '\u05e9\u05b8\u05c1\u05dc\u05d5\u05b9\u05dd', '\u4f60\u597d', pua + '  ')]
+        corpus.append(scaled)
+        for make in corpus:
+            s = make()
+            lines = [s.line(y) for y in range(s.lines)]
+            for line in lines:
+                n = len(line)
+                first = self.render_cells(line)
+                mixed = [(i // 2) % 2 for i in range(n)]
+                for levels in ([1] * n, mixed):
+                    self.render_cells(line, levels)
+                    self.ae(self.render_cells(line), first, f'{levels=}')
+        self.ae(self.render_text('abcdef', levels=[0] * 6), self.render_text('abcdef'))
+
+    def test_rtl_wide_char_mirrored(self):
+        # \u3001 is drawn in one half of its box, its advance still covers the whole group
+        for ch in '\u4f60\u3001':
+            guessed_idx, guessed = self.render_text(ch, cols=2)
+            if 1 in guessed_idx:
+                self.skipTest('no font renders the wide character')
+            self.assertNotEqual(guessed[0], guessed[1], f'{ch!r}')
+            self.ae(self.render_text(ch, cols=2, levels=[1, 1])[1], [guessed[1], guessed[0]], f'{ch!r}')
+            self.ae(self.render_text(ch, cols=2, levels=[0, 0])[1], guessed, f'{ch!r}')
+
+    def test_rtl_narrow_glyph_right_aligned(self):
+        # No bundled font covers Arabic, so the narrow glyph in a two cell group is a multicell 'a'. It takes the
+        # same path as lam-alef: one glyph, one whole unused cell.
+        s = self.create_screen(cols=2, lines=1, scrollback=0)
+        draw_multicell(s, 'a', width=2)
+        line = s.line(0)
+        guessed_idx, guessed = self.render_cells(line)
+        self.assertNotEqual(guessed[0], guessed[1])
+        rtl_idx, rtl = self.render_cells(line, [1, 1])
+        self.ae(rtl, guessed)
+        self.assertNotEqual(rtl_idx[0], guessed_idx[0])
+        self.ae(self.render_cells(line), (guessed_idx, guessed))
+
+    def test_rtl_scaled_box_cell(self):
+        def render(levels=None, **kw):
+            s = self.create_screen(cols=2, lines=2, scrollback=0)
+            draw_multicell(s, kw.pop('text'), **kw)
+            return [self.render_cells(s.line(y), levels) for y in range(2)]
+
+        s = self.create_screen(cols=2, lines=2, scrollback=0)
+        full_block, empty_block, *_ = block_helpers(s, self.sprites, self.cell_width, self.cell_height)
+
+        guessed = render(text='\u258c', scale=2)
+        for y in range(2):
+            self.assertNotEqual(guessed[y][1][0], guessed[y][1][1])
+        self.ae([row[1] for row in render([1, 1], text='\u258c', scale=2)], [[p[1], p[0]] for p in (r[1] for r in guessed)])
+
+        def check_unaligned():
+            kw = dict(text='\u2588', scale=2, subscale_n=1, subscale_d=2)
+            expected = [[full_block(), empty_block()], [empty_block(), empty_block()]]
+            guessed = render(**kw)
+            self.ae([row[1] for row in guessed], expected)
+            rtl = render([1, 1], **kw)
+            self.ae([row[1] for row in rtl], expected)
+            self.assertNotEqual(rtl[0][0][0], guessed[0][0][0])
+
+        check_unaligned()
+        set_allow_use_of_box_fonts(False)
+        try:
+            check_unaligned()
+        finally:
+            set_allow_use_of_box_fonts(True)
+
+    def test_symbol_space_ligature_stops_at_level_change(self):
+        text = self.pua_ligature_char() + ' '
+        idx0, px0 = self.render_text(text, levels=[0, 0])
+        self.assertTrue(idx0[1])
+        self.assertNotEqual(px0[0], px0[1])
+        self.ae(self.render_text(text, levels=[1, 1])[1], [px0[1], px0[0]])
+        self.ae(self.render_text(text, levels=[0, 1])[0][1], 0)
+
+    def test_ltr_and_rtl_runs_do_not_share_cache(self):
+        # HarfBuzz mirrors the parenthesis in an RTL run
+        ltr = self.render_text('(a', levels=[0, 0])
+        rtl = self.render_text('(a', levels=[1, 1])
+        self.assertNotEqual(ltr[1][0], rtl[1][0])
+        for levels, expected in (([0, 0], ltr), ([1, 1], rtl)) * 2:
+            self.ae(self.render_text('(a', levels=levels), expected, f'{levels=}')
+
+    def test_render_line_levels_length(self):
+        s = self.create_screen(cols=4, lines=1, scrollback=0)
+        s.draw('abcd')
+        for n in (3, 5):
+            with self.assertRaises(ValueError):
+                test_render_line_levels(s.line(0), bytes(n))
 
 
 def test_chars(chars: str = '╌', sz: int = 128) -> None:
