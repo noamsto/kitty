@@ -1461,10 +1461,12 @@ render_group(
     apply_horizontal_alignment(canvas, align_rf, center_glyph, ri, canvas_width, scaled_metrics.cell_height, num_scaled_cells, num_glyphs, was_colored);
     if (rtl_group && !subscaled && !center_glyph && !was_colored) {
         // A glyph narrower than its group (lam-alef in a monospace font) must sit in the group's last cells so that,
-        // displayed last to first, it touches the letter it joins. Measured by ink, as advances can be zero or
-        // narrower than what the glyph draws
-        const unsigned used = inked_width(canvas, ri.canvas_width, scaled_metrics.cell_height);
-        const unsigned delta = ((ri.canvas_width - used) / scaled_metrics.cell_width) * scaled_metrics.cell_width;
+        // displayed last to first, it touches the letter it joins. Measured by the larger of advance and ink, as
+        // advances can be zero and ink can be narrower than a fullwidth glyph's box. Ink overhanging the used cells
+        // by a little is clipped, as a single cell glyph's would be.
+        const unsigned used = MIN(ri.canvas_width, MAX(inked_width(canvas, ri.canvas_width, scaled_metrics.cell_height), ri.rendered_width));
+        const unsigned unused = MIN(ri.canvas_width - used + scaled_metrics.cell_width / 8, ri.canvas_width);
+        const unsigned delta = (unused / scaled_metrics.cell_width) * scaled_metrics.cell_width;
         if (delta) right_shift_canvas(canvas, ri.canvas_width, scaled_metrics.cell_height, delta);
     }
     if (PyErr_Occurred()) PyErr_Print();
@@ -2565,7 +2567,7 @@ render_line(FONTS_DATA_HANDLE fg_, Line *line, index_type lnum, Cursor *cursor, 
     for (index_type x = 0; x < line->xnum; x++) line->render_cells[x].sprite_idx = gpu_cells[x].sprite_idx;
 }
 
-// levels has one embedding level per cell, indexed by logical x, odd meaning RTL
+// levels has line->xnum entries, one embedding level per cell, indexed by logical x, odd meaning RTL
 void
 render_line_levels(
     FONTS_DATA_HANDLE fg_, Line *line, index_type lnum, Cursor *cursor, DisableLigature disable_ligature_strategy, ListOfChars *lc, const uint8_t *levels) {
