@@ -211,6 +211,8 @@ static Line *range_line_(Screen *self, int y);
 
 static void reset_style_table_if_unused(Screen *self);
 
+static void rederive_blank_bidi_records(LineBuf *lb, LineAttrs record);
+
 static void
 clamp_scroll_position(Screen *self) {
     // Ensure the scroll position is valid after the scrollback has shrunk
@@ -251,6 +253,7 @@ do_screen_reset(Screen *self, bool is_hard_reset) {
         linebuf_clear(self->linebuf, BLANK_CHAR);
         historybuf_clear(self->historybuf);
         linebuf_clear(self->alt_linebuf, BLANK_CHAR);
+        self->main_linebuf->bidi_stamped = self->alt_linebuf->bidi_stamped = false;
         // all buffers are now empty
         self->multiline_chars_used = false;
         zero_at_ptr(&self->multiline_chars_cut_off_at_bottom);
@@ -264,6 +267,9 @@ do_screen_reset(Screen *self, bool is_hard_reset) {
     }
     self->modes = empty_modes;
     self->saved_modes = empty_modes;
+    zero_at_ptr(&self->bidi);
+    rederive_blank_bidi_records(self->main_linebuf, (LineAttrs){0});
+    rederive_blank_bidi_records(self->alt_linebuf, (LineAttrs){0});
     self->active_hyperlink_id = 0;
     zero_at_ptr(&self->color_profile->overridden);
     reset_vt_parser(self->vt_parser);
@@ -1119,7 +1125,72 @@ init_segmentation_state(Screen *self, text_loop_state *s) {
     }
 }
 
+static LineAttrs
+current_bidi_record(const Screen *self) {
+    LineAttrs ans = {0};
+    if (!self->modes.mBDSM) return ans;
+    ans.bidi_stamp = BIDI_STAMP_IMPLICIT;
+    ans.bidi_rtl = self->bidi.rtl;
+    ans.bidi_auto = self->modes.mBIDI_AUTODETECT;
+    return ans;
+}
+
+static inline void
+set_bidi_record(LineAttrs *a, LineAttrs r) {
+    a->bidi_stamp = r.bidi_stamp;
+    a->bidi_rtl = r.bidi_rtl;
+    a->bidi_auto = r.bidi_auto;
+}
+
+static void __attribute__((noinline, cold))
+stamp_line_for_bidi(Screen *self, index_type y, uint8_t record) {
+    // A line without a record has all its record bits clear, so the record
+    // is one OR.
+    LineAttrs *a = self->linebuf->line_attrs + y;
+    if (a->bidi_stamp) return;
+    a->val |= record;
+    self->linebuf->bidi_stamped = true;
+}
+
+static inline __attribute__((always_inline)) void
+record_written_line(Screen *self, index_type y, uint8_t record) {
+    // Most writes go to a line that already has its record, so test for it
+    // here rather than in a call
+    if (!self->linebuf->line_attrs[y].bidi_stamp) stamp_line_for_bidi(self, y, record);
+}
+
+static inline __attribute__((always_inline)) void
+record_combining_write(Screen *self, const CPUCell *pc, index_type py, char_type before, bool was_multicell, uint8_t record) {
+    // A successful add always rewrites the text of the cell, a failed one leaves it as it was
+    if (pc->ch_and_idx == before) return;
+    record_written_line(self, py, record);
+    // Only a widened narrow char can move off its row, to the cursor row; a
+    // halved wide char clears its second half without moving
+    if (!was_multicell && !pc->ch_and_idx) record_written_line(self, self->cursor->y, record);
+}
+
 static void
+rederive_blank_bidi_records(LineBuf *lb, LineAttrs record) {
+    // A line with no text carries nothing written: its text was written and
+    // then erased, so its record follows the controls until text is written
+    // again.
+    if (!lb->bidi_stamped) return;
+    for (index_type y = 0; y < lb->ynum; y++) {
+        if (!lb->line_attrs[y].bidi_stamp) continue;
+        CPUCell *cp;
+        linebuf_init_cells(lb, y, &cp, NULL);
+        bool blank = true;
+        for (index_type x = 0; x < lb->xnum && blank; x++) blank = cp[x].ch_and_idx == 0;
+        if (blank) set_bidi_record(lb->line_attrs + y, record);
+    }
+}
+
+static void
+bidi_controls_changed(Screen *self) {
+    rederive_blank_bidi_records(self->linebuf, current_bidi_record(self));
+}
+
+static inline __attribute__((always_inline)) void
 init_text_loop_line(Screen *self, text_loop_state *s) {
     // Also collect garbage in the text cache when starting a new line, not just
     // when starting to draw text, as a single draw can add a great many entries,
@@ -1136,7 +1207,7 @@ init_text_loop_line(Screen *self, text_loop_state *s) {
 
 // Used when the cursor is moved after the current char has already been
 // through grapheme segmentation, so the segmentation state must be preserved
-static void
+static inline __attribute__((always_inline)) void
 reinit_text_loop_line(Screen *self, text_loop_state *s) {
     const GraphemeSegmentationResult seg = s->seg;
     init_text_loop_line(self, s);
@@ -1645,8 +1716,8 @@ is_plain_combining_char(char_type ch, GraphemeSegmentationResult seg, CharProps 
     return ch != VS15 && ch != VS16 && !(seg.grapheme_break == GBP_SpacingMark && wcwidth_std(props) > 0);
 }
 
-static size_t
-draw_combining_char_run(Screen *self, text_loop_state *s, char_type ch, CharProps props, const uint32_t *rest, size_t num_rest) {
+static inline __attribute__((always_inline)) size_t
+draw_combining_char_run_(Screen *self, text_loop_state *s, char_type ch, CharProps props, const uint32_t *rest, size_t num_rest) {
     // ch has been through grapheme segmentation, which added it to the previous
     // cell. Plain combining chars directly following it are added along with it,
     // with a single lookup in the text cache, rather than one for each char.
@@ -1679,6 +1750,26 @@ draw_combining_char_run(Screen *self, text_loop_state *s, char_type ch, CharProp
     add_combining_chars(self, run, n, xpos, s->prev.y);
     s->seg = seg;
     return n - 1;
+}
+
+// Each copy of the text loop calls its own instance, so that each instance has
+// a single caller and is inlined late, as a function called once. Inlining it
+// early, as always_inline does, changes the code of the copy that draws all
+// other text.
+static size_t
+draw_combining_char_run(Screen *self, text_loop_state *s, char_type ch, CharProps props, const uint32_t *rest, size_t num_rest) {
+    return draw_combining_char_run_(self, s, ch, props, rest, num_rest);
+}
+
+static size_t
+draw_combining_char_run_implicit(Screen *self, text_loop_state *s, char_type ch, CharProps props, const uint32_t *rest, size_t num_rest, uint8_t record) {
+    const CPUCell *pc = s->prev.cc;
+    const index_type py = s->prev.y;
+    const char_type before = pc->ch_and_idx;
+    const bool was_multicell = pc->is_multicell;
+    const size_t n = draw_combining_char_run_(self, s, ch, props, rest, num_rest);
+    record_combining_write(self, pc, py, before, was_multicell, record);
+    return n;
 }
 
 static void
@@ -1852,8 +1943,8 @@ draw_non_ascii_run(Screen *self, text_loop_state *s, const uint32_t *chars, size
     return i;
 }
 
-static void
-draw_text_loop(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_state *s) {
+static inline __attribute__((always_inline)) void
+draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_state *s, const bool implicit, const uint8_t record) {
     init_text_loop_line(self, s);
     int char_width;
 #define TEMPLATE_CELLS 16
@@ -1913,6 +2004,7 @@ draw_text_loop(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_
                     s->prev.x = self->cursor->x + n - 1;
                     s->prev.cc = cp + n - 1;
                     self->cursor->x += n;
+                    if (implicit) record_written_line(self, self->cursor->y, record);
                     s->seg = (GraphemeSegmentationResult){.grapheme_break = GBP_None};
                     i += n - 1;
                     continue;
@@ -1928,6 +2020,7 @@ draw_text_loop(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_
                 !batched_non_ascii_draw_disabled_for_tests) {
                 const size_t n = draw_non_ascii_run(self, s, chars + i, num_chars - i);
                 if (n) {
+                    if (implicit) record_written_line(self, self->cursor->y, record);
                     i += n - 1;
                     continue;
                 }
@@ -1939,7 +2032,8 @@ draw_text_loop(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_
             }
             s->seg = grapheme_segmentation_step(s->seg, cp);
             if (UNLIKELY(s->seg.add_to_current_cell && s->prev.cc)) {
-                i += draw_combining_char_run(self, s, ch, cp, chars + i + 1, num_chars - i - 1);
+                if (implicit) i += draw_combining_char_run_implicit(self, s, ch, cp, chars + i + 1, num_chars - i - 1, record);
+                else i += draw_combining_char_run(self, s, ch, cp, chars + i + 1, num_chars - i - 1);
                 continue;
             }
             char_width = wcwidth_std(cp);
@@ -1948,7 +2042,14 @@ draw_text_loop(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_
                     // Preserve zero width chars as combining chars even though
                     // they were not added to the prev cell by grapheme segmentation.
                     // Zero width chars can only be represented as combining chars.
-                    if (s->prev.cc) draw_combining_char(self, s, ch);
+                    if (s->prev.cc) {
+                        const CPUCell *pc = s->prev.cc;
+                        const index_type py = s->prev.y;
+                        const char_type before = pc->ch_and_idx;
+                        const bool was_multicell = pc->is_multicell;
+                        draw_combining_char(self, s, ch);
+                        if (implicit) record_combining_write(self, pc, py, before, was_multicell, record);
+                    }
                     continue;
                 }
                 char_width = 1;
@@ -2010,9 +2111,23 @@ draw_text_loop(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_
             self->cursor->x++;
             fc->is_multicell = false;
         }
+        if (implicit) record_written_line(self, s->prev.y, record);
     }
 #undef init_line
 #undef TEMPLATE_CELLS
+}
+
+static void
+draw_text_loop(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_state *s) {
+    draw_text_loop_(self, chars, num_chars, s, false, 0);
+}
+
+// Text written in implicit bidi mode records each line a character is written
+// to. That has its own copy of the loop, so the copy that draws all other text
+// has no records to test for.
+__attribute__((noinline)) static void
+draw_text_loop_implicit(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_state *s) {
+    draw_text_loop_(self, chars, num_chars, s, true, current_bidi_record(self).val);
 }
 
 #define PREPARE_FOR_DRAW_TEXT                                                                                         \
@@ -2034,7 +2149,8 @@ static void
 draw_text(Screen *self, const uint32_t *chars, size_t num_chars) {
     PREPARE_FOR_DRAW_TEXT;
     self->is_dirty = true;
-    draw_text_loop(self, chars, num_chars, &s);
+    if (UNLIKELY(self->modes.mBDSM)) draw_text_loop_implicit(self, chars, num_chars, &s);
+    else draw_text_loop(self, chars, num_chars, &s);
 }
 
 void
@@ -2116,6 +2232,7 @@ handle_fixed_width_multicell_command(Screen *self, CPUCell mcd, ListOfChars *lc)
     for (index_type y = self->cursor->y; y < self->cursor->y + height; y++) {
         linebuf_init_cells(self->linebuf, y, &s.cp, NULL);
         linebuf_mark_line_dirty(self->linebuf, y);
+        if (UNLIKELY(self->modes.mBDSM)) stamp_line_for_bidi(self, y, current_bidi_record(self).val);
         mcd.x = 0;
         mcd.y = y - self->cursor->y;
         for (index_type x = self->cursor->x; x < self->cursor->x + width; x++, mcd.x++) {
@@ -2475,6 +2592,10 @@ screen_toggle_screen_buffer(Screen *self, bool save_cursor, bool clear_alt_scree
             grman_clear(self->alt_grman, true, self->cell_size);
         }
         if (save_cursor) screen_save_cursor(self);
+        self->bidi.main_stash.mBDSM = self->modes.mBDSM;
+        self->bidi.main_stash.mBIDI_AUTODETECT = self->modes.mBIDI_AUTODETECT;
+        self->bidi.main_stash.rtl = self->bidi.rtl;
+        self->modes.mBDSM = self->modes.mBIDI_AUTODETECT = self->bidi.rtl = false;
         self->linebuf = self->alt_linebuf;
         self->tabstops = self->alt_tabstops;
         self->key_encoding_flags = self->alt_key_encoding_flags;
@@ -2484,12 +2605,16 @@ screen_toggle_screen_buffer(Screen *self, bool save_cursor, bool clear_alt_scree
         self->alternate_screen.entered_at = monotonic();
     } else {
         self->alternate_screen.exited_at = monotonic();
+        self->modes.mBDSM = self->bidi.main_stash.mBDSM;
+        self->modes.mBIDI_AUTODETECT = self->bidi.main_stash.mBIDI_AUTODETECT;
+        self->bidi.rtl = self->bidi.main_stash.rtl;
         self->linebuf = self->main_linebuf;
         self->tabstops = self->main_tabstops;
         self->key_encoding_flags = self->main_key_encoding_flags;
         if (save_cursor) screen_restore_cursor(self);
         self->grman = self->main_grman;
     }
+    bidi_controls_changed(self);
     screen_history_scroll(self, SCROLL_FULL, false);
     self->is_dirty = true;
     grman_mark_layers_dirty(self->grman);
@@ -2538,6 +2663,18 @@ set_mode_from_const(Screen *self, unsigned int mode, bool val) {
 
         case DECSCLM:
         case DECNRCM: break; // we ignore these modes
+        case BDSM:
+            if (self->modes.mBDSM != val) {
+                self->modes.mBDSM = val;
+                bidi_controls_changed(self);
+            }
+            break;
+        case BIDI_AUTODETECT:
+            if (self->modes.mBIDI_AUTODETECT != val) {
+                self->modes.mBIDI_AUTODETECT = val;
+                bidi_controls_changed(self);
+            }
+            break;
         case DECCKM: self->modes.mDECCKM = val; break;
         case DECTCEM: self->modes.mDECTCEM = val; break;
         case DECSCNM:
@@ -3213,6 +3350,8 @@ copy_specific_mode(Screen *self, unsigned int mode, const ScreenModes *src, Scre
             break;
             SIDE_EFFECTS(DECOM)
             SIDE_EFFECTS(DECCOLM)
+            SIDE_EFFECTS(BDSM) // kitty extension
+            SIDE_EFFECTS(BIDI_AUTODETECT)
     }
 #undef SIMPLE_MODE
 #undef SIDE_EFFECTS
@@ -3246,6 +3385,8 @@ copy_specific_modes(Screen *self, const ScreenModes *src, ScreenModes *dest) {
     copy_specific_mode(self, MOUSE_BUTTON_TRACKING, src, dest);
     copy_specific_mode(self, MOUSE_UTF8_MODE, src, dest);
     copy_specific_mode(self, DECSCNM, src, dest);
+    copy_specific_mode(self, BDSM, src, dest);
+    copy_specific_mode(self, BIDI_AUTODETECT, src, dest);
 }
 
 void
@@ -3886,6 +4027,9 @@ report_mode_status(Screen *self, unsigned int which, bool private) {
         case MOUSE_UTF8_MODE: ans = self->modes.mouse_tracking_protocol == UTF8_PROTOCOL ? 1 : 2; break;
         case MOUSE_SGR_PIXEL_MODE: ans = self->modes.mouse_tracking_protocol == SGR_PIXEL_PROTOCOL ? 1 : 2; break;
         case PENDING_UPDATE: ans = self->paused_rendering.expires_at ? 1 : 2; break;
+        // permanently reset, nothing is laid out bidirectionally yet
+        case BDSM:
+        case BIDI_AUTODETECT: ans = 4; break;
     }
     int sz = snprintf(buf, sizeof(buf) - 1, "%s%u;%u$y", (private ? "?" : ""), which, ans);
     if (sz > 0) write_escape_code_to_child(self, ESC_CSI, buf);
@@ -3908,6 +4052,15 @@ screen_set_margins(Screen *self, unsigned int top, unsigned int bottom) {
         // The cursor moves to the home position when the top and
         // bottom margins of the scrolling region (DECSTBM) changes.
         screen_cursor_position(self, 1, 1);
+    }
+}
+
+void
+screen_set_bidi_direction(Screen *self, unsigned int direction) {
+    const bool rtl = direction == 2;
+    if (rtl != self->bidi.rtl) {
+        self->bidi.rtl = rtl;
+        bidi_controls_changed(self);
     }
 }
 
@@ -5774,9 +5927,11 @@ screen_draw_overlay_line(Screen *self) {
     bool orig_line_wrap_mode = self->modes.mDECAWM;
     bool orig_cursor_enable_mode = self->modes.mDECTCEM;
     bool orig_insert_replace_mode = self->modes.mIRM;
+    bool orig_bidi_support_mode = self->modes.mBDSM;
     self->modes.mDECAWM = false;
     self->modes.mDECTCEM = false;
     self->modes.mIRM = false;
+    self->modes.mBDSM = false;
     Cursor *orig_cursor = self->cursor;
     self->cursor = &(self->overlay_line.original_line.cursor);
     // Mark the pre-edit text as distinct from committed text: italic, with a
@@ -5853,6 +6008,7 @@ screen_draw_overlay_line(Screen *self) {
     self->modes.mDECAWM = orig_line_wrap_mode;
     self->modes.mDECTCEM = orig_cursor_enable_mode;
     self->modes.mIRM = orig_insert_replace_mode;
+    self->modes.mBDSM = orig_bidi_support_mode;
 }
 
 static void
@@ -8172,6 +8328,25 @@ test_set_style_table_limit(Screen *self, PyObject *val) {
 }
 
 static PyObject *
+test_bidi_line_record(Screen *self, PyObject *val) {
+    unsigned long y = PyLong_AsUnsignedLong(val);
+    if (PyErr_Occurred()) return NULL;
+    if (y >= self->lines) {
+        PyErr_SetString(PyExc_IndexError, "line out of range");
+        return NULL;
+    }
+    const LineAttrs a = self->linebuf->line_attrs[y];
+    return Py_BuildValue("iOO", (int)a.bidi_stamp, a.bidi_rtl ? Py_True : Py_False, a.bidi_auto ? Py_True : Py_False);
+}
+
+static PyObject *
+test_bidi_state(Screen *self, PyObject *args UNUSED) {
+    return Py_BuildValue(
+        "OOOOO", self->modes.mBDSM ? Py_True : Py_False, self->modes.mBIDI_AUTODETECT ? Py_True : Py_False, self->bidi.rtl ? Py_True : Py_False,
+        self->main_linebuf->bidi_stamped ? Py_True : Py_False, self->alt_linebuf->bidi_stamped ? Py_True : Py_False);
+}
+
+static PyObject *
 test_ch_and_idx(PyObject *self UNUSED, PyObject *val) {
     CPUCell c = {0};
     if (PyLong_Check(val)) {
@@ -8193,6 +8368,8 @@ static PyMethodDef methods[] = {
     METHODB(cell_style_idx, METH_VARARGS),
     METHODB(style_table_info, METH_NOARGS),
     METHODB(test_set_style_table_limit, METH_O),
+    METHODB(test_bidi_line_record, METH_O),
+    METHODB(test_bidi_state, METH_NOARGS),
     METHODB(test_gc_style_table, METH_VARARGS),
     METHODB(test_draw_overlay_line, METH_VARARGS),
     METHODB(test_update_overlay_text, METH_VARARGS),
@@ -8260,6 +8437,7 @@ static PyMemberDef members[] = {
     {"linebuf", T_OBJECT_EX, offsetof(Screen, linebuf), READONLY, "linebuf"},
     {"main_linebuf", T_OBJECT_EX, offsetof(Screen, main_linebuf), READONLY, "main_linebuf"},
     {"historybuf", T_OBJECT_EX, offsetof(Screen, historybuf), READONLY, "historybuf"},
+    {"is_dirty", T_BOOL, offsetof(Screen, is_dirty), READONLY, "is_dirty"},
     {"command_running", T_BOOL, offsetof(Screen, command_state.running), READONLY, "command_running"},
     {"command_started_at", T_LONGLONG, offsetof(Screen, command_state.started_at), READONLY, "command_started_at"},
     {"command_finished_at", T_LONGLONG, offsetof(Screen, command_state.finished_at), READONLY, "command_finished_at"},
