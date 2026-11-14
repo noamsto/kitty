@@ -1707,7 +1707,7 @@ is_plain_combining_char(char_type ch, GraphemeSegmentationResult seg, CharProps 
 }
 
 static inline __attribute__((always_inline)) size_t
-draw_combining_char_run(Screen *self, text_loop_state *s, char_type ch, CharProps props, const uint32_t *rest, size_t num_rest) {
+draw_combining_char_run_(Screen *self, text_loop_state *s, char_type ch, CharProps props, const uint32_t *rest, size_t num_rest) {
     // ch has been through grapheme segmentation, which added it to the previous
     // cell. Plain combining chars directly following it are added along with it,
     // with a single lookup in the text cache, rather than one for each char.
@@ -1740,6 +1740,26 @@ draw_combining_char_run(Screen *self, text_loop_state *s, char_type ch, CharProp
     add_combining_chars(self, run, n, xpos, s->prev.y);
     s->seg = seg;
     return n - 1;
+}
+
+// Each copy of the text loop calls its own instance, so that each instance has
+// a single caller and is inlined late, as a function called once. Inlining it
+// early, as always_inline does, changes the code of the copy that draws all
+// other text.
+static size_t
+draw_combining_char_run(Screen *self, text_loop_state *s, char_type ch, CharProps props, const uint32_t *rest, size_t num_rest) {
+    return draw_combining_char_run_(self, s, ch, props, rest, num_rest);
+}
+
+static size_t
+draw_combining_char_run_implicit(Screen *self, text_loop_state *s, char_type ch, CharProps props, const uint32_t *rest, size_t num_rest, uint8_t record) {
+    const CPUCell *pc = s->prev.cc;
+    const index_type py = s->prev.y;
+    const char_type before = pc->ch_and_idx;
+    const bool was_multicell = pc->is_multicell;
+    const size_t n = draw_combining_char_run_(self, s, ch, props, rest, num_rest);
+    record_combining_write(self, pc, py, before, was_multicell, record);
+    return n;
 }
 
 static void
@@ -2002,12 +2022,8 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
             }
             s->seg = grapheme_segmentation_step(s->seg, cp);
             if (UNLIKELY(s->seg.add_to_current_cell && s->prev.cc)) {
-                const CPUCell *pc = s->prev.cc;
-                const index_type py = s->prev.y;
-                const char_type before = pc->ch_and_idx;
-                const bool was_multicell = pc->is_multicell;
-                i += draw_combining_char_run(self, s, ch, cp, chars + i + 1, num_chars - i - 1);
-                if (implicit) record_combining_write(self, pc, py, before, was_multicell, record);
+                if (implicit) i += draw_combining_char_run_implicit(self, s, ch, cp, chars + i + 1, num_chars - i - 1, record);
+                else i += draw_combining_char_run(self, s, ch, cp, chars + i + 1, num_chars - i - 1);
                 continue;
             }
             char_width = wcwidth_std(cp);
