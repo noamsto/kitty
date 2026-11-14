@@ -2644,12 +2644,7 @@ render_line_levels(
                    (cell_is_char(line->cpu_cells + i + num_spaces + 1, ' ') || cell_is_char(line->cpu_cells + i + num_spaces + 1, 0x2002)) // space or en-space
                    && num_spaces < MAX_NUM_EXTRA_GLYPHS_PUA && num_spaces + 1 < desired_cells && levels[i + num_spaces + 1] == run_level) {
                 num_spaces++;
-                // We have a private use char followed by space(s), render it as a multi-cell ligature.
-                // Ensure the space cell uses the foreground color from the PUA cell.
-                // This is needed because there are applications like
-                // Powerline that use PUA+space with different foreground colors
-                // for the space and the PUA. See for example: https://github.com/kovidgoyal/kitty/issues/467
-                // The colors are changed in the style of the cell, as the GPU gets colors from it
+                // the space cells take the PUA cell's foreground colour, see render_line()
                 CPUCell *space_cpu_cell = line->cpu_cells + i + num_spaces;
                 const CellStyle *pua_style = style_table_get(style_table, cpu_cell->style_idx);
                 CellStyle st = *style_table_get(style_table, space_cpu_cell->style_idx);
