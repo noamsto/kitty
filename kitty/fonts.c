@@ -1259,7 +1259,10 @@ render_box_cell(FontGroup *fg, RunFont rf, CPUCell *cpu_cell, GPUCell *gpu_cell,
 #undef failed
 }
 
-static void
+// The values are stored in the shaped run cache key, do not renumber
+typedef enum { DIRECTION_GUESS, DIRECTION_LTR, DIRECTION_RTL } ShapeDirection;
+
+static inline __attribute__((always_inline)) void
 load_hb_buffer(CPUCell *first_cpu_cell, index_type num_cells, const TextCache *tc, ListOfChars *lc) {
     size_t num = 0;
     hb_buffer_clear_contents(harfbuzz_buffer);
@@ -1537,7 +1540,7 @@ ensure_group_capacity(size_t num_cells, size_t num_groups) {
     return true;
 }
 
-static bool
+static inline __attribute__((always_inline)) bool
 restore_shaped_run(CPUCell *first_cpu_cell, GPUCell *first_gpu_cell, index_type num_cells, const ShapedRun *cached) {
     if (!ensure_group_capacity(num_cells, cached->num_groups)) return false;
     // every group up to group_idx is overwritten below and nothing reads past it, so zeroing the whole array is unnecessary
@@ -1565,7 +1568,7 @@ restore_shaped_run(CPUCell *first_cpu_cell, GPUCell *first_gpu_cell, index_type 
     return true;
 }
 
-static void
+static inline __attribute__((always_inline)) void
 load_backward_run(CPUCell *cpu_cell, index_type num_cells, const TextCache *tc, ListOfChars *lc) {
     // Same cells as load_hb_buffer() puts into the buffer, in the same order
     BackwardRun *b = &group_state.backward;
@@ -1582,8 +1585,10 @@ load_backward_run(CPUCell *cpu_cell, index_type num_cells, const TextCache *tc, 
     b->num_remaining = b->num_cells;
 }
 
-static void
-shape(CPUCell *first_cpu_cell, GPUCell *first_gpu_cell, index_type num_cells, hb_font_t *font, Font *fobj, bool disable_ligature, const TextCache *tc) {
+static inline __attribute__((always_inline)) void
+shape_impl(
+    CPUCell *first_cpu_cell, GPUCell *first_gpu_cell, index_type num_cells, hb_font_t *font, Font *fobj, bool disable_ligature, const TextCache *tc,
+    ShapeDirection dir) {
     if (!ensure_group_capacity(num_cells, 0)) fatal("Out of memory");
     RAII_ListOfChars(lc);
     text_in_cell(first_cpu_cell, tc, &lc);
@@ -1605,18 +1610,33 @@ shape(CPUCell *first_cpu_cell, GPUCell *first_gpu_cell, index_type num_cells, hb
     group_state.last_cpu_cell = first_cpu_cell + (num_cells ? num_cells - 1 : 0);
     group_state.last_gpu_cell = first_gpu_cell + (num_cells ? num_cells - 1 : 0);
     load_hb_buffer(first_cpu_cell, num_cells, tc, &lc);
-    group_state.backward.active = hb_buffer_get_direction(harfbuzz_buffer) == HB_DIRECTION_RTL;
+    if (dir != DIRECTION_GUESS) hb_buffer_set_direction(harfbuzz_buffer, dir == DIRECTION_RTL ? HB_DIRECTION_RTL : HB_DIRECTION_LTR);
+    group_state.backward.active = dir == DIRECTION_GUESS && hb_buffer_get_direction(harfbuzz_buffer) == HB_DIRECTION_RTL;
     if (group_state.backward.active) load_backward_run(first_cpu_cell, num_cells, tc, &lc);
 
     size_t num_features = fobj->num_ffs_hb_features;
     if (num_features && !disable_ligature) num_features--; // the last feature is always -calt
     hb_shape(font, harfbuzz_buffer, fobj->ffs_hb_features, num_features);
+    // grouping walks the cells in logical order, so it needs the clusters in logical order
+    if (dir == DIRECTION_RTL) hb_buffer_reverse_clusters(harfbuzz_buffer);
 
     unsigned int info_length, positions_length;
     group_state.info = hb_buffer_get_glyph_infos(harfbuzz_buffer, &info_length);
     group_state.positions = hb_buffer_get_glyph_positions(harfbuzz_buffer, &positions_length);
     if (!group_state.info || !group_state.positions) group_state.num_glyphs = 0;
     else group_state.num_glyphs = MIN(info_length, positions_length);
+}
+
+static void
+shape(CPUCell *first_cpu_cell, GPUCell *first_gpu_cell, index_type num_cells, hb_font_t *font, Font *fobj, bool disable_ligature, const TextCache *tc) {
+    shape_impl(first_cpu_cell, first_gpu_cell, num_cells, font, fobj, disable_ligature, tc, DIRECTION_GUESS);
+}
+
+static void
+shape_directed(
+    CPUCell *first_cpu_cell, GPUCell *first_gpu_cell, index_type num_cells, hb_font_t *font, Font *fobj, bool disable_ligature, const TextCache *tc,
+    ShapeDirection dir) {
+    shape_impl(first_cpu_cell, first_gpu_cell, num_cells, font, fobj, disable_ligature, tc, dir);
 }
 
 static bool
@@ -1807,7 +1827,7 @@ is_iosevka_lig_ender(LigatureType before, LigatureType current, LigatureType aft
 static LigatureType *ligature_types = NULL;
 static size_t ligature_types_sz = 0;
 
-static void
+static inline __attribute__((always_inline)) void
 group_iosevka(Font *font, hb_font_t *hbf, const TextCache *tc, ListOfChars *lc) {
     // Group as per algorithm discussed in: https://github.com/be5invis/Iosevka/issues/1007
     if (ligature_types_sz <= G(num_glyphs)) {
@@ -1864,7 +1884,7 @@ group_iosevka(Font *font, hb_font_t *hbf, const TextCache *tc, ListOfChars *lc) 
     }
 }
 
-static void
+static inline __attribute__((always_inline)) void
 group_normal(Font *font, hb_font_t *hbf, const TextCache *tc, ListOfChars *lc) {
     /* Now distribute the glyphs into groups of cells
      * Considerations to keep in mind:
@@ -1969,8 +1989,8 @@ group_normal(Font *font, hb_font_t *hbf, const TextCache *tc, ListOfChars *lc) {
 }
 
 
-static float
-shape_run(
+static inline __attribute__((always_inline)) float
+shape_run_impl(
     CPUCell *first_cpu_cell,
     GPUCell *first_gpu_cell,
     index_type num_cells,
@@ -1979,12 +1999,14 @@ shape_run(
     FontGroup *fg,
     bool disable_ligature,
     const TextCache *tc,
-    ListOfChars *lc) {
+    ListOfChars *lc,
+    ShapeDirection dir) {
     float scale = apply_scale_to_font_group(fg, &rf);
     const uint8_t key_scale = (uint8_t)MAX(1u, rf.scale);
     uint8_t subscale = ((rf.subscale_n & 0xf) << 4) | (rf.subscale_d & 0xf);
+    const uint8_t key_direction = dir == DIRECTION_GUESS ? OPT(force_ltr) : dir;
     ShapedRun cached;
-    if (shaped_run_get(font->shaped_run_hash_table, first_cpu_cell, num_cells, tc, disable_ligature, OPT(force_ltr), key_scale, subscale, &cached)) {
+    if (shaped_run_get(font->shaped_run_hash_table, first_cpu_cell, num_cells, tc, disable_ligature, key_direction, key_scale, subscale, &cached)) {
         if (restore_shaped_run(first_cpu_cell, first_gpu_cell, num_cells, &cached)) {
             if (scale != 1.f) apply_scale_to_font_group(fg, NULL);
             return scale;
@@ -1994,7 +2016,8 @@ shape_run(
         if (!face_apply_scaling(font->face, (FONTS_DATA_HANDLE)fg) && PyErr_Occurred()) PyErr_Print();
     hb_font_t *hbf = harfbuzz_font_for_face(font->face);
     if (font->spacer_strategy == SPACER_STRATEGY_UNKNOWN) detect_spacer_strategy(hbf, font, tc);
-    shape(first_cpu_cell, first_gpu_cell, num_cells, hbf, font, disable_ligature, tc);
+    if (dir == DIRECTION_GUESS) shape(first_cpu_cell, first_gpu_cell, num_cells, hbf, font, disable_ligature, tc);
+    else shape_directed(first_cpu_cell, first_gpu_cell, num_cells, hbf, font, disable_ligature, tc, dir);
     if (font->spacer_strategy == SPACERS_IOSEVKA) group_iosevka(font, hbf, tc, lc);
     else group_normal(font, hbf, tc, lc);
 #if 0
@@ -2009,6 +2032,36 @@ shape_run(
         if (!face_apply_scaling(font->face, (FONTS_DATA_HANDLE)fg) && PyErr_Occurred()) PyErr_Print();
     }
     return scale;
+}
+
+static float
+shape_run(
+    CPUCell *first_cpu_cell,
+    GPUCell *first_gpu_cell,
+    index_type num_cells,
+    Font *font,
+    RunFont rf,
+    FontGroup *fg,
+    bool disable_ligature,
+    const TextCache *tc,
+    ListOfChars *lc) {
+    return shape_run_impl(first_cpu_cell, first_gpu_cell, num_cells, font, rf, fg, disable_ligature, tc, lc, DIRECTION_GUESS);
+}
+
+static float
+shape_run_directed(
+    CPUCell *first_cpu_cell,
+    GPUCell *first_gpu_cell,
+    index_type num_cells,
+    Font *font,
+    RunFont rf,
+    FontGroup *fg,
+    bool disable_ligature,
+    const TextCache *tc,
+    ListOfChars *lc,
+    ShapeDirection dir) {
+    if (OPT(force_ltr)) dir = DIRECTION_LTR;
+    return shape_run_impl(first_cpu_cell, first_gpu_cell, num_cells, font, rf, fg, disable_ligature, tc, lc, dir);
 }
 
 static void
@@ -2151,8 +2204,8 @@ static PyObject *
 test_shape(PyObject UNUSED *self, PyObject *args) {
     Line *line;
     char *path = NULL;
-    int index = 0;
-    if (!PyArg_ParseTuple(args, "O!|zi", &Line_Type, &line, &path, &index)) return NULL;
+    int index = 0, rtl = 0;
+    if (!PyArg_ParseTuple(args, "O!|zip", &Line_Type, &line, &path, &index, &rtl)) return NULL;
     if (!line_styles_are_valid(line)) return NULL;
     index_type num = 0;
     const CPUCell *c;
@@ -2189,10 +2242,12 @@ test_shape(PyObject UNUSED *self, PyObject *args) {
     RunFont rf = {0};
     RAII_ListOfChars(lc);
     GPUCell *gpu_cells = expanded_line_for_render(line);
-    shape_run(line->cpu_cells, gpu_cells, num, font, rf, fg, false, line->text_cache, &lc);
+    if (rtl) shape_run_directed(line->cpu_cells, gpu_cells, num, font, rf, fg, false, line->text_cache, &lc, DIRECTION_RTL);
+    else shape_run(line->cpu_cells, gpu_cells, num, font, rf, fg, false, line->text_cache, &lc);
     PyObject *ans = shaped_groups_as_python();
     if (!ans) goto done;
-    shape_run(line->cpu_cells, gpu_cells, num, font, rf, fg, false, line->text_cache, &lc);
+    if (rtl) shape_run_directed(line->cpu_cells, gpu_cells, num, font, rf, fg, false, line->text_cache, &lc, DIRECTION_RTL);
+    else shape_run(line->cpu_cells, gpu_cells, num, font, rf, fg, false, line->text_cache, &lc);
     PyObject *cached = shaped_groups_as_python();
     if (!cached) {
         Py_CLEAR(ans);
