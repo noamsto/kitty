@@ -212,8 +212,6 @@ static Line *range_line_(Screen *self, int y);
 static void reset_style_table_if_unused(Screen *self);
 
 static void rederive_blank_bidi_records(LineBuf *lb, LineAttrs record);
-static uint32_t map_char(Screen *self, const uint32_t ch);
-static bool cursor_within_margins(Screen *self);
 
 static void
 clamp_scroll_position(Screen *self) {
@@ -1041,9 +1039,6 @@ dealloc(Screen *self) {
 // Draw text {{{
 typedef struct text_loop_state {
     bool image_placeholder_marked;
-    bool bdsm;
-    // the bidi record to write into a line first written to in implicit mode, set when bdsm
-    uint8_t bidi_record;
     const CPUCell cc;
     CPUCell *cp;
     GraphemeSegmentationResult seg;
@@ -1157,61 +1152,20 @@ stamp_line_for_bidi(Screen *self, index_type y, uint8_t record) {
     self->linebuf->bidi_stamped = true;
 }
 
-static void __attribute__((noinline, cold))
-stamp_line_at_draw_start(Screen *self, text_loop_state *s, const uint32_t *chars, size_t num_chars) {
-    // Record only the line the first written character lands on, never the
-    // line the draw call starts on if that character wraps off it or nothing is
-    // written: that line may hold explicit-mode text. The column is tracked
-    // through CR, BS and HT the way draw_text_loop moves it.
-    const bool wraps = self->modes.mDECAWM;
-    index_type x = self->cursor->x;
-    for (size_t i = 0; i < num_chars; i++) {
-        const uint32_t ch = map_char(self, chars[i]);
-        if (ch == LF || ch == VT || ch == FF) return;
-        if (ch == CR) { x = 0; continue; }
-        if (ch == BS) {
-            if (x > self->columns - 1) x = self->columns - 1;
-            else if (x > 0) x--;
-            else if (self->cursor->y != (cursor_within_margins(self) && self->modes.mDECOM ? self->margin_top : 0)) return;
-            continue;
-        }
-        if (ch == HT) {
-            if (x >= self->columns) {
-                if (wraps) return;
-                x = self->columns - 1;
-                continue;
-            }
-            index_type found = 0;
-            for (index_type k = x + 1; k < self->columns && !found; k++) if (self->tabstops[k]) found = k;
-            x = found ? found : self->columns - 1;
-            continue;
-        }
-        if (ch < ' ' || ch == DEL) continue;
-        unsigned width = 1;
-        if (ch > DEL) {
-            const CharProps cp = char_props_for(ch);
-            if (cp.is_invalid) continue;  // C1 controls are dropped
-            const int w = wcwidth_std(cp);
-            // a zero width char joins the cell before the cursor, none at the start of a line
-            if (w == 0) {
-                if (x == 0) continue;
-                stamp_line_for_bidi(self, self->cursor->y, s->bidi_record);
-                return;
-            }
-            width = w == 2 ? 2 : 1;
-        }
-        if (width > self->columns) continue;  // discarded
-        if (wraps && x + width > self->columns) return;
-        stamp_line_for_bidi(self, self->cursor->y, s->bidi_record);
-        return;
-    }
+static inline __attribute__((always_inline)) void
+record_combining_write(Screen *self, const CPUCell *pc, index_type py, char_type before, uint8_t record) {
+    // A successful add always rewrites the text of the cell, a failed one leaves it as it was
+    if (pc->ch_and_idx == before) return;
+    stamp_line_for_bidi(self, py, record);
+    // a widened char that did not fit moved off its row, to the cursor row
+    if (!pc->ch_and_idx) stamp_line_for_bidi(self, self->cursor->y, record);
 }
 
 static void
 rederive_blank_bidi_records(LineBuf *lb, LineAttrs record) {
-    // A line with no text, whether the cursor only arrived there or its text
-    // was erased, carries nothing written, so its record follows the controls
-    // until text is written.
+    // A line with no text carries nothing written: its text was written and
+    // then erased, so its record follows the controls until text is written
+    // again.
     if (!lb->bidi_stamped) return;
     for (index_type y = 0; y < lb->ynum; y++) {
         if (!lb->line_attrs[y].bidi_stamp) continue;
@@ -1229,7 +1183,7 @@ bidi_controls_changed(Screen *self) {
 }
 
 static inline __attribute__((always_inline)) void
-init_text_loop_line(Screen *self, text_loop_state *s, bool stamp) {
+init_text_loop_line(Screen *self, text_loop_state *s) {
     // Also collect garbage in the text cache when starting a new line, not just
     // when starting to draw text, as a single draw can add a great many entries,
     // for example, when drawing a long stream of unique multi-codepoint cells,
@@ -1238,7 +1192,6 @@ init_text_loop_line(Screen *self, text_loop_state *s, bool stamp) {
     linebuf_init_cells(self->linebuf, self->cursor->y, &s->cp, NULL);
     clear_intersecting_selections(self, self->cursor->y);
     linebuf_mark_line_dirty(self->linebuf, self->cursor->y);
-    if (UNLIKELY(s->bdsm) && stamp) stamp_line_for_bidi(self, self->cursor->y, s->bidi_record);
     s->image_placeholder_marked = false;
     s->line_has_no_multicell = false;
     init_segmentation_state(self, s);
@@ -1249,7 +1202,7 @@ init_text_loop_line(Screen *self, text_loop_state *s, bool stamp) {
 static inline __attribute__((always_inline)) void
 reinit_text_loop_line(Screen *self, text_loop_state *s) {
     const GraphemeSegmentationResult seg = s->seg;
-    init_text_loop_line(self, s, true);
+    init_text_loop_line(self, s);
     s->seg = seg;
 }
 
@@ -1620,7 +1573,7 @@ move_widened_char_past_multiline_chars(Screen *self, text_loop_state *s, CPUCell
         self->cursor->x++;
     }
     if (self->cursor->y == before) init_segmentation_state(self, s);
-    else init_text_loop_line(self, s, true);
+    else init_text_loop_line(self, s);
 }
 
 static void
@@ -1789,14 +1742,14 @@ draw_control_char(Screen *self, text_loop_state *s, uint32_t ch) {
             index_type before = self->cursor->y;
             screen_backspace(self);
             if (before == self->cursor->y) init_segmentation_state(self, s);
-            else init_text_loop_line(self, s, true);
+            else init_text_loop_line(self, s);
         } break;
         case HT:
             if (UNLIKELY(self->cursor->x >= self->columns)) {
                 if (self->modes.mDECAWM) {
                     // xterm discards the TAB in this case so match its behavior
                     continue_to_next_line(self);
-                    init_text_loop_line(self, s, true);
+                    init_text_loop_line(self, s);
                 } else if (self->columns > 0) {
                     self->cursor->x = self->columns - 1;
                     if (s->cp[self->cursor->x].is_multicell) {
@@ -1817,7 +1770,7 @@ draw_control_char(Screen *self, text_loop_state *s, uint32_t ch) {
             // and the cursor ends up on the bottom line, which is cleared
             const bool scrolls = self->cursor->y == self->margin_bottom;
             screen_linefeed(self);
-            init_text_loop_line(self, s, true);
+            init_text_loop_line(self, s);
             s->line_has_no_multicell = scrolls && self->cursor->y == self->margin_bottom;
         } break;
         case CR:
@@ -1952,13 +1905,9 @@ draw_non_ascii_run(Screen *self, text_loop_state *s, const uint32_t *chars, size
     return i;
 }
 
-static void
-draw_text_loop(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_state *s) {
-    init_text_loop_line(self, s, false);
-    if (UNLIKELY(s->bdsm)) {
-        s->bidi_record = current_bidi_record(self).val;
-        stamp_line_at_draw_start(self, s, chars, num_chars);
-    }
+static inline __attribute__((always_inline)) void
+draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_state *s, const bool implicit, const uint8_t record) {
+    init_text_loop_line(self, s);
     int char_width;
 #define TEMPLATE_CELLS 16
     CPUCell cpu_template[TEMPLATE_CELLS];
@@ -2017,6 +1966,7 @@ draw_text_loop(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_
                     s->prev.x = self->cursor->x + n - 1;
                     s->prev.cc = cp + n - 1;
                     self->cursor->x += n;
+                    if (implicit) stamp_line_for_bidi(self, self->cursor->y, record);
                     s->seg = (GraphemeSegmentationResult){.grapheme_break = GBP_None};
                     i += n - 1;
                     continue;
@@ -2032,6 +1982,7 @@ draw_text_loop(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_
                 !batched_non_ascii_draw_disabled_for_tests) {
                 const size_t n = draw_non_ascii_run(self, s, chars + i, num_chars - i);
                 if (n) {
+                    if (implicit) stamp_line_for_bidi(self, self->cursor->y, record);
                     i += n - 1;
                     continue;
                 }
@@ -2043,7 +1994,11 @@ draw_text_loop(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_
             }
             s->seg = grapheme_segmentation_step(s->seg, cp);
             if (UNLIKELY(s->seg.add_to_current_cell && s->prev.cc)) {
+                const CPUCell *pc = s->prev.cc;
+                const index_type py = s->prev.y;
+                const char_type before = pc->ch_and_idx;
                 i += draw_combining_char_run(self, s, ch, cp, chars + i + 1, num_chars - i - 1);
+                if (implicit) record_combining_write(self, pc, py, before, record);
                 continue;
             }
             char_width = wcwidth_std(cp);
@@ -2052,7 +2007,13 @@ draw_text_loop(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_
                     // Preserve zero width chars as combining chars even though
                     // they were not added to the prev cell by grapheme segmentation.
                     // Zero width chars can only be represented as combining chars.
-                    if (s->prev.cc) draw_combining_char(self, s, ch);
+                    if (s->prev.cc) {
+                        const CPUCell *pc = s->prev.cc;
+                        const index_type py = s->prev.y;
+                        const char_type before = pc->ch_and_idx;
+                        draw_combining_char(self, s, ch);
+                        if (implicit) record_combining_write(self, pc, py, before, record);
+                    }
                     continue;
                 }
                 char_width = 1;
@@ -2114,9 +2075,23 @@ draw_text_loop(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_
             self->cursor->x++;
             fc->is_multicell = false;
         }
+        if (implicit) stamp_line_for_bidi(self, s->prev.y, record);
     }
 #undef init_line
 #undef TEMPLATE_CELLS
+}
+
+static void
+draw_text_loop(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_state *s) {
+    draw_text_loop_(self, chars, num_chars, s, false, 0);
+}
+
+// Text written in implicit bidi mode records each line a character is written
+// to. That has its own copy of the loop, so the copy that draws all other text
+// has no records to test for.
+__attribute__((noinline)) static void
+draw_text_loop_implicit(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_state *s) {
+    draw_text_loop_(self, chars, num_chars, s, true, current_bidi_record(self).val);
 }
 
 #define PREPARE_FOR_DRAW_TEXT                                                                                         \
@@ -2131,7 +2106,6 @@ draw_text_loop(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_
         draw_style_idx = style_table_intern_cached(self->style_table, &draw_style, &self->hyperlink_style_idx_cache); \
     } else draw_style_idx = screen_cursor_style_idx(self);                                                            \
     text_loop_state s = {                                                                                             \
-        .bdsm = self->modes.mBDSM,                                                                                    \
         .cc = (CPUCell){.hyperlink_id = self->active_hyperlink_id, .style_idx = draw_style_idx},                      \
     };
 
@@ -2139,7 +2113,8 @@ static void
 draw_text(Screen *self, const uint32_t *chars, size_t num_chars) {
     PREPARE_FOR_DRAW_TEXT;
     self->is_dirty = true;
-    draw_text_loop(self, chars, num_chars, &s);
+    if (UNLIKELY(self->modes.mBDSM)) draw_text_loop_implicit(self, chars, num_chars, &s);
+    else draw_text_loop(self, chars, num_chars, &s);
 }
 
 void
@@ -2221,7 +2196,7 @@ handle_fixed_width_multicell_command(Screen *self, CPUCell mcd, ListOfChars *lc)
     for (index_type y = self->cursor->y; y < self->cursor->y + height; y++) {
         linebuf_init_cells(self->linebuf, y, &s.cp, NULL);
         linebuf_mark_line_dirty(self->linebuf, y);
-        if (UNLIKELY(s.bdsm)) stamp_line_for_bidi(self, y, current_bidi_record(self).val);
+        if (UNLIKELY(self->modes.mBDSM)) stamp_line_for_bidi(self, y, current_bidi_record(self).val);
         mcd.x = 0;
         mcd.y = y - self->cursor->y;
         for (index_type x = self->cursor->x; x < self->cursor->x + width; x++, mcd.x++) {

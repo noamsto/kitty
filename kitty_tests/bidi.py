@@ -49,7 +49,7 @@ class TestBidi(BaseTest):
         pb(s, CUP(4) + 'd')
         self.ae(self.records(s, 3), [NONE])
         s = self.screen()
-        pb(s, '\x1b[8ha\r\n\x1b[8lb')  # the LF stamped row 1, 8l removes that blank record
+        pb(s, '\x1b[8ha\r\n\x1b[8lb')  # the LF writes nothing to row 1 and b is explicit
         self.ae(self.records(s, 0, 1), [LTR, NONE])
         pb(s, '\x1b[8h\x1b[8l' + CUP(4) + 'c')
         self.ae(self.records(s, 3), [NONE])
@@ -62,7 +62,7 @@ class TestBidi(BaseTest):
                 pb(s, '\x1b[8h' + x)
                 self.ae(self.records(s, 0), [NONE])
                 if '\n' in x:
-                    self.assertNotEqual(self.records(s, 1), [NONE])
+                    self.ae(self.records(s, 1), [NONE])
         for x in ('def', '\rdef'):
             with self.subTest(x=x):
                 s = self.screen()
@@ -170,7 +170,7 @@ class TestBidi(BaseTest):
             self.assertFalse(s.is_dirty, combo)
             self.ae(s.linebuf.dirty_lines(), dirty, combo)
         s = self.screen()
-        pb(s, '\x1b[8ha\r\n')
+        pb(s, '\x1b[8ha\r\nb\r\x1b[K')
         s.reset_dirty()
         dirty = s.linebuf.dirty_lines()
         pb(s, '\x1b[2 k')
@@ -318,23 +318,89 @@ class TestBidi(BaseTest):
         pb(s, '\x1b[8ha\r\n\x1b[2 kb')
         self.ae(self.records(s, 0, 1), [LTR, RTL])
         s = self.screen()
-        pb(s, '\x1b[8ha\r\n\r\n\x1b[?2501h')
+        pb(s, '\x1b[8ha\r\nb\r\x1b[K\r\nc\r\x1b[K\x1b[?2501h')
         self.ae(self.records(s, 0, 1, 2), [LTR, AUTO, AUTO])
+        s = self.screen()
+        pb(s, '\x1b[8ha\r\n\r\n\x1b[?2501h')
+        self.ae(self.records(s, 0, 1, 2), [LTR, NONE, NONE])
         s = self.screen()
         pb(s, '\x1b[8h \x1b[2 k')  # a written space is text
         self.ae(self.records(s, 0), [LTR])
         s = self.screen()
-        pb(s, '\x1b[8h\x1b[?2501h\x1b[?s\x1b[?2501la\r\n')
+        pb(s, '\x1b[8h\x1b[?2501h\x1b[?s\x1b[?2501la\r\nb\r\x1b[K')
         self.ae(self.records(s, 0, 1), [LTR, LTR])
         pb(s, '\x1b[?r')
         self.ae(self.records(s, 0, 1), [LTR, AUTO])
         s = self.screen()
-        pb(s, '\x1b[8h\x1b[?1049h\x1b[8ha\r\n\x1b[?1049l')
+        pb(s, '\x1b[8h\x1b[?1049h\x1b[8ha\r\nb\r\x1b[K')
+        self.ae(self.records(s, 0, 1), [LTR, LTR])
+        pb(s, '\x1b[?1049l')
         pb(s, '\x1b[?47h')
         self.ae(self.records(s, 0, 1), [LTR, NONE])
         s = self.screen()
-        pb(s, '\x1b[8ha\r\n\x1b[8l')
+        pb(s, '\x1b[8ha\r\nb\r\x1b[K\x1b[8l')
         self.ae(self.records(s, 0, 1), [LTR, NONE])
         s = self.screen()
         pb(s, '\x1b[8h\x1b[2 ka\x1b[1 k' + CUP(1) + '\x1b[2K\x1b[1 k')  # a no-op set re-derives nothing
         self.ae(self.records(s, 0), [RTL])
+
+    def test_joining_char_stamps_the_row_it_joins(self):
+        for first, joiner in (('\U0001F44D', '\U0001F3FD'), ('\U0001F1FA', '\U0001F1F8')):
+            with self.subTest(first=first):
+                s = self.screen(cols=5)
+                pb(s, 'abc' + first)
+                pb(s, '\x1b[8h' + joiner)
+                self.ae(self.records(s, 0, 1), [LTR, NONE])
+        with self.subTest('zero width after wrap'):
+            s = self.screen(cols=5)
+            pb(s, 'abcdef\r')
+            pb(s, '\x1b[8h\u0301')
+            self.ae(self.records(s, 0, 1), [LTR, NONE])
+
+    def test_multicell_move_stamps_the_row_written(self):
+        s = self.screen(cols=2)
+        draw_multicell(s, 'a', scale=2)
+        pb(s, CUP(2) + '\x1b[8hX')
+        self.ae(self.records(s, 0, 1, 2), [NONE, NONE, LTR])
+
+    def test_shift_out_in_one_draw_call(self):
+        s = self.screen()
+        pb(s, '\x1b)U\x1b[8h\x0e\x01')
+        self.ae(self.records(s, 0), [LTR])
+        s = self.screen()
+        pb(s, '\x1b)U\x1b[8h\x01')
+        self.ae(self.records(s, 0), [NONE])
+
+    def test_arrival_does_not_stamp(self):
+        with self.subTest('LF'):
+            s = self.screen()
+            pb(s, '\r\nxyz' + CUP(1))
+            pb(s, '\x1b[8h\n')
+            self.ae(self.records(s, 1), [NONE])
+        with self.subTest('BS'):
+            s = self.screen(cols=5)
+            pb(s, 'abc\r\nxyz\r')
+            pb(s, '\x1b[8h\x08')
+            self.ae(self.records(s, 0), [NONE])
+        with self.subTest('BS then write'):
+            s = self.screen(cols=5)
+            pb(s, 'abc\r\nxyz\r')
+            pb(s, '\x1b[8h\x08Q')
+            self.ae(self.records(s, 0), [LTR])
+        with self.subTest('HT wrap'):
+            s = self.screen(cols=5)
+            pb(s, '\r\nxyz' + CUP(1) + 'abcde')
+            pb(s, '\x1b[8h\t')
+            self.ae(self.records(s, 0, 1), [NONE, NONE])
+
+    def test_widened_char_move_stamps_both_rows(self):
+        s = self.screen(cols=5)
+        pb(s, 'abcd\u263a')
+        pb(s, '\x1b[8h\ufe0f')
+        self.ae(self.records(s, 0, 1), [LTR, LTR])
+
+    def test_refused_combining_char_does_not_stamp(self):
+        s = self.screen(cols=10)
+        pb(s, 'a' + '\u0301' * 23)
+        pb(s, '\x1b[8h\u0301')
+        self.ae(self.records(s, 0), [NONE])
