@@ -908,7 +908,7 @@ font_for_cell(
 }
 
 // Gives a unique (arbitrary) id to a box glyph
-static glyph_index
+static inline __attribute__((always_inline)) glyph_index
 box_glyph_id(char_type ch) {
     START_ALLOW_CASE_RANGE
     switch (ch) {
@@ -1036,7 +1036,7 @@ pointer_to_space_for_last_sprite(Canvas *canvas, FontCellMetrics fcm, unsigned *
     return canvas->buf + (canvas->size_in_bytes / sizeof(canvas->buf[0]) - *sz);
 }
 
-static pixel *
+static inline __attribute__((always_inline)) pixel *
 extract_cell_from_canvas(FontGroup *fg, unsigned int i, unsigned int num_cells) {
     unsigned sz;
     pixel *ans = pointer_to_space_for_last_sprite(&fg->canvas, fg->fcm, &sz);
@@ -1293,7 +1293,7 @@ load_hb_buffer(CPUCell *first_cpu_cell, index_type num_cells, const TextCache *t
 }
 
 
-static void
+static inline __attribute__((always_inline)) void
 render_filled_sprite(pixel *buf, unsigned num_glyphs, FontCellMetrics scaled_metrics, unsigned num_scaled_cells) {
     if (num_scaled_cells > num_glyphs) {
         memset(buf, 0xff, sizeof(buf[0]) * num_glyphs * scaled_metrics.cell_width);
@@ -1303,7 +1303,7 @@ render_filled_sprite(pixel *buf, unsigned num_glyphs, FontCellMetrics scaled_met
     } else memset(buf, 0xff, sizeof(buf[0]) * num_glyphs * scaled_metrics.cell_height * scaled_metrics.cell_width);
 }
 
-static void
+static inline __attribute__((always_inline)) void
 apply_horizontal_alignment(
     pixel *canvas,
     RunFont rf,
@@ -1827,7 +1827,7 @@ detect_spacer_strategy(hb_font_t *hbf, Font *font, const TextCache *tc) {
     }
 }
 
-static LigatureType
+static inline __attribute__((always_inline)) LigatureType
 ligature_type_for_glyph(hb_font_t *hbf, glyph_index glyph_id, SpacerStrategy strategy) {
     static char glyph_name[128];
     glyph_name[arraysz(glyph_name) - 1] = 0;
@@ -2024,15 +2024,15 @@ shape_run_impl(
     GPUCell *first_gpu_cell,
     index_type num_cells,
     Font *font,
-    RunFont rf,
+    RunFont *rf,
     FontGroup *fg,
     bool disable_ligature,
     const TextCache *tc,
     ListOfChars *lc,
     ShapeDirection dir) {
-    float scale = apply_scale_to_font_group(fg, &rf);
-    const uint8_t key_scale = (uint8_t)MAX(1u, rf.scale);
-    uint8_t subscale = ((rf.subscale_n & 0xf) << 4) | (rf.subscale_d & 0xf);
+    float scale = apply_scale_to_font_group(fg, rf);
+    const uint8_t key_scale = (uint8_t)MAX(1u, rf->scale);
+    uint8_t subscale = ((rf->subscale_n & 0xf) << 4) | (rf->subscale_d & 0xf);
     const uint8_t key_direction = dir == DIRECTION_GUESS ? OPT(force_ltr) : dir;
     ShapedRun cached;
     if (shaped_run_get(font->shaped_run_hash_table, first_cpu_cell, num_cells, tc, disable_ligature, key_direction, key_scale, subscale, &cached)) {
@@ -2074,7 +2074,7 @@ shape_run(
     bool disable_ligature,
     const TextCache *tc,
     ListOfChars *lc) {
-    return shape_run_impl(first_cpu_cell, first_gpu_cell, num_cells, font, rf, fg, disable_ligature, tc, lc, DIRECTION_GUESS);
+    return shape_run_impl(first_cpu_cell, first_gpu_cell, num_cells, font, &rf, fg, disable_ligature, tc, lc, DIRECTION_GUESS);
 }
 
 static float
@@ -2090,7 +2090,7 @@ shape_run_directed(
     ListOfChars *lc,
     ShapeDirection dir) {
     if (OPT(force_ltr)) dir = DIRECTION_LTR;
-    return shape_run_impl(first_cpu_cell, first_gpu_cell, num_cells, font, rf, fg, disable_ligature, tc, lc, dir);
+    return shape_run_impl(first_cpu_cell, first_gpu_cell, num_cells, font, &rf, fg, disable_ligature, tc, lc, dir);
 }
 
 static void
@@ -2128,12 +2128,12 @@ split_run_at_offset(index_type cursor_offset, index_type *left, index_type *righ
 }
 
 static inline __attribute__((always_inline)) void
-render_groups_impl(FontGroup *fg, RunFont rf, bool center_glyph, const TextCache *tc, bool rtl) {
+render_groups_impl(FontGroup *fg, RunFont *rf, bool center_glyph, const TextCache *tc, bool rtl) {
     unsigned idx = 0;
     const FontCellMetrics unscaled_metrics = fg->fcm;
-    float scale = apply_scale_to_font_group(fg, &rf);
+    float scale = apply_scale_to_font_group(fg, rf);
     if (scale != 1.f)
-        if (!face_apply_scaling(fg->fonts[rf.font_idx].face, (FONTS_DATA_HANDLE)fg) && PyErr_Occurred()) PyErr_Print();
+        if (!face_apply_scaling(fg->fonts[rf->font_idx].face, (FONTS_DATA_HANDLE)fg) && PyErr_Occurred()) PyErr_Print();
     while (idx <= G(group_idx)) {
         Group *group = G(groups) + idx;
         if (!group->num_cells) break;
@@ -2150,7 +2150,7 @@ render_groups_impl(FontGroup *fg, RunFont rf, bool center_glyph, const TextCache
                 G(first_gpu_cell) + group->first_cell_idx,
                 G(info) + group->first_glyph_idx,
                 G(positions) + group->first_glyph_idx,
-                rf,
+                *rf,
                 global_glyph_render_scratch.glyphs,
                 group->num_glyphs,
                 center_glyph,
@@ -2163,18 +2163,18 @@ render_groups_impl(FontGroup *fg, RunFont rf, bool center_glyph, const TextCache
     }
     if (scale != 1.f) {
         apply_scale_to_font_group(fg, NULL);
-        if (!face_apply_scaling(fg->fonts[rf.font_idx].face, (FONTS_DATA_HANDLE)fg) && PyErr_Occurred()) PyErr_Print();
+        if (!face_apply_scaling(fg->fonts[rf->font_idx].face, (FONTS_DATA_HANDLE)fg) && PyErr_Occurred()) PyErr_Print();
     }
 }
 
 static void
 render_groups(FontGroup *fg, RunFont rf, bool center_glyph, const TextCache *tc) {
-    render_groups_impl(fg, rf, center_glyph, tc, false);
+    render_groups_impl(fg, &rf, center_glyph, tc, false);
 }
 
 static void
 render_groups_rtl(FontGroup *fg, RunFont rf, bool center_glyph, const TextCache *tc) {
-    render_groups_impl(fg, rf, center_glyph, tc, true);
+    render_groups_impl(fg, &rf, center_glyph, tc, true);
 }
 
 static PyObject *
@@ -2315,7 +2315,7 @@ render_run_impl(
     CPUCell *first_cpu_cell,
     GPUCell *first_gpu_cell,
     index_type num_cells,
-    RunFont rf,
+    const RunFont rf,
     bool pua_space_ligature,
     bool center_glyph,
     int cursor_offset,
