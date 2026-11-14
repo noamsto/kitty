@@ -288,6 +288,11 @@ class TestBidi(BaseTest):
         pb(s, '\x1b[?1049l')
         self.ae(self.records(s, 0, 1), [LTR, NONE])
         self.ae(s.test_bidi_state()[3:], (True, True))
+        s = self.screen()  # DECSTR in main re-derives main's erased lines itself
+        pb(s, '\x1b[8ha\r\nx\r\x1b[K')
+        self.ae(self.records(s, 0, 1), [LTR, LTR])
+        pb(s, '\x1b[!p')
+        self.ae(self.records(s, 0, 1), [LTR, NONE])
         # resize, with and without rewrapping
         for lines, cols in ((5, 10), (8, 10), (5, 6), (3, 12)):
             s = self.screen()
