@@ -1494,6 +1494,23 @@ dispatch_csi(PS *self) {
             if (!start_modifier && end_modifier == '*') { CALL_CSI_HANDLER1(screen_decsace, 0); }
             REPORT_ERROR("Unknown CSI x sequence with start and end modifiers: '%c' '%c'", start_modifier, end_modifier);
             break;
+        case 'k':
+            if (end_modifier == ' ' && !start_modifier) {
+                if (num_params > 2) {
+                    REPORT_ERROR("SCP escape code with more than 2 parameters is invalid");
+                    break;
+                }
+                p1 = num_params ? params[0] : 0;
+                if (p1 < 0 || p1 > 2) {
+                    REPORT_ERROR("SCP escape code with unknown direction: %d", p1);
+                    break;
+                }
+                REPORT_COMMAND(screen_set_bidi_direction, p1);
+                screen_set_bidi_direction(self->screen, p1);
+                break;
+            }
+            REPORT_ERROR("Unknown CSI k sequence with start and end modifiers: '%c' '%c'", start_modifier, end_modifier);
+            break;
         case DECSCUSR:
             if (end_modifier == ' ') {
                 if (!start_modifier) { CALL_CSI_HANDLER1M(screen_set_cursor, 1); }
