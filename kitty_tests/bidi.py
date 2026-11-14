@@ -280,7 +280,9 @@ class TestBidi(BaseTest):
         pb(s, '\x1b[?1049l')
         self.ae(self.records(s, 0), [NONE])
         s = self.screen()
-        pb(s, '\x1b[8ha\r\n\x1b[?1049h\x1b[8hb\r\n\x1b[!p')
+        pb(s, '\x1b[8ha\r\nx\r\x1b[K\x1b[?1049h\x1b[8hb\r\ny\r\x1b[K')
+        self.ae(self.records(s, 0, 1), [LTR, LTR])
+        pb(s, '\x1b[!p')
         self.ae(s.test_bidi_state(), (False, False, False, True, True))
         self.ae(self.records(s, 0, 1), [LTR, NONE])
         pb(s, '\x1b[?1049l')
@@ -355,6 +357,11 @@ class TestBidi(BaseTest):
             s = self.screen(cols=5)
             pb(s, 'abcdef\r')
             pb(s, '\x1b[8h\u0301')
+            self.ae(self.records(s, 0, 1), [LTR, NONE])
+        with self.subTest('zero width non-joining after wrap'):
+            s = self.screen(cols=5)
+            pb(s, 'abcdef\r')
+            pb(s, '\x1b[8h\u200b')
             self.ae(self.records(s, 0, 1), [LTR, NONE])
 
     def test_multicell_move_stamps_the_row_written(self):

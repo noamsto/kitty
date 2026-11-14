@@ -1153,12 +1153,20 @@ stamp_line_for_bidi(Screen *self, index_type y, uint8_t record) {
 }
 
 static inline __attribute__((always_inline)) void
-record_combining_write(Screen *self, const CPUCell *pc, index_type py, char_type before, uint8_t record) {
+record_written_line(Screen *self, index_type y, uint8_t record) {
+    // Most writes go to a line that already has its record, so test for it
+    // here rather than in a call
+    if (!self->linebuf->line_attrs[y].bidi_stamp) stamp_line_for_bidi(self, y, record);
+}
+
+static inline __attribute__((always_inline)) void
+record_combining_write(Screen *self, const CPUCell *pc, index_type py, char_type before, bool was_multicell, uint8_t record) {
     // A successful add always rewrites the text of the cell, a failed one leaves it as it was
     if (pc->ch_and_idx == before) return;
-    stamp_line_for_bidi(self, py, record);
-    // a widened char that did not fit moved off its row, to the cursor row
-    if (!pc->ch_and_idx) stamp_line_for_bidi(self, self->cursor->y, record);
+    record_written_line(self, py, record);
+    // Only a widened narrow char can move off its row, to the cursor row; a
+    // halved wide char clears its second half without moving
+    if (!was_multicell && !pc->ch_and_idx) record_written_line(self, self->cursor->y, record);
 }
 
 static void
@@ -1698,7 +1706,7 @@ is_plain_combining_char(char_type ch, GraphemeSegmentationResult seg, CharProps 
     return ch != VS15 && ch != VS16 && !(seg.grapheme_break == GBP_SpacingMark && wcwidth_std(props) > 0);
 }
 
-static size_t
+static inline __attribute__((always_inline)) size_t
 draw_combining_char_run(Screen *self, text_loop_state *s, char_type ch, CharProps props, const uint32_t *rest, size_t num_rest) {
     // ch has been through grapheme segmentation, which added it to the previous
     // cell. Plain combining chars directly following it are added along with it,
@@ -1966,7 +1974,7 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
                     s->prev.x = self->cursor->x + n - 1;
                     s->prev.cc = cp + n - 1;
                     self->cursor->x += n;
-                    if (implicit) stamp_line_for_bidi(self, self->cursor->y, record);
+                    if (implicit) record_written_line(self, self->cursor->y, record);
                     s->seg = (GraphemeSegmentationResult){.grapheme_break = GBP_None};
                     i += n - 1;
                     continue;
@@ -1982,7 +1990,7 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
                 !batched_non_ascii_draw_disabled_for_tests) {
                 const size_t n = draw_non_ascii_run(self, s, chars + i, num_chars - i);
                 if (n) {
-                    if (implicit) stamp_line_for_bidi(self, self->cursor->y, record);
+                    if (implicit) record_written_line(self, self->cursor->y, record);
                     i += n - 1;
                     continue;
                 }
@@ -1997,8 +2005,9 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
                 const CPUCell *pc = s->prev.cc;
                 const index_type py = s->prev.y;
                 const char_type before = pc->ch_and_idx;
+                const bool was_multicell = pc->is_multicell;
                 i += draw_combining_char_run(self, s, ch, cp, chars + i + 1, num_chars - i - 1);
-                if (implicit) record_combining_write(self, pc, py, before, record);
+                if (implicit) record_combining_write(self, pc, py, before, was_multicell, record);
                 continue;
             }
             char_width = wcwidth_std(cp);
@@ -2011,8 +2020,9 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
                         const CPUCell *pc = s->prev.cc;
                         const index_type py = s->prev.y;
                         const char_type before = pc->ch_and_idx;
+                        const bool was_multicell = pc->is_multicell;
                         draw_combining_char(self, s, ch);
-                        if (implicit) record_combining_write(self, pc, py, before, record);
+                        if (implicit) record_combining_write(self, pc, py, before, was_multicell, record);
                     }
                     continue;
                 }
@@ -2075,7 +2085,7 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
             self->cursor->x++;
             fc->is_multicell = false;
         }
-        if (implicit) stamp_line_for_bidi(self, s->prev.y, record);
+        if (implicit) record_written_line(self, s->prev.y, record);
     }
 #undef init_line
 #undef TEMPLATE_CELLS
