@@ -367,12 +367,21 @@ current_sprite_index(const GPUSpriteTracker *sprite_tracker) {
 }
 
 static SpritePosition *
-sprite_position_for(FontGroup *fg, RunFont rf, glyph_index *glyphs, unsigned glyph_count, uint8_t ligature_index, unsigned cell_count) {
+sprite_position_for(FontGroup *fg, RunFont rf, glyph_index *glyphs, unsigned glyph_count, uint8_t ligature_index, unsigned cell_count, uint8_t key_tag) {
     bool created;
     Font *font = fg->fonts + rf.font_idx;
     uint8_t subscale = ((rf.subscale_n & 0xf) << 4) | (rf.subscale_d & 0xf);
     SpritePosition *s = find_or_create_sprite_position(
-        font->sprite_position_hash_table, glyphs, glyph_count, ligature_index, cell_count, rf.scale, subscale, rf.multicell_y, rf.align.val, &created);
+        font->sprite_position_hash_table,
+        glyphs,
+        glyph_count,
+        ligature_index,
+        cell_count,
+        rf.scale,
+        subscale,
+        rf.multicell_y,
+        rf.align.val | key_tag,
+        &created);
     if (!s) {
         PyErr_NoMemory();
         return NULL;
@@ -1201,12 +1210,11 @@ render_box_cell(FontGroup *fg, RunFont rf, CPUCell *cpu_cell, GPUCell *gpu_cell,
     }
     if (!num_glyphs) failed;
     const bool rtl_group = rtl && num_cells > 1;
-    RunFont key_rf = rf;
-    if (rtl_group) key_rf.align.val |= SPRITE_KEY_RTL;
     bool all_rendered = true;
 #define sp global_glyph_render_scratch.sprite_positions
     for (unsigned ligature_index = 0; ligature_index < num_cells; ligature_index++) {
-        sp[ligature_index] = sprite_position_for(fg, key_rf, global_glyph_render_scratch.glyphs, num_glyphs, ligature_index, num_cells);
+        sp[ligature_index] =
+            sprite_position_for(fg, rf, global_glyph_render_scratch.glyphs, num_glyphs, ligature_index, num_cells, rtl_group ? SPRITE_KEY_RTL : 0);
         if (sp[ligature_index] == NULL) failed;
         sp[ligature_index]->colored = false;
         if (!sp[ligature_index]->rendered) all_rendered = false;
@@ -1307,6 +1315,7 @@ static inline __attribute__((always_inline)) void
 apply_horizontal_alignment(
     pixel *canvas,
     RunFont rf,
+    bool align_right,
     bool center_glyph,
     GlyphRenderInfo ri,
     unsigned max_render_width,
@@ -1320,7 +1329,7 @@ apply_horizontal_alignment(
 #else
     (void)was_colored;
 #endif
-    if (rf.subscale_n && rf.subscale_d && rf.align.horizontal && rf.subscale_n < rf.subscale_d) {
+    if (rf.subscale_n && rf.subscale_d && (rf.align.horizontal || align_right) && rf.subscale_n < rf.subscale_d) {
         delta = max_render_width - ri.rendered_width;
         if (rf.align.horizontal == 2) delta /= 2;
     } else if (center_glyph && num_glyphs && num_cells > 1 && ri.rendered_width < max_render_width) {
@@ -1365,8 +1374,6 @@ render_group(
     const Font *font = fg->fonts + rf.font_idx;
     bool all_rendered = true;
     const bool rtl_group = rtl && num_cells > 1;
-    RunFont key_rf = rf;
-    if (rtl_group) key_rf.align.val |= SPRITE_KEY_RTL;
 
     unsigned num_scaled_cells = MAX(1u, (unsigned)ceil(num_cells / scale));
     const unsigned canvas_width = num_cells * unscaled_metrics.cell_width;
@@ -1392,7 +1399,7 @@ render_group(
     for (unsigned i = 0, ligature_index = 0; i < num_cells; i++) {
         bool is_repeat_sprite =
             is_infinite_ligature && i > 1 && i + 1 < num_glyphs && glyphs[i] == glyphs[i - 1] && glyphs[i] == glyphs[i - 2] && glyphs[i] == glyphs[i + 1];
-        sp[i] = is_repeat_sprite ? sp[i - 1] : sprite_position_for(fg, key_rf, glyphs, glyph_count, ligature_index++, num_cells);
+        sp[i] = is_repeat_sprite ? sp[i - 1] : sprite_position_for(fg, rf, glyphs, glyph_count, ligature_index++, num_cells, rtl_group ? SPRITE_KEY_RTL : 0);
         if (!sp[i]) failed;
         if (!sp[i]->rendered) all_rendered = false;
     }
@@ -1456,9 +1463,7 @@ render_group(
         canvas = fg->canvas.buf;
     }
     const bool subscaled = rf.subscale_n && rf.subscale_d;
-    RunFont align_rf = rf;
-    if (rtl_group && subscaled && !rf.align.horizontal) align_rf.align.horizontal = 1;
-    apply_horizontal_alignment(canvas, align_rf, center_glyph, ri, canvas_width, scaled_metrics.cell_height, num_scaled_cells, num_glyphs, was_colored);
+    apply_horizontal_alignment(canvas, rf, rtl_group, center_glyph, ri, canvas_width, scaled_metrics.cell_height, num_scaled_cells, num_glyphs, was_colored);
     if (rtl_group && !subscaled && !center_glyph && !was_colored) {
         // A glyph narrower than its group (lam-alef in a monospace font) must sit in the group's last cells so that,
         // displayed last to first, it touches the letter it joins. Measured by the larger of advance and ink, as
