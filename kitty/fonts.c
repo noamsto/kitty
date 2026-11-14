@@ -1332,6 +1332,17 @@ apply_horizontal_alignment(
 }
 
 
+static unsigned
+inked_width(const pixel *canvas, unsigned width, unsigned height) {
+    unsigned ans = 0;
+    for (unsigned y = 0; y < height; y++, canvas += width) {
+        for (unsigned x = width; x > ans; x--) {
+            if (canvas[x - 1]) { ans = x; break; }
+        }
+    }
+    return ans;
+}
+
 static inline __attribute__((always_inline)) void
 render_group(
     FontGroup *fg,
@@ -1450,10 +1461,10 @@ render_group(
     apply_horizontal_alignment(canvas, align_rf, center_glyph, ri, canvas_width, scaled_metrics.cell_height, num_scaled_cells, num_glyphs, was_colored);
     if (rtl_group && !subscaled && !center_glyph && !was_colored) {
         // A glyph narrower than its group (lam-alef in a monospace font) must sit in the group's last cells so that,
-        // displayed last to first, it touches the letter it joins
-        const int64_t used = (int64_t)ri.x + ri.rendered_width;
-        const unsigned unused = used < ri.canvas_width ? (unsigned)(ri.canvas_width - used) : 0;
-        const unsigned delta = (unused / scaled_metrics.cell_width) * scaled_metrics.cell_width;
+        // displayed last to first, it touches the letter it joins. Measured by ink, as advances can be zero or
+        // narrower than what the glyph draws
+        const unsigned used = inked_width(canvas, ri.canvas_width, scaled_metrics.cell_height);
+        const unsigned delta = ((ri.canvas_width - used) / scaled_metrics.cell_width) * scaled_metrics.cell_width;
         if (delta) right_shift_canvas(canvas, ri.canvas_width, scaled_metrics.cell_height, delta);
     }
     if (PyErr_Occurred()) PyErr_Print();
