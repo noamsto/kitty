@@ -457,8 +457,8 @@ current_sprite_index(const GPUSpriteTracker *sprite_tracker) {
     return sprite_tracker->z * (sprite_tracker->xnum * sprite_tracker->ynum) + sprite_tracker->y * sprite_tracker->xnum + sprite_tracker->x;
 }
 
-static SpritePosition *
-sprite_position_for(FontGroup *fg, RunFont rf, glyph_index *glyphs, unsigned glyph_count, uint8_t ligature_index, unsigned cell_count, uint8_t key_tag) {
+static inline __attribute__((always_inline)) SpritePosition *
+sprite_position_for_impl(FontGroup *fg, RunFont rf, glyph_index *glyphs, unsigned glyph_count, uint8_t ligature_index, unsigned cell_count, const uint8_t key_tag) {
     bool created;
     Font *font = fg->fonts + rf.font_idx;
     uint8_t subscale = ((rf.subscale_n & 0xf) << 4) | (rf.subscale_d & 0xf);
@@ -478,6 +478,16 @@ sprite_position_for(FontGroup *fg, RunFont rf, glyph_index *glyphs, unsigned gly
         return NULL;
     }
     return s;
+}
+
+static SpritePosition *
+sprite_position_for(FontGroup *fg, RunFont rf, glyph_index *glyphs, unsigned glyph_count, uint8_t ligature_index, unsigned cell_count) {
+    return sprite_position_for_impl(fg, rf, glyphs, glyph_count, ligature_index, cell_count, 0);
+}
+
+static SpritePosition *
+sprite_position_for_rtl(FontGroup *fg, RunFont rf, glyph_index *glyphs, unsigned glyph_count, uint8_t ligature_index, unsigned cell_count) {
+    return sprite_position_for_impl(fg, rf, glyphs, glyph_count, ligature_index, cell_count, SPRITE_KEY_RTL);
 }
 
 void
@@ -1315,7 +1325,8 @@ render_box_cell(FontGroup *fg, RunFont rf, CPUCell *cpu_cell, GPUCell *gpu_cell,
 #define sp global_glyph_render_scratch.sprite_positions
     for (unsigned ligature_index = 0; ligature_index < num_cells; ligature_index++) {
         sp[ligature_index] =
-            sprite_position_for(fg, rf, global_glyph_render_scratch.glyphs, num_glyphs, ligature_index, num_cells, rtl_group ? SPRITE_KEY_RTL : 0);
+            rtl_group ? sprite_position_for_rtl(fg, rf, global_glyph_render_scratch.glyphs, num_glyphs, ligature_index, num_cells) :
+                        sprite_position_for(fg, rf, global_glyph_render_scratch.glyphs, num_glyphs, ligature_index, num_cells);
         if (sp[ligature_index] == NULL) failed;
         sp[ligature_index]->colored = false;
         if (!sp[ligature_index]->rendered) all_rendered = false;
@@ -1779,7 +1790,9 @@ render_group(
     for (unsigned i = 0, ligature_index = 0; i < num_cells; i++) {
         bool is_repeat_sprite =
             is_infinite_ligature && i > 1 && i + 1 < num_glyphs && glyphs[i] == glyphs[i - 1] && glyphs[i] == glyphs[i - 2] && glyphs[i] == glyphs[i + 1];
-        sp[i] = is_repeat_sprite ? sp[i - 1] : sprite_position_for(fg, rf, glyphs, glyph_count, ligature_index++, num_cells, rtl_group ? SPRITE_KEY_RTL : 0);
+        sp[i] = is_repeat_sprite ? sp[i - 1] :
+            rtl_group ? sprite_position_for_rtl(fg, rf, glyphs, glyph_count, ligature_index++, num_cells) :
+                        sprite_position_for(fg, rf, glyphs, glyph_count, ligature_index++, num_cells);
         if (!sp[i]) failed;
         if (!sp[i]->rendered) all_rendered = false;
     }
