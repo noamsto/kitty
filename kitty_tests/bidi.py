@@ -454,3 +454,18 @@ class TestBidi(BaseTest):
                 s = self.screen()
                 self.assertTrue(stamped(s, '\x1b[8h'))
                 self.assertFalse(stamped(s, reset, 1))
+        # A stale draw loop writes record 0 while the mode is off but still
+        # sets the buffer's stamped flag, so check the flags on fresh screens.
+        for reset in ('\x1bc', '\x1b[!p'):
+            with self.subTest('flags after', reset=reset):
+                s = self.screen()
+                pb(s, '\x1b[8h' + reset + 'a')
+                self.ae(s.test_bidi_state()[3:], (False, False))
+        with self.subTest('flags in alt'):
+            s = self.screen()
+            pb(s, '\x1b[8h\x1b[?1049ha')
+            self.assertFalse(s.test_bidi_state()[4])
+        with self.subTest('alt toggles the mode on and off, main restores it'):
+            s = self.screen()
+            pb(s, '\x1b[8h\x1b[?1049h\x1b[8h\x1b[8l\x1b[?1049l')
+            self.assertTrue(stamped(s, '', 1))
