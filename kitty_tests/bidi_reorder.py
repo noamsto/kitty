@@ -1188,6 +1188,7 @@ class TestBidiReorder(BaseTest):
         f = self.filled(rows)
         self.frame(f)
         self.ae(self.vmaps(s), self.vmaps(f))
+
         # a paragraph with rows above the view is cut by the snapshot, so it resolves while paused and again unpaused
         def build():
             s = self.screen(cols=5, lines=3, scrollback=10)

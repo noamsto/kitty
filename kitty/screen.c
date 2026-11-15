@@ -4644,7 +4644,10 @@ screen_pause_rendering(Screen *self, bool pause, int for_in_ms) {
         if (self->linebuf->bidi_stamped) {
             if (bm->paused_cap < num_rows) {
                 uint64_t *ids = realloc(bm->paused_ids, sizeof(uint64_t) * num_rows);
-                if (ids) { bm->paused_ids = ids; bm->paused_cap = num_rows; }
+                if (ids) {
+                    bm->paused_ids = ids;
+                    bm->paused_cap = num_rows;
+                }
             }
             record_ids = bm->paused_cap >= num_rows;
         }
@@ -4936,7 +4939,7 @@ static uint64_t
 bidi_row_id(const BidiRows *src, int y) {
     if (src->paused) return (index_type)y < src->paused_rows ? src->paused_ids[y] : 0;
     if (y >= 0) return BIDI_ID_SCREEN | (uint64_t)(y + 1);
-    return bidi_history_line_id(src->screen->historybuf, (index_type)-(y + 1));
+    return bidi_history_line_id(src->screen->historybuf, (index_type)(-(y + 1)));
 }
 
 // Drops the entries that mention a screen row when the screen rows are read under another context than they were written
@@ -5000,8 +5003,7 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued, in
 
     // A window cut from a longer paragraph is never cached. The extend-up loop stops on a row not continued into first, at lowest,
     // or at max_above rows above y0, where only a test of the row above tells whether it was cut.
-    bool cacheable = !*continued &&
-                     !(y0 - first == max_above && first > src->lowest && bidi_row_continues(src, first - 1, bidi_row_cells(src, first - 1)));
+    bool cacheable = !*continued && !(y0 - first == max_above && first > src->lowest && bidi_row_continues(src, first - 1, bidi_row_cells(src, first - 1)));
     const int min_render_row = y0 + src->to_render_row, end_render_row = MIN(last + src->to_render_row + 1, (int)b->rows);
     const uint64_t first_id = bidi_row_id(src, first), last_id = bidi_row_id(src, last);
     const uint32_t num_rows = (uint32_t)(last - first + 1);
@@ -5021,8 +5023,7 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued, in
         else if ((index_type)r == skip_render_row) cacheable = false;
         else if (hit) {
             const uint64_t id = bidi_row_id(src, y);
-            hit = !a->has_dirty_text && id && b->row_id[r] == id && b->para_first[r] == first_id && b->para_last[r] == last_id &&
-                  b->para_rows[r] == num_rows;
+            hit = !a->has_dirty_text && id && b->row_id[r] == id && b->para_first[r] == first_id && b->para_last[r] == last_id && b->para_rows[r] == num_rows;
         }
     }
     // The maps, active bits and entries of a hit are kept as they are
