@@ -266,6 +266,7 @@ typedef struct {
         bool rtl; // direction set by SCP for the current buffer
         struct { bool mBDSM, mBIDI_AUTODETECT, rtl; } main_stash; // main's controls while alt is active
     } bidi;
+    struct BidiMaps *bidi_maps; // allocated by the first upload of a stamped buffer
 } Screen;
 
 #define live_pixel_scroll_enabled(screen) (OPT(pixel_scroll) && (screen)->linebuf == (screen)->main_linebuf)

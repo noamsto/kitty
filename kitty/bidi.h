@@ -29,7 +29,6 @@ typedef struct BidiMaps {
     uint16_t *v2l;   // rows*cols, row-major by render row: the logical cell shown at each visual column
     uint8_t *levels; // rows*cols, the embedding level of each logical cell
     bool *active;    // rows: the row has a map
-    Line *lines;     // rows: the walker's views of a paragraph's on-screen rows
     index_type cols, rows;
     // The LineBuf the maps were made from: the active linebuf, or the paused snapshot
     const void *source;

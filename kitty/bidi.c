@@ -13,11 +13,9 @@ free_row_maps(BidiMaps *b) {
     free(b->v2l);
     free(b->levels);
     free(b->active);
-    free(b->lines);
     b->v2l = NULL;
     b->levels = NULL;
     b->active = NULL;
-    b->lines = NULL;
     b->rows = 0;
     b->cols = 0;
 }
@@ -44,8 +42,7 @@ bidi_maps_ensure(BidiMaps *b, index_type rows, index_type cols) {
     b->v2l = malloc(cells * sizeof(b->v2l[0]));
     b->levels = malloc(cells * sizeof(b->levels[0]));
     b->active = calloc(rows, sizeof(b->active[0]));
-    b->lines = calloc(rows, sizeof(b->lines[0]));
-    if (!b->v2l || !b->levels || !b->active || !b->lines) {
+    if (!b->v2l || !b->levels || !b->active) {
         free_row_maps(b);
         return false;
     }
