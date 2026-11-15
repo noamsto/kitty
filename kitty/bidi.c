@@ -131,7 +131,7 @@ resolve_levels(BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const
     if (!n_trim) return 0;
     fribidi_get_bracket_types(b->text, (FriBidiStrIndex)n, b->types, b->brackets);
     // FriBidi before 1.0.17 walks back to the previous strong char for every unresolved bracket pair (N0); scan bounds
-    // that walk, and skipping N0 past the budget keeps every version linear. Real text stays far below it.
+    // that walk, and skipping N0 past the budget keeps every version linear.
     uint64_t scan = 0;
     int64_t last = -1;
     for (uint32_t i = 0; i < n_trim; i++) {

@@ -4986,7 +4986,6 @@ bidi_render_line(Screen *self, BidiMaps *b, FONTS_DATA_HANDLE fonts_data, Line *
     b->render_count++;
 }
 
-// The screen's maps, allocated by its first walker upload, sized for the render rows and set up for an upload from source
 static BidiMaps *
 bidi_maps_for_upload(Screen *self, const LineBuf *source) {
     BidiMaps *b = self->bidi_maps;
@@ -5059,9 +5058,8 @@ update_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE fonts_data,
     return true;
 }
 
-// Not inlined, so that screen_update_cell_data() pays one branch for it. The
-// snapshot's rows are the render rows and its paragraphs are its own: its top
-// row continues no row above it.
+// The snapshot's rows are the render rows and its paragraphs are its own: its
+// top row continues no row above it.
 __attribute__((noinline)) static bool
 update_paused_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE fonts_data) {
     screen_bidi_check_mode(self);
@@ -5194,8 +5192,7 @@ screen_update_cell_data(Screen *self, void *address, FONTS_DATA_HANDLE fonts_dat
             // The GPU buffer was invalidated so every row must be written. The
             // paused linebuf has exactly render_lines_for_screen() rows.
             const index_type row_offset = self->paused_rendering.pixel_scroll;
-            if (UNLIKELY(linebuf->bidi_stamped) && update_paused_cell_data_bidi(self, address, fonts_data)) {
-            } else
+            if (!(UNLIKELY(linebuf->bidi_stamped) && update_paused_cell_data_bidi(self, address, fonts_data)))
                 for (index_type y = 0; y < linebuf->ynum; y++) {
                     linebuf_init_line(linebuf, y);
                     if (linebuf->line->attrs.has_dirty_text) {
@@ -5220,8 +5217,7 @@ screen_update_cell_data(Screen *self, void *address, FONTS_DATA_HANDLE fonts_dat
     const unsigned int render_lines = render_lines_for_screen(self);
     const int render_row_offset = pixel_scroll_enabled(self);
     Line line = {.text_cache = self->text_cache};
-    if (UNLIKELY(self->linebuf->bidi_stamped) && update_cell_data_bidi(self, address, fonts_data, cursor_has_moved, is_overlay_active, force_history_render)) {
-    } else
+    if (!(UNLIKELY(self->linebuf->bidi_stamped) && update_cell_data_bidi(self, address, fonts_data, cursor_has_moved, is_overlay_active, force_history_render)))
         for (unsigned int render_row = 0; render_row < render_lines; render_row++) {
             const int virtual_y = (int)render_row - render_row_offset;
             bool is_history = false;
@@ -8664,7 +8660,6 @@ test_bidi_state(Screen *self, PyObject *args UNUSED) {
         self->main_linebuf->bidi_stamped ? Py_True : Py_False, self->alt_linebuf->bidi_stamped ? Py_True : Py_False);
 }
 
-// The maps of the last upload if they are usable and the render row has a map, else NULL
 static const BidiMaps *
 bidi_maps_for_test_row(Screen *self, PyObject *val, index_type *render_row) {
     *render_row = PyLong_AsUnsignedLong(val);

@@ -218,7 +218,7 @@ class TestBidiReorder(BaseTest):
                 self.assertGreater(s.cursor.x, 0, 'codepoint did not draw')
                 test_screen_update_cell_data(s)
                 self.ae(self.memo(s, 0), want)
-        # RLM is zero width, so it never needs the classifier: a leading-mark matter
+        # RLM is zero width, so it never needs the classifier
         self.ae(self.screen().test_bidi_flag_misses(), [0x200F])
 
     def test_flag_named_scripts(self):
