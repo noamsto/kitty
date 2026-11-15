@@ -4933,8 +4933,7 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued, in
         last++;
         around[last - y0] = bidi_row_cells(src, last);
     }
-    if (y0 - first == BIDI_MAX_PARAGRAPH_ROWS / 2)
-        first = bidi_extend_paragraph_up(src, around, y0, first, BIDI_MAX_PARAGRAPH_ROWS - 1 - (last - y0));
+    if (y0 - first == BIDI_MAX_PARAGRAPH_ROWS / 2) first = bidi_extend_paragraph_up(src, around, y0, first, BIDI_MAX_PARAGRAPH_ROWS - 1 - (last - y0));
     *continued = last + 1 < src->end && bidi_row_continues(src, last, around[last - y0]);
 
     const TextCache *tc = src->screen->text_cache;
