@@ -212,6 +212,11 @@ invalidate_render_cache(HistoryBuf *self) {
     if (self->render_cache.keys) memset(self->render_cache.keys, 0, self->render_cache.num_rows * sizeof(self->render_cache.keys[0]));
 }
 
+void
+historybuf_invalidate_render_cache(HistoryBuf *self) {
+    invalidate_render_cache(self);
+}
+
 bool
 historybuf_init_line_for_render(HistoryBuf *self, index_type lnum, Line *l, index_type num_rows) {
     // Initialize l with render data from the render cache, which has room for
@@ -252,6 +257,11 @@ history_buf_endswith_wrap(HistoryBuf *self) {
 CPUCell *
 historybuf_cpu_cells(HistoryBuf *self, index_type lnum) {
     return cpu_lineptr(self, index_of(self, lnum));
+}
+
+LineAttrs *
+historybuf_attrs(HistoryBuf *self, index_type lnum) {
+    return attrptr(self, index_of(self, lnum));
 }
 
 void

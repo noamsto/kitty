@@ -293,6 +293,7 @@ typedef struct {
     CursorShape shape;
     unsigned x, y, multicursor_count;
     float cursor_opacity, text_blink_opacity;
+    unsigned visual_x; // the column x is drawn at, see screen_cursor_render_x()
 } CursorRenderInfo;
 
 typedef enum DynamicColorType { COLOR_NOT_SET, COLOR_IS_SPECIAL, COLOR_IS_INDEX, COLOR_IS_RGB } DynamicColorType;
