@@ -4934,7 +4934,6 @@ typedef struct BidiRows {
     index_type paused_rows;
 } BidiRows;
 
-// The paragraph cache's id of row y
 static uint64_t
 bidi_row_id(const BidiRows *src, int y) {
     if (src->paused) return (index_type)y < src->paused_rows ? src->paused_ids[y] : 0;
@@ -5026,7 +5025,6 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued, in
             hit = !a->has_dirty_text && id && b->row_id[r] == id && b->para_first[r] == first_id && b->para_last[r] == last_id && b->para_rows[r] == num_rows;
         }
     }
-    // The maps, active bits and entries of a hit are kept as they are
     if (cacheable && hit) return last;
 
     const TextCache *tc = src->screen->text_cache;

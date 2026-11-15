@@ -91,7 +91,6 @@ bool bidi_resolve_paragraph(
     index_type min_render_row,
     index_type skip_render_row);
 void bidi_set_row_inactive(BidiMaps *b, index_type render_row);
-// Drops every cache entry
 void bidi_cache_invalidate(BidiMaps *b);
 // Drops the entries that mention a screen row, for when the screen rows were moved or the shown buffer changed
 void bidi_cache_drop_screen_entries(BidiMaps *b);

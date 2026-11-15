@@ -904,7 +904,6 @@ class TestBidiReorder(BaseTest):
     EDGE_PARAGRAPH = 'אבג abאב 12ab'
     CACHE_ROWS = ['אבג abc', 'abc אבג', 'אב', 'xyz', 'אבגדה']
 
-    # 19
     def test_dirty_row_redraws_only_rows_whose_levels_change(self):
         s = self.paragraph('אבגדה', '12 3!', 'abcde', 'fghij', 'klmno', lines=6)
         self.frame(s)
@@ -920,7 +919,6 @@ class TestBidiReorder(BaseTest):
         s.draw('z')  # Latin over Latin changes no levels: only the written row redraws
         self.ae(self.frame(s)[1], 1)
 
-    # 20
     def test_paused_frame_redraws_only_rows_whose_levels_change(self):
         # only rows 0 (written) and 1 redraw, with and without the leading render row of pixel scroll
         for pixel_scroll in (False, True):
@@ -937,7 +935,6 @@ class TestBidiReorder(BaseTest):
                 self.ae(self.sprites(self.uploaded(s, 1)), self.fresh_sprites('(12ב', **opts))
                 self.ae(self.frame(s)[1], 0)
 
-    # 21
     def test_line_scrolled_into_view_reshaped_after_split(self):
         # (12ב split while out of view: it reshapes when scrolled back in, live or paused
         for paused in (False, True):
@@ -957,7 +954,6 @@ class TestBidiReorder(BaseTest):
                     s.pause_rendering(True, 1000)
                 self.ae((self.sprites(self.uploaded(s, 2)), self.lv(s, 2)), (self.fresh_sprites('(12ב'), (0, 0, 0, 1, 0)))
 
-    # 22
     def test_paused_frame_row_continuing_from_history(self):
         # row 0 (12ב continues from history; the paused snapshot resolves row 0 alone at 0,0,0,1,0, the next live frame at 1,2,2,1,0
         opts = {'pixel_scroll': False}
@@ -1005,15 +1001,12 @@ class TestBidiReorder(BaseTest):
         self.frame(f)
         self.ae(self.vmaps(s)[0], self.vmaps(f)[0])
 
-    # 23
     def test_history_slot_reuse_reshapes_line(self):
         self.recycle_history_number(False)
 
-    # 25
     def test_history_slot_reuse_reshapes_line_in_paused_frame(self):
         self.recycle_history_number(True)
 
-    # 24
     def test_full_ring_push_reshapes_only_reused_slots(self):
         # a full ring reuses the slot of the oldest line: only the new line reshapes, wherever the view is
         texts = ['אב 12', 'א2 3(', 'ab אב', 'אבגד.', 'א 12b', '(12ב', 'אב cd', 'a אבג']
@@ -1055,7 +1048,6 @@ class TestBidiReorder(BaseTest):
                     self.ae((self.vmaps(s)[y], self.lv(s, y)), (vmap, levels), f'row {y}')
                     self.assert_shaped(s, y, sprites, f'row {y}')
 
-    # 26
     def test_dirty_row_below_view_redraws_paragraph(self):
         # scrolled up one row: a dirty row below the view re-resolves the paragraph; row 2 redraws, others keep their levels
         s = self.paragraph('אבגדה', 'אבגדה', '12 3!', 'abcde', lines=3, scrollback=10)
@@ -1065,7 +1057,6 @@ class TestBidiReorder(BaseTest):
         self.ae((s.scrolled_by, s.linebuf.dirty_lines(), self.lv(s, 2)), (1, [], (2, 2, 1, 2, 0)))
         self.beta_over_a(s, 2, scrolled_by=1, renders=1)
 
-    # 28
     def test_cache_reuses_unchanged_paragraphs(self):
         # one dirty row makes only its own paragraph resolve again
         rows = ['אבג abc'] * 3
@@ -1085,7 +1076,6 @@ class TestBidiReorder(BaseTest):
         self.ae(after, self.vmaps(f))
         self.ae(self.frame(s), (0, 0))
 
-    # 29
     def test_cache_view_change_resolves_again(self):
         # every trigger changes which line a render row shows (or the layout) without a dirty row: no entry may be trusted
         rows = self.CACHE_ROWS[:2] + ['אב', 'xyz', 'אבגדה']
@@ -1151,7 +1141,6 @@ class TestBidiReorder(BaseTest):
         s.draw(text)
         return s
 
-    # 30
     def test_cache_option_toggle(self):
         # force_ltr on drops the maps, turning it off resolves again, then the cache holds
         s = self.drawn('abc' + A)
@@ -1166,7 +1155,6 @@ class TestBidiReorder(BaseTest):
         self.assertGreater(resolves, 0)
         self.ae((self.vmaps(s)[0], self.frame(s)[0]), (self.ABC_A, 0))
 
-    # 31
     def test_cache_losing_and_gaining_rtl(self):
         # Overwriting the only RTL run leaves a Latin row (nothing to resolve); Hebrew written into it resolves
         s = self.drawn('abc' + A)
@@ -1178,7 +1166,6 @@ class TestBidiReorder(BaseTest):
         self.put(s, 1, 4, A)
         self.ae((self.frame(s)[0], self.vmaps(s)[0], self.frame(s)[0]), (1, self.ABC_A, 0))
 
-    # 32
     def test_cache_tall_paragraph_always_resolves(self):
         # a paragraph cut by the 256 row window is never cached: unchanged frames still resolve it
         s = self.screen(cols=2, lines=300, scrollback=200)
@@ -1190,7 +1177,6 @@ class TestBidiReorder(BaseTest):
             seen.append(self.vmaps(s))
         self.ae(seen, seen[:1] * 3)
 
-    # 33
     def test_cache_paused_rendering(self):
         # paragraphs entirely inside the view keep their entries through a pause: no resolves while paused or unpausing
         rows = ['אבג abc', 'abc אבג']
@@ -1221,7 +1207,6 @@ class TestBidiReorder(BaseTest):
         self.frame(f)
         self.ae(self.state(s), self.state(f))
 
-    # 35
     def test_cache_reset(self):
         # RIS clears the stamps and both flags: no maps until CSI 8 h, and the text written after it resolves
         s = self.drawn('abc' + A)
