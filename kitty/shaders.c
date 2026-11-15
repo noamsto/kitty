@@ -1106,8 +1106,8 @@ cell_update_uniform_block(
     // its shape, so the main cursor render data must be computed even when the
     // main cursor itself is hidden by DECTCEM.
     if (rd->cursor_opacity != 0 && (cursor->is_visible || cursor->multicursor_count)) {
-        rd->cursor_x1 = cursor->x, rd->cursor_y1 = cursor->y;
-        rd->cursor_x2 = cursor->x, rd->cursor_y2 = cursor->y;
+        rd->cursor_x1 = cursor->visual_x, rd->cursor_y1 = cursor->y;
+        rd->cursor_x2 = cursor->visual_x, rd->cursor_y2 = cursor->y;
         if (pixel_scroll_enabled(screen)) {
             rd->cursor_y1 += 1;
             rd->cursor_y2 += 1;
@@ -1287,6 +1287,7 @@ cell_prepare_to_render(ssize_t vao_idx, Screen *screen, FONTS_DATA_HANDLE fonts_
     // Garbage collecting the style table changes the style indices of cells, so all cell data must be uploaded again
     const bool styles_remapped = screen->style_texture.texture && screen->style_texture.generation != screen->style_table->generation;
     if (styles_remapped) screen->paused_rendering.cell_data_updated = false;
+    if (screen->bidi_maps) screen_bidi_check_mode(screen);
 
 #define update_cell_data                                                                               \
     {                                                                                                  \
