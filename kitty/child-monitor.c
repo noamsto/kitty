@@ -989,6 +989,7 @@ collect_cursor_info(CursorRenderInfo *ans, Window *w, monotonic_t now, OSWindow 
         ans->x = cursor->x;
         ans->y = cursor->y;
     }
+    ans->visual_x = rd->screen->bidi_maps ? screen_cursor_render_x(rd->screen, ans->x, ans->y) : ans->x;
     ans->is_visible = false;
     ans->multicursor_count = 0;
     ans->cursor_opacity = 1;
@@ -1084,6 +1085,7 @@ prepare_to_render_os_window(
         zero_at_ptr(cri);
         cri->x = TD.screen->cursor->x;
         cri->y = TD.screen->cursor->y;
+        cri->visual_x = cri->x;
         if (send_cell_data_to_gpu(TD.vao_idx, TD.screen, os_window)) needs_render = true;
         os_window->needs_layers = os_window->needs_layers || screen_needs_rendering_in_layers(os_window, NULL, TD.screen);
     }

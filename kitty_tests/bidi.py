@@ -33,10 +33,13 @@ class TestBidi(BaseTest):
         return s.callbacks.wtcbuf
 
     def test_autodetect_decrqm(self):
-        for opts in ({}, {'force_ltr': True}):
-            s = self.screen(**opts)
-            for setup in ('', '\x1b[?2501h', '\x1b[?2501l'):
-                self.ae(self.reply(s, setup + '\x1b[?2501$p'), b'\x1b[?2501;4$y', (opts, setup))
+        s = self.screen()
+        self.ae(self.reply(s, '\x1b[?2501$p'), b'\x1b[?2501;2$y')
+        for setup, ans in (('\x1b[?2501h', 1), ('\x1b[?2501l', 2), ('\x1b[?2501h', 1)):
+            self.ae(self.reply(s, setup + '\x1b[?2501$p'), f'\x1b[?2501;{ans}$y'.encode(), setup)
+        s = self.screen(force_ltr=True)
+        for setup in ('', '\x1b[?2501h', '\x1b[?2501l'):
+            self.ae(self.reply(s, setup + '\x1b[?2501$p'), b'\x1b[?2501;4$y', setup)
 
     def test_stamp(self):
         s = self.screen()
@@ -150,10 +153,18 @@ class TestBidi(BaseTest):
         pb(s, '\x1b[4;8l')
         self.ae(self.reply(s, '\x1b[4$p'), b'\x1b[4;2$y')
         self.assertFalse(s.test_bidi_state()[0])
+        self.ae(self.reply(s, '\x1b[8$p'), b'\x1b[8;2$y')
+        self.ae(self.reply(s, '\x1b[?2501$p'), b'\x1b[?2501;2$y')
+        for seq, bdsm, auto in (('8h', 1, 2), ('?2501h', 1, 1), ('8l', 2, 1), ('?2501l', 2, 2)):
+            pb(s, f'\x1b[{seq}')
+            self.ae(self.reply(s, '\x1b[8$p'), f'\x1b[8;{bdsm}$y'.encode(), seq)
+            self.ae(self.reply(s, '\x1b[?2501$p'), f'\x1b[?2501;{auto}$y'.encode(), seq)
+        s = self.screen(force_ltr=True)
         for seq in ('8h', '8l', '?2501h', '?2501l'):
             pb(s, f'\x1b[{seq}')
             self.ae(self.reply(s, '\x1b[8$p'), b'\x1b[8;4$y', seq)
             self.ae(self.reply(s, '\x1b[?2501$p'), b'\x1b[?2501;4$y', seq)
+        s = self.screen()
         d = Dump()
         parse_bytes(s, b'\x1b[2 k', d)
         self.ae(list(d), [('screen_set_bidi_direction', 2)])
