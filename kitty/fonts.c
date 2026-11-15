@@ -1850,7 +1850,7 @@ render_group(
         // advances can be zero and ink can be narrower than a fullwidth glyph's box. Ink overhanging the used cells
         // by a little is clipped, as a single cell glyph's would be.
         const unsigned used = MIN(ri.canvas_width, MAX(inked_width(canvas, ri.canvas_width, scaled_metrics.cell_height), ri.rendered_width));
-        const unsigned unused = MIN(ri.canvas_width - used + scaled_metrics.cell_width / 8, ri.canvas_width);
+        const unsigned unused = MIN(ri.canvas_width - used + scaled_metrics.cell_width / 8, ri.canvas_width - 1);
         const unsigned delta = (unused / scaled_metrics.cell_width) * scaled_metrics.cell_width;
         if (delta) right_shift_canvas(canvas, ri.canvas_width, scaled_metrics.cell_height, delta);
     }
