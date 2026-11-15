@@ -45,6 +45,14 @@ def draw_coloured(s, text, first_colour=1):
     parse_bytes(s, b'\x1b[m')
 
 
+ISOLATES = '⁦⁧⁨⁩'  # LRI RLI FSI PDI
+
+
+def osc66_isolates(text, isolate_as=None):
+    # each isolate of text in an OSC 66 cell of its own, the only way a cell can start with one
+    return ''.join(f'\x1b]66;w=1;{isolate_as or ch}\x07' if ch in ISOLATES else ch for ch in text).encode()
+
+
 class TestBidiReorder(BaseTest):
     def setUp(self):
         self.enterContext(setup_for_testing())
@@ -296,6 +304,25 @@ class TestBidiReorder(BaseTest):
         draw_multicell(s, 'א', width=2)
         draw_multicell(s, 'ב', width=2)
         self.ae((self.refresh(s, 0), self.levels(s, 0)), ((3, 2, 1, 0) + ID10[4:], (1, 1, 1, 1) + (0,) * 6))
+
+    def assert_isolates_resolve_as_neutrals(self, text, cols, lines):
+        # an isolate written normally is a combining char that never reaches FriBidi; one in an OSC 66 cell resolves as ! does
+        def maps(isolate_as):
+            s = self.screen(cols=cols, lines=lines)
+            parse_bytes(s, osc66_isolates(text, isolate_as))
+            test_screen_update_cell_data(s)
+            return [(self.v2l(s, y), self.levels(s, y)) for y in range(lines)]
+
+        neutral = maps('!')
+        self.assertIsNotNone(neutral[0][0])
+        self.ae(maps(None), neutral)
+
+    def test_osc66_isolates_resolve_as_neutrals(self):
+        self.assert_isolates_resolve_as_neutrals('a⁧bא⁩⁦ב⁩⁨ג⁩', cols=12, lines=2)
+
+    def test_osc66_isolate_flood_resolves_as_neutrals(self):
+        # thousands of sibling isolate pairs in one soft-wrapped paragraph
+        self.assert_isolates_resolve_as_neutrals('א' + '⁧x⁩' * 3000, cols=200, lines=50)
 
     def test_history_row_reshaped_when_sibling_changes_its_levels(self):
         # ( ends a history row: R before and EN after make it R, mirrored; a after makes it L

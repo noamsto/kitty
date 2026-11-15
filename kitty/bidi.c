@@ -118,19 +118,20 @@ resolve_levels(BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const
     }
     b->row_start[num_rows] = n;
     fribidi_get_bidi_types(b->text, (FriBidiStrIndex)n, b->types);
-    fribidi_get_bracket_types(b->text, (FriBidiStrIndex)n, b->types, b->brackets);
     // Blanks at the paragraph's end take the paragraph level (L1) whatever
     // precedes them, so they need not be resolved; not so with an explicit
     // embedding, as their level then sets the eos of the run before them (X10).
     uint32_t n_trim = n;
     while (n_trim > b->row_start[num_rows - 1] && b->text[n_trim - 1] == ' ') n_trim--;
+    bool has_explicit = false;
     for (uint32_t i = 0; i < n_trim; i++) {
-        if (FRIBIDI_IS_EXPLICIT(b->types[i])) {
-            n_trim = n;
-            break;
-        }
+        // Drawn normally an isolate is a combining char FriBidi never sees; OSC 66 can start a cell with one, and FriBidi is quadratic in sibling isolates
+        if (FRIBIDI_IS_ISOLATE(b->types[i])) b->types[i] = FRIBIDI_TYPE_ON;
+        has_explicit |= FRIBIDI_IS_EXPLICIT(b->types[i]) != 0;
     }
+    if (has_explicit) n_trim = n;
     if (!n_trim) return 0;
+    fribidi_get_bracket_types(b->text, (FriBidiStrIndex)n, b->types, b->brackets);
     FriBidiParType base_dir = FRIBIDI_PAR_LTR;
     b->resolve_count++;
     // Returns the highest level plus one, or 0 on failure
