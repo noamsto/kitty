@@ -1105,6 +1105,17 @@ class BidiRendering(FontBaseTest):
         self.assertNotEqual(rtl_idx[0], guessed_idx[0])
         self.ae(self.render_cells(line), (guessed_idx, guessed))
 
+        # A thin zero advance glyph in a two cell group must not be shifted out of the canvas.
+        s = self.create_screen(cols=2, lines=1, scrollback=0)
+        draw_multicell(s, '\u0307', width=2)
+        line = s.line(0)
+        guessed_idx, guessed = self.render_cells(line)
+        self.ae([any(p) for p in guessed], [True, False])
+        rtl_idx, rtl = self.render_cells(line, [1, 1])
+        self.ae(rtl, guessed)
+        self.assertNotEqual(rtl_idx[0], guessed_idx[0])
+        self.ae(self.render_cells(line), (guessed_idx, guessed))
+
     def test_rtl_scaled_box_cell(self):
         def render(levels=None, **kw):
             s = self.create_screen(cols=2, lines=2, scrollback=0)
