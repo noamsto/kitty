@@ -46,11 +46,14 @@ def draw_coloured(s, text, first_colour=1):
 
 
 ISOLATES = '⁦⁧⁨⁩'  # LRI RLI FSI PDI
+LRE, RLE, PDF, LRO, RLO = '‪‫‬‭‮'
+BIDI_CONTROLS = ISOLATES + LRE + RLE + PDF + LRO + RLO
+NO_BRACKETS = str.maketrans('()', '!!')
 
 
-def osc66_isolates(text, isolate_as=None):
-    # each isolate of text in an OSC 66 cell of its own, the only way a cell can start with one
-    return ''.join(f'\x1b]66;w=1;{isolate_as or ch}\x07' if ch in ISOLATES else ch for ch in text).encode()
+def osc66_controls(text, control_as=None):
+    # each bidi control of text in an OSC 66 cell of its own, the only way a cell can start with one
+    return ''.join(f'\x1b]66;w=1;{control_as or ch}\x07' if ch in BIDI_CONTROLS else ch for ch in text).encode()
 
 
 class TestBidiReorder(BaseTest):
@@ -311,24 +314,51 @@ class TestBidiReorder(BaseTest):
         draw_multicell(s, 'ב', width=2)
         self.ae((self.refresh(s, 0), self.levels(s, 0)), ((3, 2, 1, 0) + ID10[4:], (1, 1, 1, 1) + (0,) * 6))
 
-    def assert_isolates_resolve_as_neutrals(self, text, cols, lines):
-        # an isolate written normally is a combining char that never reaches FriBidi; one in an OSC 66 cell resolves as ! does
-        def maps(isolate_as):
-            s = self.screen(cols=cols, lines=lines)
-            parse_bytes(s, osc66_isolates(text, isolate_as))
-            test_screen_update_cell_data(s)
-            return [(self.v2l(s, y), self.levels(s, y)) for y in range(lines)]
+    def maps(self, data, cols, lines):
+        # (v2l, levels) of every screen row after one frame of data
+        s = self.screen(cols=cols, lines=lines)
+        parse_bytes(s, data)
+        test_screen_update_cell_data(s)
+        return [(self.v2l(s, y), self.levels(s, y)) for y in range(lines)]
 
-        neutral = maps('!')
+    def assert_controls_resolve_as_neutrals(self, text, cols, lines):
+        # a bidi control written normally is a combining char that never reaches FriBidi; one in an OSC 66 cell resolves as ! does
+        neutral = self.maps(osc66_controls(text, '!'), cols, lines)
         self.assertIsNotNone(neutral[0][0])
-        self.ae(maps(None), neutral)
+        self.ae(self.maps(osc66_controls(text), cols, lines), neutral)
 
     def test_osc66_isolates_resolve_as_neutrals(self):
-        self.assert_isolates_resolve_as_neutrals('a⁧bא⁩⁦ב⁩⁨ג⁩', cols=12, lines=2)
+        self.assert_controls_resolve_as_neutrals('a⁧bא⁩⁦ב⁩⁨ג⁩', cols=12, lines=2)
 
     def test_osc66_isolate_flood_resolves_as_neutrals(self):
         # thousands of sibling isolate pairs in one soft-wrapped paragraph
-        self.assert_isolates_resolve_as_neutrals('א' + '⁧x⁩' * 3000, cols=200, lines=50)
+        self.assert_controls_resolve_as_neutrals('א' + '⁧x⁩' * 3000, cols=200, lines=50)
+
+    def test_osc66_embeddings_resolve_as_neutrals(self):
+        self.assert_controls_resolve_as_neutrals('aא' + RLE + 'bc', cols=12, lines=2)
+        self.assert_controls_resolve_as_neutrals('a' + RLO + 'bc' + PDF + 'd' + LRO + 'אב', cols=12, lines=2)
+        # nested to FriBidi's deepest level
+        self.assert_controls_resolve_as_neutrals((RLE + LRE) * 62 + 'אa', cols=200, lines=50)
+
+    def bracket_maps(self, text, cols, lines):
+        # the maps of text, and of text with its brackets as !, which N0 cannot pair
+        return self.maps(text.encode(), cols, lines), self.maps(text.translate(NO_BRACKETS).encode(), cols, lines)
+
+    def test_n0_scan_budget_boundary(self):
+        # The scan adds, per opening bracket, its distance back to the last letter or digit: 1 for the ( after א, then
+        # 2k + 2 for pair k = 0, 1, ... after ב. Against 16 per char, blanks trimmed: 32 pairs give 1057 <= 16 * 68 = 1088,
+        # 33 pairs 1123 > 16 * 70 = 1120.
+        kept, plain = self.bracket_maps('א(ב)' + '()' * 32, cols=80, lines=1)
+        # N0 makes (ב) R after א; as ! the ) would take the paragraph's L from the neutrals up to eos
+        self.ae((kept[0][1][:5], plain[0][1][:5]), ((1, 1, 1, 1, 0), (1, 1, 1, 0, 0)))
+        skipped, plain = self.bracket_maps('א(ב)' + '()' * 33, cols=80, lines=1)
+        self.ae(skipped, plain)
+
+    def test_bracket_flood_resolves_without_n0(self):
+        # 3000 pairs soft-wrapped over 31 rows, far over the scan budget
+        flood, plain = self.bracket_maps('א(ב)' + '()' * 3000, cols=200, lines=50)
+        self.assertIsNotNone(flood[0][0])
+        self.ae(flood, plain)
 
     def test_history_row_reshaped_when_sibling_changes_its_levels(self):
         # ( ends a history row: R before and EN after make it R, mirrored; a after makes it L

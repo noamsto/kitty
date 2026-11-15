@@ -119,19 +119,28 @@ resolve_levels(BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const
     b->row_start[num_rows] = n;
     fribidi_get_bidi_types(b->text, (FriBidiStrIndex)n, b->types);
     // Blanks at the paragraph's end take the paragraph level (L1) whatever
-    // precedes them, so they need not be resolved; not so with an explicit
-    // embedding, as their level then sets the eos of the run before them (X10).
+    // precedes them, so they need not be resolved: only inside an explicit
+    // embedding could they set the eos of the run before them (X10), and the
+    // retype below leaves none.
     uint32_t n_trim = n;
     while (n_trim > b->row_start[num_rows - 1] && b->text[n_trim - 1] == ' ') n_trim--;
-    bool has_explicit = false;
     for (uint32_t i = 0; i < n_trim; i++) {
-        // Drawn normally an isolate is a combining char FriBidi never sees; OSC 66 can start a cell with one, and FriBidi is quadratic in sibling isolates
-        if (FRIBIDI_IS_ISOLATE(b->types[i])) b->types[i] = FRIBIDI_TYPE_ON;
-        has_explicit |= FRIBIDI_IS_EXPLICIT(b->types[i]) != 0;
+        // Drawn normally a bidi control is a combining char FriBidi never sees; OSC 66 can start a cell with one, and FriBidi is quadratic in sibling isolates
+        if (b->types[i] & (FRIBIDI_MASK_ISOLATE | FRIBIDI_MASK_EXPLICIT)) b->types[i] = FRIBIDI_TYPE_ON;
     }
-    if (has_explicit) n_trim = n;
     if (!n_trim) return 0;
     fribidi_get_bracket_types(b->text, (FriBidiStrIndex)n, b->types, b->brackets);
+    // FriBidi before 1.0.17 walks back to the previous strong char for every unresolved bracket pair (N0); scan bounds
+    // that walk, and skipping N0 past the budget keeps every version linear. Real text stays far below it.
+    uint64_t scan = 0;
+    int64_t last = -1;
+    for (uint32_t i = 0; i < n_trim; i++) {
+        if (b->types[i] & (FRIBIDI_MASK_LETTER | FRIBIDI_MASK_NUMBER)) last = i;
+        else if (FRIBIDI_IS_BRACKET_OPEN(b->brackets[i])) scan += (uint64_t)(i - last);
+    }
+    if (scan > (uint64_t)BIDI_N0_SCAN_PER_CHAR * n_trim) {
+        for (uint32_t i = 0; i < n; i++) b->brackets[i] = FRIBIDI_NO_BRACKET;
+    }
     FriBidiParType base_dir = FRIBIDI_PAR_LTR;
     b->resolve_count++;
     // Returns the highest level plus one, or 0 on failure

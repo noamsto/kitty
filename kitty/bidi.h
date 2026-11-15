@@ -11,6 +11,8 @@
 #include <fribidi.h>
 
 #define BIDI_MAX_PARAGRAPH_ROWS 256
+// Steps per character a paragraph's bracket pairing (N0) may walk back to a letter or digit before it is skipped
+#define BIDI_N0_SCAN_PER_CHAR 16
 // The skip_render_row of bidi_resolve_paragraph() that skips no row
 #define BIDI_NO_RENDER_ROW ((index_type)UINT_MAX)
 
