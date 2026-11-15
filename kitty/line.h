@@ -41,7 +41,11 @@ static_assert(sizeof(CellGPUData) == 8, "Fix the ordering of CellGPUData");
 typedef struct RenderCell {
     sprite_index sprite_idx;
     uint8_t mark;
-    uint8_t padding[3];
+    // the embedding level the cell was shaped at, written only by the bidi walker
+    uint8_t level;
+    // meaningful in a row's first cell: some cell of the row was shaped at a nonzero level
+    uint8_t shaped_with_levels;
+    uint8_t padding[1];
 } RenderCell;
 static_assert(sizeof(RenderCell) == 8, "Fix the ordering of RenderCell");
 
@@ -99,7 +103,8 @@ typedef union LineAttrs {
     };
     uint8_t val;
 } LineAttrs;
-enum { BIDI_STAMP_NONE, BIDI_STAMP_IMPLICIT };
+// BIDI_STAMP_RTL is the upload's memo of an implicit line that holds right-to-left text
+enum { BIDI_STAMP_NONE, BIDI_STAMP_IMPLICIT, BIDI_STAMP_RTL };
 static_assert(sizeof(LineAttrs) == sizeof(uint8_t), "Fix the ordering of LineAttrs");
 
 
@@ -286,6 +291,16 @@ cells_for_gpu(const CPUCell *c, const RenderCell *r, index_type num, CellGPUData
     static_assert(MARK_MASK < (1u << CELL_GPU_STYLE_SHIFT), "Increase CELL_GPU_STYLE_SHIFT");
     for (index_type i = 0; i < num; i++) {
         const CellGPUData d = {.sprite_idx = r[i].sprite_idx, .style_and_mark = (c[i].style_idx << CELL_GPU_STYLE_SHIFT) | r[i].mark};
+        memcpy(dest + i, &d, sizeof(d));
+    }
+}
+
+static inline void
+cells_for_gpu_permuted(const CPUCell *c, const RenderCell *r, const uint16_t *v2l, index_type num, CellGPUData *dest) {
+    // As cells_for_gpu() with visual cell i taken from logical cell v2l[i]: only the reads are permuted, dest is written sequentially.
+    for (index_type i = 0; i < num; i++) {
+        const index_type l = v2l[i];
+        const CellGPUData d = {.sprite_idx = r[l].sprite_idx, .style_and_mark = (c[l].style_idx << CELL_GPU_STYLE_SHIFT) | r[l].mark};
         memcpy(dest + i, &d, sizeof(d));
     }
 }
