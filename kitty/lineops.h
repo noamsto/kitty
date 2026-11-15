@@ -142,6 +142,7 @@ bool cells_have_multiline_chars(const CPUCell *cells, index_type count);
 bool historybuf_pop_line(HistoryBuf *, Line *);
 void historybuf_init_line(HistoryBuf *self, index_type num, Line *l);
 bool historybuf_init_line_for_render(HistoryBuf *self, index_type lnum, Line *l, index_type num_rows);
+void historybuf_invalidate_render_cache(HistoryBuf *self);
 bool history_buf_endswith_wrap(HistoryBuf *self);
 CPUCell *historybuf_cpu_cells(HistoryBuf *self, index_type num);
 LineAttrs *historybuf_attrs(HistoryBuf *self, index_type num);

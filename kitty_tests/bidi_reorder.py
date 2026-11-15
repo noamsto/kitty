@@ -11,9 +11,14 @@ from .base import BaseTest, draw_multicell, parse_bytes
 
 A = 'אבג'  # three Hebrew letters, bidi class R
 ID10 = tuple(range(10))
+MIXED = 'abc' + A
+MIXED_V2L = (0, 1, 2, 5, 4, 3) + ID10[6:]
 # a row whose map is not its own inverse: R R WS EN EN, N1 makes the space R
 NSI = 'אב 12'
+NSI_LEVELS = (1, 1, 1, 2, 2)
 NSI_V2L = (3, 4, 2, 1, 0)
+NSI_L2V = (4, 3, 2, 0, 1)
+EXTRA_CURSOR = 1 << 2  # an extra cursor of shape 1 in the selection buffer
 NONE, IMPLICIT, RTL = 0, 1, 2  # bidi_stamp values, RTL being the upload's memo
 CellGPUData = namedtuple('CellGPUData', 'sprite_idx style_and_mark')
 GPU_CELL = struct.Struct('=II')  # CellGPUData in kitty/line.h
@@ -103,6 +108,40 @@ class TestBidiReorder(BaseTest):
         s.draw(ch)
         self.assertFalse(s.linebuf.is_continued(row))
 
+    def mixed(self, **opts):
+        s = self.screen(**opts)
+        s.draw(MIXED)
+        return s
+
+    def nsi(self):
+        s = self.screen(cols=5)
+        s.draw(NSI)
+        self.ae(self.refresh(s, 0), NSI_V2L)
+        return s
+
+    def selection_rows(self, s, raw):
+        # the bytes of each screen row of a selection buffer with one byte per cell
+        offset = len(raw) // s.columns - s.lines  # the extra leading render row of pixel scroll
+        return [list(raw[s.columns * (y + offset) : s.columns * (y + offset + 1)]) for y in range(s.lines)]
+
+    def lit(self, s):
+        # the columns lit on row 0 by a new selection upload; no other row may be lit
+        rows = self.selection_rows(s, s.current_selections())
+        self.ae(rows[1:], [[0] * s.columns] * (s.lines - 1))
+        return [x for x, b in enumerate(rows[0]) if b]
+
+    def selected_columns(self, s, start, end):
+        # the visual columns lit on row 0 after a frame when logical cells start..end are selected
+        s.clear_selection()
+        s.start_selection(start, 0)
+        s.update_selection(end, 0)
+        test_screen_update_cell_data(s)
+        return self.lit(s)
+
+    def queries(self, s):
+        # the selection of logical cells 3..4, the cursor's column and the logical column of visual column 3, on row 0
+        return self.selected_columns(s, 3, 4), s.test_cursor_render_x(), s.test_bidi_logical_x(3, 0)
+
     def test_levels_and_maps(self):
         for text, levels, v2l in (
             ('abc' + A, (0, 0, 0, 1, 1, 1, 0, 0, 0, 0), (0, 1, 2, 5, 4, 3, 6, 7, 8, 9)),
@@ -115,6 +154,11 @@ class TestBidiReorder(BaseTest):
                 s = self.screen()
                 s.draw(text)
                 self.ae((self.refresh(s, 0), self.levels(s, 0)), (v2l, levels))
+        # logical cell 1 (span 1) is at visual column 2; the emoji's span of 2 starts at its second cell, column 1
+        s = self.screen()
+        s.draw('א😀ב')
+        self.refresh(s, 0)
+        self.ae((s.test_bidi_visual_x(1, 0), s.test_bidi_visual_x(1, 0, 2)), (2, 1))
 
     def test_unflagged_continuation_and_history(self):
         # the continuation row (levels 2,2,1,2,2) has no RTL character of its own
@@ -446,3 +490,189 @@ class TestBidiReorder(BaseTest):
         logical = [s.cell_style_idx(0, x) for x in range(5)]
         self.assertNotEqual(before, logical)
         self.ae(styles(self.uploaded(s, 0)), [logical[NSI_V2L[v]] for v in range(5)])
+
+    def test_selection_and_inverse_maps(self):
+        # NSI's map is not its own inverse: a swapped map lights visual 3 for logical 0 and visual 1 for logical 3
+        s = self.nsi()
+        self.ae([self.selected_columns(self.mixed(), 3, 4), self.selected_columns(s, 0, 0), self.selected_columns(s, 3, 3)], [[4, 5], [4], [0]])
+        s = self.screen()
+        s.draw(MIXED + ' d')
+        v2l = self.refresh(s, 0)
+        levels = self.levels(s, 0)
+        for x in range(s.columns):
+            vx = s.test_bidi_visual_x(x, 0)
+            self.ae(
+                (s.test_bidi_logical_x(vx, 0), vx, s.test_bidi_logical_x(x, 0), s.test_bidi_is_rtl(x, 0)), (x, v2l.index(x), v2l[x], bool(levels[x] & 1)), x
+            )
+        self.ae((s.test_bidi_visual_x(2, 3), s.test_bidi_logical_x(2, 3), s.test_bidi_is_rtl(2, 3)), (2, 2, False))
+        s = self.nsi()
+        self.ae(
+            (self.levels(s, 0), tuple(s.test_bidi_logical_x(x, 0) for x in range(5)), tuple(s.test_bidi_visual_x(x, 0) for x in range(5))),
+            (NSI_LEVELS, NSI_V2L, NSI_L2V),
+        )
+        # a click's half of an RTL cell is flipped, as its logical left half is drawn on the right, not of the level 2 digits
+        self.ae([s.test_bidi_logical_click(vx, 0, True) for vx in (0, 4)], [(3, True), (0, False)])
+        self.ae(self.mixed().test_bidi_logical_click(1, 0, True), (1, True))
+
+    def test_selection_stride_moves_whole_cells(self):
+        # with several bytes per cell, as on the GPU, each cell's bytes move together: its bits stay in its first byte
+        s = self.nsi()
+        parse_bytes(s, b'\x1b[>1;2:1:2; q')  # an extra cursor on logical cell 1
+        s.start_selection(0, 0)
+        s.update_selection(0, 0)
+        test_screen_update_cell_data(s)
+        one = s.current_selections()
+        self.ae(self.selection_rows(s, one)[0], [0, 0, 0, EXTRA_CURSOR, 1])
+        for stride in (2, 5):
+            with self.subTest(stride=stride):
+                self.ae(s.test_apply_selection(stride), b''.join(bytes((c,)) + bytes(stride - 1) for c in one))
+
+    def test_extra_cursors_on_visual_cells(self):
+        s = self.mixed()
+        parse_bytes(s, b'\x1b[>1;2:1:4;2:1:1;2:2:4; q')  # logical cells 3 and 0 of row 0, 3 of row 1
+        test_screen_update_cell_data(s)
+        c = EXTRA_CURSOR
+        self.ae(self.selection_rows(s, s.current_selections())[:2], [[c, 0, 0, 0, 0, c, 0, 0, 0, 0], [0, 0, 0, c, 0, 0, 0, 0, 0, 0]])
+
+    def test_cursor_render_x(self):
+        # the cursor is drawn on its cell's visual column; on a blank cell or the pending wrap column after an RTL
+        # character it is drawn left of that character, where the next one goes
+        for text, x, want in (
+            (MIXED, 3, 5),
+            (MIXED, 6, 2),
+            ('ls שלום', 7, 2),
+            ('שלום' + 'd', 4, 4),
+            ('ab' + 'שלום' + ' d', 6, 1),
+            (A + ' 12', 6, 6),
+            ('abcdef' + 'אבגד', 10, 5),
+            ('אבגד' + 'abcdef', 10, 10),
+            ('abc', 1, 1),
+        ):
+            with self.subTest(text=text, x=x):
+                s = self.screen()
+                s.draw(text)
+                if s.cursor.x != x:
+                    s.cursor_position(1, x + 1)
+                self.ae(s.cursor.x, x)
+                test_screen_update_cell_data(s)
+                self.ae(s.test_cursor_render_x(), want)
+        # the paused snapshot has the leading row of pixel scroll, so its row y + 1 is the cursor's
+        s = self.screen()
+        parse_bytes(s, f'abcdefgh\r\nls {A}'.encode())
+        test_screen_update_cell_data(s)
+        self.ae(s.test_cursor_render_x(), 2)
+        s.pause_rendering(True, 1000)
+        test_screen_update_cell_data(s)
+        self.ae(s.test_cursor_render_x(), 2)
+
+    def test_resize_narrower_drops_maps(self):
+        # until the next frame, maps sized for the old width must not be used
+        s = self.screen(cols=20, lines=3)
+        s.draw(''.join(chr(0x5D0 + i) for i in range(20)))
+        self.ae(self.refresh(s, 0), tuple(range(19, -1, -1)))
+        s.resize(3, 10)
+        self.ae([(s.test_bidi_logical_x(x, 0), s.test_bidi_visual_x(x, 0)) for x in range(10)], [(x, x) for x in range(10)])
+        self.ae(self.refresh(s, 0), tuple(range(9, -1, -1)))
+
+    def test_alternate_screen_ignores_main_maps(self):
+        # without pixel scroll the alternate screen has as many render rows as the main one: only the source and its stamp tell the maps apart
+        s = self.mixed(pixel_scroll=False)
+        self.ae(self.queries(s), ([4, 5], 2, 5))
+        parse_bytes(s, b'\x1b[?1049h\x1b[H')
+        s.draw(MIXED)
+        self.ae((s.test_bidi_state()[3:], s.cursor.x), ((True, False), 6))
+        self.ae(self.queries(s), ([3, 4], 6, 3))
+        # once stamped too, the alternate screen has no maps of its own until its next frame
+        parse_bytes(s, b'\x1b[8h\x1b[H')
+        s.draw(MIXED)
+        self.ae((s.test_bidi_state()[4], s.test_cursor_render_x(), s.test_bidi_logical_x(3, 0)), (True, 6, 3))
+        parse_bytes(s, b'\x1b[?1049l')
+        self.ae((s.test_cursor_render_x(), s.test_bidi_logical_x(3, 0)), (2, 5))
+
+    def test_option_off_at_runtime(self):
+        # force_ltr turned on at runtime shapes plainly in logical order, turned off again reorders
+        plain, reordered = self.fresh_sprites(MIXED, cols=10, force_ltr=True), self.fresh_sprites(MIXED, cols=10)
+        self.assertNotEqual(plain, reordered)
+        s = self.mixed()
+        self.ae(self.refresh(s, 0), MIXED_V2L)
+        for force_ltr, v2l, sprites in ((True, None, plain), (False, MIXED_V2L, reordered)):
+            with self.subTest(force_ltr=force_ltr):
+                self.set_options({'force_ltr': force_ltr})
+                s.test_bidi_check_mode()
+                self.ae(
+                    (self.sprites(self.uploaded(s, 0)), self.v2l(s, 0), tuple(s.test_bidi_logical_x(x, 0) for x in range(10))),
+                    (sprites, v2l, v2l or ID10),
+                )
+        # frames after a resize under force_ltr leave the selection clean
+        s = self.mixed()
+        self.refresh(s, 0)
+        self.set_options({'force_ltr': True})
+        s.resize(5, 8)
+        s.start_selection(0, 0)
+        s.update_selection(3, 0)
+        s.test_bidi_check_mode()
+        test_screen_update_cell_data(s)
+        s.current_selections()
+        self.assertFalse(s.is_selection_dirty())
+        test_screen_update_cell_data(s)
+        self.assertFalse(s.is_selection_dirty())
+
+    def test_force_ltr_on_at_runtime_stops_using_maps(self):
+        s = self.mixed()
+        self.ae(self.queries(s), ([4, 5], 2, 5))
+        self.assertFalse(s.is_selection_dirty())
+        self.set_options({'force_ltr': True})
+        # the maps of the last upload are not used even before the next frame
+        self.ae((self.v2l(s, 0), s.test_cursor_render_x(), s.test_bidi_logical_x(3, 0), s.is_selection_dirty()), (None, 6, 3, True))
+        s.test_bidi_check_mode()
+        test_screen_update_cell_data(s)
+        self.assertTrue(s.is_selection_dirty())
+        self.ae(self.lit(s), [3, 4])
+        self.assertFalse(s.is_selection_dirty())
+        test_screen_update_cell_data(s)
+        self.assertFalse(s.is_selection_dirty())
+
+    def test_force_ltr_change_while_paused(self):
+        # the change dirties every snapshot row, so the next paused upload shapes them all in the new mode
+        plain, reordered = self.fresh_sprites(MIXED, cols=10, force_ltr=True), self.fresh_sprites(MIXED, cols=10)
+        s = self.mixed()
+        test_screen_update_cell_data(s)
+        s.pause_rendering(True, 1000)
+        self.ae(self.sprites(self.uploaded(s, 0)), reordered)
+        for force_ltr, v2l, sprites in ((True, None, plain), (False, MIXED_V2L, reordered)):
+            with self.subTest(force_ltr=force_ltr):
+                self.set_options({'force_ltr': force_ltr})
+                self.assertTrue(s.test_bidi_mode_changed())
+                s.test_bidi_check_mode()
+                self.assertFalse(s.test_bidi_mode_changed())
+                renders = s.test_bidi_counts()[1]
+                self.ae((self.sprites(self.uploaded(s, 0)), self.v2l(s, 0)), (sprites, v2l))
+                if not force_ltr:
+                    self.ae(s.test_bidi_counts()[1] - renders, s.lines + 1)
+
+    def test_force_ltr_change_realised_on_any_buffer(self):
+        # a screen with maps realises the change whichever buffer it shows
+        for what, seq in (('alternate screen', b'\x1b[?1049h'), ('hard reset', b'\x1bc')):
+            with self.subTest(what):
+                s = self.mixed()
+                test_screen_update_cell_data(s)
+                parse_bytes(s, seq)
+                self.set_options({'force_ltr': True})
+                self.assertTrue(s.test_bidi_mode_changed())
+                s.test_bidi_check_mode()
+                self.assertFalse(s.test_bidi_mode_changed())
+
+    def test_rows_written_under_force_ltr_reordered_once_it_is_off(self):
+        # under force_ltr no row is scanned: turning it off rescans the rows shown meanwhile, live and in the history
+        s = self.screen(cols=5, lines=2, scrollback=10, force_ltr=True)
+        parse_bytes(s, f'{A}\r\nx\r\n{A}'.encode())
+        self.ae((s.historybuf.count, str(s.historybuf.line(0))), (1, A))
+        for up in (True, False):
+            s.scroll(1, up)
+            test_screen_update_cell_data(s)
+        self.ae((self.memo(s, 1), s.historybuf.dirty_lines(), s.linebuf.dirty_lines()), (IMPLICIT, [], []))
+        self.set_options({'force_ltr': False})
+        s.test_bidi_check_mode()
+        self.ae(self.refresh(s, 1), (2, 1, 0, 3, 4))
+        s.scroll(1, True)
+        self.ae(self.refresh(s, 0), (2, 1, 0, 3, 4))

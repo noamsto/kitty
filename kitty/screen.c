@@ -5005,8 +5005,10 @@ bidi_maps_for_upload(Screen *self, const LineBuf *source) {
 // Not inlined, so that screen_update_cell_data() pays one branch for it
 __attribute__((noinline)) static bool
 update_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE fonts_data, bool cursor_has_moved, bool is_overlay_active, bool force_history_render) {
-    if (OPT(force_ltr)) return false;
+    screen_bidi_check_mode(self);
+    // Allocated even under force_ltr, so that a later change of it is realised
     BidiMaps *b = bidi_maps_for_upload(self, self->linebuf);
+    if (OPT(force_ltr)) return false;
     const unsigned int render_lines = render_lines_for_screen(self);
     const BidiRows src = {
         .screen = self,
@@ -5054,6 +5056,8 @@ update_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE fonts_data,
         }
     }
     b->valid = true;
+    // The cursor info was collected from the maps of the previous frame
+    self->cursor_render_info.visual_x = screen_cursor_render_x(self, self->cursor_render_info.x, self->cursor_render_info.y);
     return true;
 }
 
@@ -5062,9 +5066,10 @@ update_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE fonts_data,
 // row continues no row above it.
 __attribute__((noinline)) static bool
 update_paused_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE fonts_data) {
-    if (OPT(force_ltr)) return false;
+    screen_bidi_check_mode(self);
     LineBuf *linebuf = self->paused_rendering.linebuf;
     BidiMaps *b = bidi_maps_for_upload(self, linebuf);
+    if (OPT(force_ltr)) return false;
     const BidiRows src = {.screen = self, .linebuf = linebuf, .lowest = 0, .end = (int)linebuf->ynum, .to_render_row = 0};
     const index_type row_offset = self->paused_rendering.pixel_scroll;
     bool continued = false;
@@ -5086,7 +5091,100 @@ update_paused_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE font
         }
     }
     b->valid = true;
+    self->cursor_render_info.visual_x = screen_cursor_render_x(self, self->cursor_render_info.x, self->cursor_render_info.y);
     return true;
+}
+
+// The maps of the last upload are for the frame now shown and in its mode
+static bool
+screen_bidi_maps_usable(const Screen *self) {
+    const BidiMaps *b = self->bidi_maps;
+    const LineBuf *shown = self->paused_rendering.expires_at ? self->paused_rendering.linebuf : self->linebuf;
+    return b && b->valid && !OPT(force_ltr) && b->cols == self->columns && b->rows == render_lines_for_screen(self) && b->source == shown &&
+           shown->bidi_stamped;
+}
+
+static bool
+screen_bidi_mode_changed(const Screen *self) {
+    return self->bidi_maps && self->bidi_maps->force_ltr_seen != OPT(force_ltr);
+}
+
+// Realises a runtime change of force_ltr: the next upload shapes every line of
+// the screen's buffers, history and paused snapshot again, in the new mode
+__attribute__((noinline)) void
+screen_bidi_check_mode(Screen *self) {
+    if (!screen_bidi_mode_changed(self)) return;
+    screen_dirty_sprite_positions(self);
+    historybuf_invalidate_render_cache(self->historybuf);
+    LineBuf *snapshot = self->paused_rendering.linebuf;
+    if (snapshot) {
+        for (index_type y = 0; y < snapshot->ynum; y++) linebuf_mark_line_dirty(snapshot, y);
+        self->paused_rendering.cell_data_updated = false;
+    }
+    self->bidi_maps->changed = true;
+    self->bidi_maps->force_ltr_seen = OPT(force_ltr);
+}
+
+// Puts the selection buffer of screen_apply_selection() in visual order when
+// the maps are usable, so that the bits of each cell, extra cursor included,
+// light the visual cell of their logical cell
+__attribute__((noinline)) static void
+apply_selection_bidi(Screen *self, uint8_t *address, size_t stride) {
+    BidiMaps *b = self->bidi_maps;
+    b->changed = false;
+    if (!(b->selection_used_maps = screen_bidi_maps_usable(self))) return;
+    const size_t row_size = (size_t)self->columns * stride;
+    for (index_type r = 0; r < b->rows; r++) bidi_permute_row_bytes(b, r, address + r * row_size, stride);
+}
+
+// Whether a map changed, or the maps became usable or unusable, since the last
+// selection upload, while that upload has something to place
+__attribute__((noinline)) static bool
+bidi_selection_dirty(const Screen *self) {
+    const BidiMaps *b = self->bidi_maps;
+    return (b->changed || screen_bidi_maps_usable(self) != b->selection_used_maps) &&
+           (self->selections.count || self->url_ranges.count || self->extra_cursors.count);
+}
+
+void
+screen_bidi_logical_click(Screen *self, index_type *x, index_type y, bool *in_left_half) {
+    if (!screen_bidi_maps_usable(self)) return;
+    const BidiMaps *b = self->bidi_maps;
+    const index_type render_row = y + pixel_scroll_enabled(self);
+    *x = bidi_logical_x(b, render_row, *x);
+    // The logical left half of a right-to-left cell is drawn on its right
+    if (bidi_cell_is_rtl(b, render_row, *x)) *in_left_half = !*in_left_half;
+}
+
+static inline index_type
+cell_span(const CPUCell *c) {
+    return c->is_multicell && c->x == 0 ? mcd_x_limit(c) : 1;
+}
+
+static bool cell_is_blank(const CPUCell *c);
+
+// The column the cursor at x on linebuf row y is drawn at: the visual column
+// of its cell, except on a blank cell or the pending wrap column after a
+// right-to-left character, where it is the column visually left of that
+// character, as the next right-to-left character goes there
+index_type
+screen_cursor_render_x(Screen *self, index_type x, index_type y) {
+    if (!screen_bidi_maps_usable(self)) return x;
+    const BidiMaps *b = self->bidi_maps;
+    const index_type render_row = y + rendered_scrolled_by(self) + pixel_scroll_enabled(self);
+    if (render_row >= b->rows || !b->active[render_row]) return x;
+    // The paused snapshot is indexed by render row, as the maps are
+    const CPUCell *cells = self->paused_rendering.expires_at ? linebuf_cpu_cells_for_line(self->paused_rendering.linebuf, render_row)
+                                                             : linebuf_cpu_cells_for_line(self->linebuf, y);
+    if (x > 0 && (x == self->columns || (x < self->columns && cell_is_blank(cells + x)))) {
+        index_type p = x - 1;
+        while (p && cells[p].is_multicell && cells[p].x) p--;
+        if (bidi_cell_is_rtl(b, render_row, p)) {
+            const index_type left = bidi_visual_x(b, render_row, p, cell_span(cells + p));
+            return left ? left - 1 : 0;
+        }
+    }
+    return x < self->columns ? bidi_visual_x(b, render_row, x, cell_span(cells + x)) : x;
 }
 // }}}
 
@@ -5473,6 +5571,7 @@ screen_apply_selection(Screen *self, void *address_, size_t num_cells, size_t st
         if (ec->locations[i].cell < num_cells) address[(size_t)ec->locations[i].cell * stride] |= (ec->locations[i].shape & 7) << 2;
     }
     ec->dirty = false;
+    if (self->bidi_maps) apply_selection_bidi(self, address_, stride);
 }
 
 static index_type
@@ -7322,6 +7421,7 @@ screen_is_selection_dirty(Screen *self) {
     IterationData q;
     if (self->paused_rendering.expires_at) return false;
     if (self->scrolled_by != self->last_rendered.scrolled_by) return true;
+    if (self->bidi_maps && bidi_selection_dirty(self)) return true;
     if (self->selections.last_rendered_count != self->selections.count || self->url_ranges.last_rendered_count != self->url_ranges.count ||
         self->extra_cursors.dirty)
         return true;
@@ -8566,13 +8666,13 @@ test_bidi_state(Screen *self, PyObject *args UNUSED) {
         self->main_linebuf->bidi_stamped ? Py_True : Py_False, self->alt_linebuf->bidi_stamped ? Py_True : Py_False);
 }
 
-// The maps of the last upload if that upload was made by the walker and the render row has a map, else NULL
+// The maps of the last upload if they are usable and the render row has a map, else NULL
 static const BidiMaps *
 bidi_maps_for_test_row(Screen *self, PyObject *val, index_type *render_row) {
     *render_row = PyLong_AsUnsignedLong(val);
     if (PyErr_Occurred()) return NULL;
     const BidiMaps *b = self->bidi_maps;
-    return b && b->valid && *render_row < b->rows && b->active[*render_row] ? b : NULL;
+    return screen_bidi_maps_usable(self) && *render_row < b->rows && b->active[*render_row] ? b : NULL;
 }
 
 static PyObject *
@@ -8600,6 +8700,71 @@ static PyObject *
 test_bidi_counts(Screen *self, PyObject *a UNUSED) {
     const BidiMaps *b = self->bidi_maps;
     return Py_BuildValue("KK", b ? b->resolve_count : 0ull, b ? b->render_count : 0ull);
+}
+
+// The queries take screen rows and are the identity, or false, unless the maps are usable
+static PyObject *
+test_bidi_visual_x(Screen *self, PyObject *args) {
+    unsigned x, y, span = 1;
+    if (!PyArg_ParseTuple(args, "II|I", &x, &y, &span)) return NULL;
+    return PyLong_FromUnsignedLong(screen_bidi_maps_usable(self) ? bidi_visual_x(self->bidi_maps, y + pixel_scroll_enabled(self), x, span) : x);
+}
+
+static PyObject *
+test_bidi_logical_x(Screen *self, PyObject *args) {
+    unsigned x, y;
+    if (!PyArg_ParseTuple(args, "II", &x, &y)) return NULL;
+    return PyLong_FromUnsignedLong(screen_bidi_maps_usable(self) ? bidi_logical_x(self->bidi_maps, y + pixel_scroll_enabled(self), x) : x);
+}
+
+static PyObject *
+test_bidi_logical_click(Screen *self, PyObject *args) {
+    unsigned x, y;
+    int in_left_half;
+    if (!PyArg_ParseTuple(args, "IIp", &x, &y, &in_left_half)) return NULL;
+    bool left = in_left_half;
+    screen_bidi_logical_click(self, &x, y, &left);
+    return Py_BuildValue("IO", x, left ? Py_True : Py_False);
+}
+
+static PyObject *
+test_bidi_is_rtl(Screen *self, PyObject *args) {
+    unsigned x, y;
+    if (!PyArg_ParseTuple(args, "II", &x, &y)) return NULL;
+    return Py_NewRef(screen_bidi_maps_usable(self) && bidi_cell_is_rtl(self->bidi_maps, y + pixel_scroll_enabled(self), x) ? Py_True : Py_False);
+}
+
+static PyObject *
+test_cursor_render_x(Screen *self, PyObject *a UNUSED) {
+    const Cursor *c = self->paused_rendering.expires_at ? &self->paused_rendering.cursor : self->cursor;
+    return PyLong_FromUnsignedLong(screen_cursor_render_x(self, c->x, c->y));
+}
+
+static PyObject *
+test_apply_selection(Screen *self, PyObject *val) {
+    const unsigned long stride = PyLong_AsUnsignedLong(val);
+    if (PyErr_Occurred()) return NULL;
+    if (!stride) {
+        PyErr_SetString(PyExc_ValueError, "stride must be positive");
+        return NULL;
+    }
+    const size_t num_cells = (size_t)render_lines_for_screen(self) * self->columns;
+    PyObject *ans = PyBytes_FromStringAndSize(NULL, (Py_ssize_t)(num_cells * stride));
+    if (!ans) return NULL;
+    screen_apply_selection(self, PyBytes_AS_STRING(ans), num_cells, stride);
+    return ans;
+}
+
+static PyObject *
+test_bidi_mode_changed(Screen *self, PyObject *a UNUSED) {
+    return Py_NewRef(screen_bidi_mode_changed(self) ? Py_True : Py_False);
+}
+
+// What cell_prepare_to_render() does before each frame
+static PyObject *
+test_bidi_check_mode(Screen *self, PyObject *a UNUSED) {
+    if (self->bidi_maps) screen_bidi_check_mode(self);
+    Py_RETURN_NONE;
 }
 
 static PyObject *
@@ -8642,6 +8807,14 @@ static PyMethodDef methods[] = {
     METHODB(test_bidi_levels, METH_O),
     METHODB(test_bidi_counts, METH_NOARGS),
     METHODB(test_bidi_flag_misses, METH_NOARGS),
+    METHODB(test_bidi_visual_x, METH_VARARGS),
+    METHODB(test_bidi_logical_x, METH_VARARGS),
+    METHODB(test_bidi_logical_click, METH_VARARGS),
+    METHODB(test_bidi_is_rtl, METH_VARARGS),
+    METHODB(test_cursor_render_x, METH_NOARGS),
+    METHODB(test_apply_selection, METH_O),
+    METHODB(test_bidi_mode_changed, METH_NOARGS),
+    METHODB(test_bidi_check_mode, METH_NOARGS),
     METHODB(test_gc_style_table, METH_VARARGS),
     METHODB(test_draw_overlay_line, METH_VARARGS),
     METHODB(test_update_overlay_text, METH_VARARGS),
