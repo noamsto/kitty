@@ -15,6 +15,8 @@
 #define BIDI_N0_SCAN_PER_CHAR 16
 // The skip_render_row of bidi_resolve_paragraph() that skips no row
 #define BIDI_NO_RENDER_ROW ((index_type)UINT_MAX)
+// Line ids of the paragraph cache: a screen row's id has this bit, a history row's is its absolute line number plus one; 0 is no id
+#define BIDI_ID_SCREEN (1ull << 63)
 
 // False for codepoints outside the blocks that contain right-to-left or Arabic
 // letters, i.e. text that cannot need reordering. Ordered so that the common
@@ -31,6 +33,19 @@ typedef struct BidiMaps {
     uint16_t *v2l;   // rows*cols, row-major by render row: the logical cell shown at each visual column
     uint8_t *levels; // rows*cols, the embedding level of each logical cell
     bool *active;    // rows: the row has a map
+    // The paragraph cache, per render row: the id of the line shown there when its map was last written or kept, and the ids of
+    // the first and last rows and the row count of the paragraph that wrote it. Screen ids are valid under the context only.
+    uint64_t *row_id, *para_first, *para_last;
+    uint32_t *para_rows;
+    const void *ctx_linebuf; // NULL: no screen-row entries
+    uint32_t ctx_gen;
+    // The live ids of the paused snapshot's rows and the live context, recorded when rendering was paused
+    uint64_t *paused_ids;
+    index_type paused_rows, paused_cap;
+    const void *paused_ctx_linebuf;
+    uint32_t paused_ctx_gen;
+    // The last resolve may be cached: false when it met a cell spanning several rows or ran out of memory
+    bool resolve_cacheable;
     index_type cols, rows;
     // The LineBuf the maps were made from: the active linebuf, or the paused snapshot
     const void *source;
@@ -76,6 +91,10 @@ bool bidi_resolve_paragraph(
     index_type min_render_row,
     index_type skip_render_row);
 void bidi_set_row_inactive(BidiMaps *b, index_type render_row);
+// Drops every cache entry
+void bidi_cache_invalidate(BidiMaps *b);
+// Drops the entries that mention a screen row, for when the screen rows were moved or the shown buffer changed
+void bidi_cache_drop_screen_entries(BidiMaps *b);
 
 // The queries below are the identity, or false, for a row without a map.
 // The visual column of the left edge of the logical cell x spanning span cells

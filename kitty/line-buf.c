@@ -31,6 +31,7 @@ clear_chars_to(LineBuf *linebuf, index_type y, char_type ch) {
 
 void
 linebuf_clear(LineBuf *self, char_type ch) {
+    self->bidi_generation++;
     zero_at_ptr_count(self->cpu_cell_buf, self->xnum * self->ynum);
     zero_at_ptr_count(self->render_cell_buf, self->xnum * self->ynum);
     zero_at_ptr_count(self->line_attrs, self->ynum);
@@ -167,6 +168,7 @@ linebuf_clear_lines(LineBuf *self, const Cursor *cursor, index_type start, index
 #if BLANK_CHAR != 0
 #error This implementation is incorrect for BLANK_CHAR != 0
 #endif
+    self->bidi_generation++;
 #define lineptr(which, i) which##_lineptr(self, self->line_map[i])
     const size_t cpu_stride = sizeof(CPUCell) * self->xnum, render_stride = sizeof(RenderCell) * self->xnum;
     CPUCell *first_cpu_line = lineptr(cpu, start);
@@ -344,6 +346,7 @@ linebuf_clear_line(LineBuf *self, index_type y, bool clear_attrs) {
 #if BLANK_CHAR != 0
 #error This implementation is incorrect for BLANK_CHAR != 0
 #endif
+    self->bidi_generation++;
     index_type ym = self->line_map[y];
     CPUCell *c = cpu_lineptr(self, ym);
     zero_at_ptr_count(c, self->xnum);
@@ -363,6 +366,7 @@ linebuf_clear_line_text(LineBuf *self, index_type y) {
 #if BLANK_CHAR != 0
 #error This implementation is incorrect for BLANK_CHAR != 0
 #endif
+    self->bidi_generation++;
     zero_at_ptr_count(cpu_lineptr(self, self->line_map[y]), self->xnum);
     self->line_attrs[y].val = 0;
     self->line_attrs[y].has_dirty_text = true;
@@ -383,6 +387,7 @@ clear_line(LineBuf *self, PyObject *val) {
 void
 linebuf_index(LineBuf *self, index_type top, index_type bottom) {
     if (top >= self->ynum - 1 || bottom >= self->ynum || bottom <= top) return;
+    self->bidi_generation++;
     index_type old_top = self->line_map[top];
     LineAttrs old_attrs = self->line_attrs[top];
     const index_type num = bottom - top;
@@ -404,6 +409,7 @@ pyw_index(LineBuf *self, PyObject *args) {
 void
 linebuf_reverse_index(LineBuf *self, index_type top, index_type bottom) {
     if (top >= self->ynum - 1 || bottom >= self->ynum || bottom <= top) return;
+    self->bidi_generation++;
     index_type old_bottom = self->line_map[bottom];
     LineAttrs old_attrs = self->line_attrs[bottom];
     for (index_type i = bottom; i > top; i--) {
@@ -442,6 +448,7 @@ linebuf_insert_lines(LineBuf *self, unsigned int num, unsigned int y, unsigned i
     if (y >= self->ynum || y > bottom || bottom >= self->ynum) return;
     index_type ylimit = bottom + 1;
     if (ylimit < y || (num = MIN(ylimit - y, num)) < 1) return;
+    self->bidi_generation++;
     const size_t scratch_sz = sizeof(self->scratch[0]) * num;
     memcpy(self->scratch, self->line_map + ylimit - num, scratch_sz);
     for (i = ylimit - 1; i >= y + num; i--) {
@@ -472,6 +479,7 @@ linebuf_delete_lines(LineBuf *self, index_type num, index_type y, index_type bot
     index_type ylimit = bottom + 1;
     num = MIN(bottom + 1 - y, num);
     if (y >= self->ynum || y > bottom || bottom >= self->ynum || num < 1) return;
+    self->bidi_generation++;
     const size_t scratch_sz = sizeof(self->scratch[0]) * num;
     memcpy(self->scratch, self->line_map + y, scratch_sz);
     for (i = y; i < ylimit && i + num < self->ynum; i++) {

@@ -258,6 +258,7 @@ do_screen_reset(Screen *self, bool is_hard_reset) {
         historybuf_clear(self->historybuf);
         linebuf_clear(self->alt_linebuf, BLANK_CHAR);
         self->main_linebuf->bidi_stamped = self->alt_linebuf->bidi_stamped = false;
+        if (self->bidi_maps) bidi_cache_invalidate(self->bidi_maps);
         // all buffers are now empty
         self->multiline_chars_used = false;
         zero_at_ptr(&self->multiline_chars_cut_off_at_bottom);
@@ -856,6 +857,7 @@ remove_blank_output_line_reservation_marker(Cursor *cursor, LineBuf *linebuf) {
 static bool
 screen_resize(Screen *self, unsigned int lines, unsigned int columns) {
     screen_pause_rendering(self, false, 0);
+    if (self->bidi_maps) bidi_cache_invalidate(self->bidi_maps);
     lines = MAX(1u, lines);
     columns = MAX(1u, columns);
 
@@ -4584,6 +4586,12 @@ copy_selections(Selections *dest, const Selections *src) {
 
 static Line *render_line_for_virtual_y(Screen *self, int y, Line *line, index_type *lnum, bool *is_history);
 
+// The paragraph cache's id of history line lnum (0 is the newest)
+static inline uint64_t
+bidi_history_line_id(const HistoryBuf *hb, index_type lnum) {
+    return hb->num_pushed - MIN(hb->num_pushed, (uint64_t)lnum);
+}
+
 bool
 screen_pause_rendering(Screen *self, bool pause, int for_in_ms) {
     if (!pause) {
@@ -4629,16 +4637,34 @@ screen_pause_rendering(Screen *self, bool pause, int for_in_ms) {
         }
     }
     self->paused_rendering.linebuf->bidi_stamped = self->linebuf->bidi_stamped;
+    BidiMaps *bm = self->bidi_maps;
+    bool record_ids = false;
+    if (bm) {
+        bm->paused_rows = 0;
+        if (self->linebuf->bidi_stamped) {
+            if (bm->paused_cap < num_rows) {
+                uint64_t *ids = realloc(bm->paused_ids, sizeof(uint64_t) * num_rows);
+                if (ids) { bm->paused_ids = ids; bm->paused_cap = num_rows; }
+            }
+            record_ids = bm->paused_cap >= num_rows;
+        }
+    }
     Line line = {.text_cache = self->text_cache};
     for (index_type y = 0; y < num_rows; y++) {
         index_type lnum;
         bool is_history;
         Line *src = render_line_for_virtual_y(self, (int)y - (int)row_offset, &line, &lnum, &is_history);
+        if (record_ids) bm->paused_ids[y] = !src ? 0 : is_history ? bidi_history_line_id(self->historybuf, lnum) : (BIDI_ID_SCREEN | (uint64_t)(lnum + 1));
         if (src) {
             linebuf_init_line(self->paused_rendering.linebuf, y);
             copy_line(src, self->paused_rendering.linebuf->line);
             self->paused_rendering.linebuf->line_attrs[y] = src->attrs;
         } else linebuf_clear_line(self->paused_rendering.linebuf, y, true);
+    }
+    if (record_ids) {
+        bm->paused_rows = num_rows;
+        bm->paused_ctx_linebuf = self->linebuf;
+        bm->paused_ctx_gen = self->linebuf->bidi_generation;
     }
     copy_selections(&self->paused_rendering.selections, &self->selections);
     copy_selections(&self->paused_rendering.url_ranges, &self->url_ranges);
@@ -4873,6 +4899,7 @@ screen_update_only_line_graphics_data(Screen *self) {
     index_type lnum = 0;
     clamp_scroll_position(self);
     screen_reset_dirty(self);
+    if (self->bidi_maps) bidi_cache_invalidate(self->bidi_maps);
     self->scroll_changed = false;
     const unsigned int render_lines = render_lines_for_screen(self);
     const int render_row_offset = pixel_scroll_enabled(self);
@@ -4898,7 +4925,28 @@ typedef struct BidiRows {
     LineBuf *linebuf;
     int lowest, end;
     int to_render_row; // row y is shown in render row y + to_render_row
+    // A paused snapshot's rows have the live ids recorded at pause time, paused_ids[y] for y < paused_rows, else id 0
+    bool paused;
+    const uint64_t *paused_ids;
+    index_type paused_rows;
 } BidiRows;
+
+// The paragraph cache's id of row y
+static uint64_t
+bidi_row_id(const BidiRows *src, int y) {
+    if (src->paused) return (index_type)y < src->paused_rows ? src->paused_ids[y] : 0;
+    if (y >= 0) return BIDI_ID_SCREEN | (uint64_t)(y + 1);
+    return bidi_history_line_id(src->screen->historybuf, (index_type)-(y + 1));
+}
+
+// Drops the entries that mention a screen row when the screen rows are read under another context than they were written
+static void
+bidi_cache_use_context(BidiMaps *b, const void *linebuf, uint32_t generation) {
+    if (b->ctx_linebuf == linebuf && b->ctx_gen == generation) return;
+    bidi_cache_drop_screen_entries(b);
+    b->ctx_linebuf = linebuf;
+    b->ctx_gen = generation;
+}
 
 static const CPUCell *
 bidi_row_cells(const BidiRows *src, int y) {
@@ -4937,15 +4985,48 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued, in
     // The cells of row y are at around[y - y0]
     const CPUCell *window[2 * BIDI_MAX_PARAGRAPH_ROWS - 1], **around = window + BIDI_MAX_PARAGRAPH_ROWS - 1;
     around[0] = bidi_row_cells(src, y0);
-    int first = y0, last = y0;
+    int first = y0, last = y0, max_above = BIDI_MAX_PARAGRAPH_ROWS / 2;
     // Half the window above y0, then as much below as fits, then the rest above
-    if (*continued) first = bidi_extend_paragraph_up(src, around, y0, first, BIDI_MAX_PARAGRAPH_ROWS / 2);
+    if (*continued) first = bidi_extend_paragraph_up(src, around, y0, first, max_above);
     while (last - first + 1 < BIDI_MAX_PARAGRAPH_ROWS && last + 1 < src->end && bidi_row_continues(src, last, around[last - y0])) {
         last++;
         around[last - y0] = bidi_row_cells(src, last);
     }
-    if (y0 - first == BIDI_MAX_PARAGRAPH_ROWS / 2) first = bidi_extend_paragraph_up(src, around, y0, first, BIDI_MAX_PARAGRAPH_ROWS - 1 - (last - y0));
+    if (y0 - first == max_above) {
+        max_above = BIDI_MAX_PARAGRAPH_ROWS - 1 - (last - y0);
+        first = bidi_extend_paragraph_up(src, around, y0, first, max_above);
+    }
     *continued = last + 1 < src->end && bidi_row_continues(src, last, around[last - y0]);
+
+    // A window cut from a longer paragraph is never cached. The extend-up loop stops on a row not continued into first, at lowest,
+    // or at max_above rows above y0, where only a test of the row above tells whether it was cut.
+    bool cacheable = !*continued &&
+                     !(y0 - first == max_above && first > src->lowest && bidi_row_continues(src, first - 1, bidi_row_cells(src, first - 1)));
+    const int min_render_row = y0 + src->to_render_row, end_render_row = MIN(last + src->to_render_row + 1, (int)b->rows);
+    const uint64_t first_id = bidi_row_id(src, first), last_id = bidi_row_id(src, last);
+    const uint32_t num_rows = (uint32_t)(last - first + 1);
+    // A hit: the same lines with the same text in the same paragraph at the same render rows as when the maps were last written
+    bool hit = cacheable;
+    for (int y = first; y <= last && cacheable; y++) {
+        const LineAttrs *a = bidi_row_attrs(src, y);
+        const int r = y + src->to_render_row;
+        if (a->has_image_placeholders) cacheable = false;
+        // Rows above the view are history rows (a paragraph with shown rows above y0 is longer than the window). Pushes keep
+        // them dirty until first shown, so they cannot be required clean. Their text is still that of the key: history ids are
+        // recycled newest-first, so a recycled row above the view brings a dirty or moved row below it into the paragraph or
+        // changes its key; in-place history edits (clear_multicell_cell, the multicell nukes) only clear chars, which cannot add
+        // right-to-left text, and a paragraph whose resolve met a multi-row cell is never cached.
+        else if (r < min_render_row) continue;
+        else if (r >= (int)b->rows) hit &= !a->has_dirty_text;
+        else if ((index_type)r == skip_render_row) cacheable = false;
+        else if (hit) {
+            const uint64_t id = bidi_row_id(src, y);
+            hit = !a->has_dirty_text && id && b->row_id[r] == id && b->para_first[r] == first_id && b->para_last[r] == last_id &&
+                  b->para_rows[r] == num_rows;
+        }
+    }
+    // The maps, active bits and entries of a hit are kept as they are
+    if (cacheable && hit) return last;
 
     const TextCache *tc = src->screen->text_cache;
     bool rtl = false, placeholders = false;
@@ -4957,12 +5038,18 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued, in
         rtl |= a->bidi_stamp == BIDI_STAMP_RTL;
         placeholders |= a->has_image_placeholders;
     }
-    const int min_render_row = y0 + src->to_render_row;
-    if (rtl && !placeholders) {
+    const bool resolved = rtl && !placeholders;
+    if (resolved) {
         bidi_resolve_paragraph(b, around + (first - y0), last - first + 1, tc, first + src->to_render_row, min_render_row, skip_render_row);
     } else {
-        const int end = MIN(last + src->to_render_row + 1, (int)b->rows);
-        for (int r = min_render_row; r < end; r++) bidi_set_row_inactive(b, r);
+        for (int r = min_render_row; r < end_render_row; r++) bidi_set_row_inactive(b, r);
+    }
+    const bool keep = cacheable && (!resolved || b->resolve_cacheable);
+    for (int r = min_render_row; r < end_render_row; r++) {
+        b->row_id[r] = keep ? bidi_row_id(src, r - src->to_render_row) : 0;
+        b->para_first[r] = first_id;
+        b->para_last[r] = last_id;
+        b->para_rows[r] = num_rows;
     }
     return last;
 }
@@ -5017,6 +5104,7 @@ update_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE fonts_data,
     // Allocated even under force_ltr, so that a later change of it is realised
     BidiMaps *b = bidi_maps_for_upload(self, self->linebuf);
     if (OPT(force_ltr)) return false;
+    bidi_cache_use_context(b, self->linebuf, self->linebuf->bidi_generation);
     const unsigned int render_lines = render_lines_for_screen(self);
     const BidiRows src = {
         .screen = self,
@@ -5032,6 +5120,7 @@ update_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE fonts_data,
         const int y0 = (int)r - src.to_render_row;
         if (y0 < src.lowest) {
             bidi_set_row_inactive(b, r);
+            b->row_id[r] = 0;
             update_line_data_blank(self->columns, r++, address);
             continue;
         }
@@ -5077,7 +5166,18 @@ update_paused_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE font
     LineBuf *linebuf = self->paused_rendering.linebuf;
     BidiMaps *b = bidi_maps_for_upload(self, linebuf);
     if (OPT(force_ltr)) return false;
-    const BidiRows src = {.screen = self, .linebuf = linebuf, .lowest = 0, .end = (int)linebuf->ynum, .to_render_row = 0};
+    // Without ids for this snapshot every id is 0, under a context no live frame has
+    const bool have_ids = b->paused_ids && b->paused_rows == linebuf->ynum;
+    bidi_cache_use_context(b, have_ids ? b->paused_ctx_linebuf : NULL, have_ids ? b->paused_ctx_gen : 0);
+    const BidiRows src = {
+        .screen = self,
+        .linebuf = linebuf,
+        .lowest = 0,
+        .end = (int)linebuf->ynum,
+        .to_render_row = 0,
+        .paused = true,
+        .paused_ids = have_ids ? b->paused_ids : NULL,
+        .paused_rows = have_ids ? b->paused_rows : 0};
     const index_type row_offset = self->paused_rendering.pixel_scroll;
     bool continued = false;
     for (index_type y = 0; y < linebuf->ynum;) {
@@ -5128,6 +5228,7 @@ screen_bidi_check_mode(Screen *self) {
         for (index_type y = 0; y < snapshot->ynum; y++) linebuf_mark_line_dirty(snapshot, y);
         self->paused_rendering.cell_data_updated = false;
     }
+    if (self->bidi_maps) bidi_cache_invalidate(self->bidi_maps);
     self->bidi_maps->changed = true;
     self->bidi_maps->force_ltr_seen = OPT(force_ltr);
 }
@@ -8703,6 +8804,14 @@ test_bidi_levels(Screen *self, PyObject *val) {
 }
 
 static PyObject *
+test_bidi_set_generation(Screen *self, PyObject *val) {
+    const unsigned long n = PyLong_AsUnsignedLong(val);
+    if (PyErr_Occurred()) return NULL;
+    self->linebuf->bidi_generation = (uint32_t)n;
+    Py_RETURN_NONE;
+}
+
+static PyObject *
 test_bidi_counts(Screen *self, PyObject *a UNUSED) {
     const BidiMaps *b = self->bidi_maps;
     return Py_BuildValue("KK", b ? b->resolve_count : 0ull, b ? b->render_count : 0ull);
@@ -8812,6 +8921,7 @@ static PyMethodDef methods[] = {
     METHODB(test_bidi_v2l, METH_O),
     METHODB(test_bidi_levels, METH_O),
     METHODB(test_bidi_counts, METH_NOARGS),
+    METHODB(test_bidi_set_generation, METH_O),
     METHODB(test_bidi_flag_misses, METH_NOARGS),
     METHODB(test_bidi_visual_x, METH_VARARGS),
     METHODB(test_bidi_logical_x, METH_VARARGS),
