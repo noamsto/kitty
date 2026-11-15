@@ -125,8 +125,10 @@ typedef struct ExtraCursors {
     bool dirty;
 } ExtraCursors;
 
+typedef struct Screen Screen;
+typedef struct text_loop_state text_loop_state;
 
-typedef struct {
+struct Screen {
     PyObject_HEAD
 
         unsigned int columns,
@@ -267,7 +269,9 @@ typedef struct {
         struct { bool mBDSM, mBIDI_AUTODETECT, rtl; } main_stash; // main's controls while alt is active
     } bidi;
     struct BidiMaps *bidi_maps; // allocated by the first upload of a stamped buffer
-} Screen;
+    // Follows modes.mBDSM so that the draw path needs no test per call, see sync_draw_text_loop()
+    void (*draw_text_loop)(Screen *, const uint32_t *, size_t, text_loop_state *);
+};
 
 #define live_pixel_scroll_enabled(screen) (OPT(pixel_scroll) && (screen)->linebuf == (screen)->main_linebuf)
 // While rendering is paused the pixel scroll state captured at pause time is used so that pausing does not change what is rendered

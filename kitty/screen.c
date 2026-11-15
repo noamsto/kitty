@@ -51,6 +51,8 @@ static const ScreenModes empty_modes = {0, .mDECAWM = true, .mDECTCEM = true, .m
 
 #define CSI_REP_MAX_REPETITIONS 65535u
 
+static void sync_draw_text_loop(Screen *self);
+
 // Constructor/destructor {{{
 
 static void
@@ -158,6 +160,7 @@ new_screen_object(PyTypeObject *type, PyObject *args, PyObject UNUSED *kwds) {
         self->window_id = window_id;
         self->modes = empty_modes;
         self->saved_modes = empty_modes;
+        sync_draw_text_loop(self);
         self->is_dirty = true;
         self->scroll_changed = false;
         self->margin_top = 0;
@@ -268,6 +271,7 @@ do_screen_reset(Screen *self, bool is_hard_reset) {
     }
     self->modes = empty_modes;
     self->saved_modes = empty_modes;
+    sync_draw_text_loop(self);
     zero_at_ptr(&self->bidi);
     rederive_blank_bidi_records(self->main_linebuf, (LineAttrs){0});
     rederive_blank_bidi_records(self->alt_linebuf, (LineAttrs){0});
@@ -2135,6 +2139,12 @@ draw_text_loop_implicit(Screen *self, const uint32_t *chars, size_t num_chars, t
     draw_text_loop_(self, chars, num_chars, s, true, current_bidi_record(self).val);
 }
 
+// Must be called after every write of modes.mBDSM, or of modes as a whole.
+static void
+sync_draw_text_loop(Screen *self) {
+    self->draw_text_loop = self->modes.mBDSM ? draw_text_loop_implicit : draw_text_loop;
+}
+
 #define PREPARE_FOR_DRAW_TEXT                                                                                         \
     if (tc_should_gc(self->text_cache)) screen_garbage_collect_text_cache(self);                                      \
     if (style_table_needs_gc(self->style_table)) screen_garbage_collect_style_table(self);                            \
@@ -2154,8 +2164,7 @@ static void
 draw_text(Screen *self, const uint32_t *chars, size_t num_chars) {
     PREPARE_FOR_DRAW_TEXT;
     self->is_dirty = true;
-    if (UNLIKELY(self->modes.mBDSM)) draw_text_loop_implicit(self, chars, num_chars, &s);
-    else draw_text_loop(self, chars, num_chars, &s);
+    self->draw_text_loop(self, chars, num_chars, &s);
 }
 
 void
@@ -2619,6 +2628,7 @@ screen_toggle_screen_buffer(Screen *self, bool save_cursor, bool clear_alt_scree
         if (save_cursor) screen_restore_cursor(self);
         self->grman = self->main_grman;
     }
+    sync_draw_text_loop(self);
     bidi_controls_changed(self);
     screen_history_scroll(self, SCROLL_FULL, false);
     self->is_dirty = true;
@@ -2670,6 +2680,7 @@ set_mode_from_const(Screen *self, unsigned int mode, bool val) {
         case BDSM:
             if (self->modes.mBDSM != val) {
                 self->modes.mBDSM = val;
+                sync_draw_text_loop(self);
                 bidi_controls_changed(self);
             }
             break;
@@ -6246,6 +6257,7 @@ screen_draw_overlay_line(Screen *self) {
     self->modes.mDECTCEM = false;
     self->modes.mIRM = false;
     self->modes.mBDSM = false;
+    sync_draw_text_loop(self);
     Cursor *orig_cursor = self->cursor;
     self->cursor = &(self->overlay_line.original_line.cursor);
     // Mark the pre-edit text as distinct from committed text: italic, with a
@@ -6323,6 +6335,7 @@ screen_draw_overlay_line(Screen *self) {
     self->modes.mDECTCEM = orig_cursor_enable_mode;
     self->modes.mIRM = orig_insert_replace_mode;
     self->modes.mBDSM = orig_bidi_support_mode;
+    sync_draw_text_loop(self);
 }
 
 static void
