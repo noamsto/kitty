@@ -38,12 +38,12 @@ typedef struct BidiMaps {
     uint64_t *row_id, *para_first, *para_last;
     uint32_t *para_rows;
     const void *ctx_linebuf; // NULL: no screen-row entries
-    uint32_t ctx_gen;
+    uint64_t ctx_gen;
     // The live ids of the paused snapshot's rows and the live context, recorded when rendering was paused
     uint64_t *paused_ids;
     index_type paused_rows, paused_cap;
     const void *paused_ctx_linebuf;
-    uint32_t paused_ctx_gen;
+    uint64_t paused_ctx_gen;
     // The last resolve may be cached: false when it met a cell spanning several rows or ran out of memory
     bool resolve_cacheable;
     index_type cols, rows;

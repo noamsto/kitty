@@ -165,8 +165,10 @@ resolve_levels(BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const
     }
     FriBidiParType base_dir = FRIBIDI_PAR_LTR;
     b->resolve_count++;
-    // Returns the highest level plus one, or 0 on failure
-    if (fribidi_get_par_embedding_levels_ex(b->types, b->brackets, (FriBidiStrIndex)n_trim, &base_dir, b->para_levels) <= 1) return 0;
+    // Returns the highest level plus one: 0 is a failure, which must not be cached, and 1 is a paragraph with every level 0
+    const FriBidiLevel max_level = fribidi_get_par_embedding_levels_ex(b->types, b->brackets, (FriBidiStrIndex)n_trim, &base_dir, b->para_levels);
+    if (!max_level) b->resolve_cacheable = false;
+    if (max_level <= 1) return 0;
     for (uint32_t i = n_trim; i < n; i++) b->para_levels[i] = 0;
     return n_trim;
 }

@@ -22,7 +22,7 @@ typedef struct {
     bool bidi_stamped; // set by the first bidi record written into this buffer, cleared only by RIS
     // Bumped by every primitive that moves rows or clears text without marking
     // the row dirty; the bidi paragraph cache drops its screen-row entries when it changes
-    uint32_t bidi_generation;
+    uint64_t bidi_generation;
 } LineBuf;
 
 

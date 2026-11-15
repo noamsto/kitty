@@ -4944,7 +4944,7 @@ bidi_row_id(const BidiRows *src, int y) {
 
 // Drops the entries that mention a screen row when the screen rows are read under another context than they were written
 static void
-bidi_cache_use_context(BidiMaps *b, const void *linebuf, uint32_t generation) {
+bidi_cache_use_context(BidiMaps *b, const void *linebuf, uint64_t generation) {
     if (b->ctx_linebuf == linebuf && b->ctx_gen == generation) return;
     bidi_cache_drop_screen_entries(b);
     b->ctx_linebuf = linebuf;
@@ -8806,9 +8806,9 @@ test_bidi_levels(Screen *self, PyObject *val) {
 
 static PyObject *
 test_bidi_set_generation(Screen *self, PyObject *val) {
-    const unsigned long n = PyLong_AsUnsignedLong(val);
+    const unsigned long long n = PyLong_AsUnsignedLongLong(val);
     if (PyErr_Occurred()) return NULL;
-    self->linebuf->bidi_generation = (uint32_t)n;
+    self->linebuf->bidi_generation = (uint64_t)n;
     Py_RETURN_NONE;
 }
 

@@ -1016,9 +1016,11 @@ class TestBidiReorder(BaseTest):
     # 24
     def test_full_ring_push_reshapes_only_reused_slots(self):
         # a full ring reuses the slot of the oldest line: only the new line reshapes, wherever the view is
+        texts = ['אב 12', 'א2 3(', 'ab אב', 'אבגד.', 'א 12b', '(12ב', 'אב cd', 'a אבג']
+
         def ring():
             s = self.screen(cols=5, lines=4, scrollback=0, pixel_scroll=False)
-            parse_bytes(s, '\r\n'.join(['אב 12'] * 8).encode())
+            parse_bytes(s, '\r\n'.join(texts).encode())
             self.frame(s)
             self.prerender(s)
             return s
@@ -1026,19 +1028,31 @@ class TestBidiReorder(BaseTest):
         def push(s, scroll):
             s.scroll(scroll, True)
             self.warm(s)
-            self.ae((s.scrolled_by, self.lv(s, 0)), (min(scroll, 4), (1, 1, 1, 2, 2)))
+            self.ae(s.scrolled_by, min(scroll, 4))
             s.cursor_position(4, 1)
             parse_bytes(s, b'\n')
-            return self.frame(s)[1]
+            return self.frame(s)
 
-        fresh = self.fresh_sprites('אב 12', pixel_scroll=False)
-        for scroll in (2, 10):
+        def alone(text):
+            # the maps and levels of a line drawn alone, and its glyphs
+            f = self.screen(cols=5, lines=1, scrollback=0, pixel_scroll=False)
+            f.draw(text)
+            self.frame(f)
+            return self.vmaps(f)[0], self.lv(f, 0), self.fresh_sprites(text, pixel_scroll=False)
+
+        # at scroll 2 the view keeps its lines, but the two of them that moved from the screen into the history resolve;
+        # at scroll 10 the view slides over the ring and every row shows another line
+        for scroll, resolves in ((2, 2), (10, 4)):
             with self.subTest(scroll=scroll):
                 s = ring()
                 self.ae(s.historybuf.count, 4)
-                self.ae(push(s, scroll), 1)
-                for y in range(4):
-                    self.assert_shaped(s, y, fresh, f'row {y}')
+                self.ae(push(s, scroll), (resolves, 1))
+                lines = texts[1:] + ['']
+                start = len(lines) - 4 - s.scrolled_by
+                for y, text in enumerate(lines[start : start + 4]):
+                    vmap, levels, sprites = alone(text)
+                    self.ae((self.vmaps(s)[y], self.lv(s, y)), (vmap, levels), f'row {y}')
+                    self.assert_shaped(s, y, sprites, f'row {y}')
 
     # 26
     def test_dirty_row_below_view_redraws_paragraph(self):
@@ -1224,10 +1238,10 @@ class TestBidiReorder(BaseTest):
         self.ae((self.vmaps(s)[0], self.frame(s)[0]), (self.ABC_A, 0))
 
     def test_cache_counter_wrap(self):
-        # the generation wraps from UINT32_MAX to 0: rows moved by the index must not hit the entries of the lines they replace
+        # the generation wraps from UINT64_MAX to 0: rows moved by the index must not hit the entries of the lines they replace
         rows = ['אבג abc', 'abc אבג', 'אבגדה abc', 'a אב', 'abcd אבגדה']
         s = self.filled(rows)
-        s.test_bidi_set_generation(0xFFFFFFFF)
+        s.test_bidi_set_generation(0xFFFFFFFFFFFFFFFF)
         self.warm(s)
         before = self.vmaps(s)
         self.ae(len(set(before)), 5)
@@ -1249,8 +1263,9 @@ class TestBidiReorder(BaseTest):
         s.pause_rendering(True, 1000)
         self.frame(s)
         s.resize(5, 6)
-        self.assertGreater(self.frame(s)[0], 0)
-        f = build()
+        self.ae(self.frame(s)[0], 3)  # the three paragraphs with a right-to-left run
+        # the oracle never rendered at the old size, so it holds no entry a stale lookup could reuse
+        f = self.filled(rows)
         f.resize(5, 6)
         self.frame(f)
         self.ae(self.state(s), self.state(f))
