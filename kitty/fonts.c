@@ -366,8 +366,8 @@ current_sprite_index(const GPUSpriteTracker *sprite_tracker) {
     return sprite_tracker->z * (sprite_tracker->xnum * sprite_tracker->ynum) + sprite_tracker->y * sprite_tracker->xnum + sprite_tracker->x;
 }
 
-static SpritePosition *
-sprite_position_for(FontGroup *fg, RunFont rf, glyph_index *glyphs, unsigned glyph_count, uint8_t ligature_index, unsigned cell_count, uint8_t key_tag) {
+static inline __attribute__((always_inline)) SpritePosition *
+sprite_position_for_impl(FontGroup *fg, RunFont rf, glyph_index *glyphs, unsigned glyph_count, uint8_t ligature_index, unsigned cell_count, const uint8_t key_tag) {
     bool created;
     Font *font = fg->fonts + rf.font_idx;
     uint8_t subscale = ((rf.subscale_n & 0xf) << 4) | (rf.subscale_d & 0xf);
@@ -387,6 +387,16 @@ sprite_position_for(FontGroup *fg, RunFont rf, glyph_index *glyphs, unsigned gly
         return NULL;
     }
     return s;
+}
+
+static SpritePosition *
+sprite_position_for(FontGroup *fg, RunFont rf, glyph_index *glyphs, unsigned glyph_count, uint8_t ligature_index, unsigned cell_count) {
+    return sprite_position_for_impl(fg, rf, glyphs, glyph_count, ligature_index, cell_count, 0);
+}
+
+static SpritePosition *
+sprite_position_for_rtl(FontGroup *fg, RunFont rf, glyph_index *glyphs, unsigned glyph_count, uint8_t ligature_index, unsigned cell_count) {
+    return sprite_position_for_impl(fg, rf, glyphs, glyph_count, ligature_index, cell_count, SPRITE_KEY_RTL);
 }
 
 void
@@ -1214,7 +1224,8 @@ render_box_cell(FontGroup *fg, RunFont rf, CPUCell *cpu_cell, GPUCell *gpu_cell,
 #define sp global_glyph_render_scratch.sprite_positions
     for (unsigned ligature_index = 0; ligature_index < num_cells; ligature_index++) {
         sp[ligature_index] =
-            sprite_position_for(fg, rf, global_glyph_render_scratch.glyphs, num_glyphs, ligature_index, num_cells, rtl_group ? SPRITE_KEY_RTL : 0);
+            rtl_group ? sprite_position_for_rtl(fg, rf, global_glyph_render_scratch.glyphs, num_glyphs, ligature_index, num_cells) :
+                        sprite_position_for(fg, rf, global_glyph_render_scratch.glyphs, num_glyphs, ligature_index, num_cells);
         if (sp[ligature_index] == NULL) failed;
         sp[ligature_index]->colored = false;
         if (!sp[ligature_index]->rendered) all_rendered = false;
@@ -1399,7 +1410,9 @@ render_group(
     for (unsigned i = 0, ligature_index = 0; i < num_cells; i++) {
         bool is_repeat_sprite =
             is_infinite_ligature && i > 1 && i + 1 < num_glyphs && glyphs[i] == glyphs[i - 1] && glyphs[i] == glyphs[i - 2] && glyphs[i] == glyphs[i + 1];
-        sp[i] = is_repeat_sprite ? sp[i - 1] : sprite_position_for(fg, rf, glyphs, glyph_count, ligature_index++, num_cells, rtl_group ? SPRITE_KEY_RTL : 0);
+        sp[i] = is_repeat_sprite ? sp[i - 1] :
+            rtl_group ? sprite_position_for_rtl(fg, rf, glyphs, glyph_count, ligature_index++, num_cells) :
+                        sprite_position_for(fg, rf, glyphs, glyph_count, ligature_index++, num_cells);
         if (!sp[i]) failed;
         if (!sp[i]->rendered) all_rendered = false;
     }
@@ -1546,7 +1559,6 @@ typedef struct {
 
 typedef struct {
     uint32_t previous_cluster;
-    BackwardRun backward;
     bool prev_was_special, prev_was_empty;
     CellData current_cell_data;
     Group *groups;
@@ -1559,6 +1571,7 @@ typedef struct {
 } GroupState;
 
 static GroupState group_state = {0};
+static BackwardRun backward_run = {0};
 
 static bool
 ensure_group_glyph_storage(size_t n) {
@@ -1618,7 +1631,7 @@ restore_shaped_run(CPUCell *first_cpu_cell, GPUCell *first_gpu_cell, index_type 
 static inline __attribute__((always_inline)) void
 load_backward_run(CPUCell *cpu_cell, index_type num_cells, const TextCache *tc, ListOfChars *lc) {
     // Same cells as load_hb_buffer() puts into the buffer, in the same order
-    BackwardRun *b = &group_state.backward;
+    BackwardRun *b = &backward_run;
     b->num_cells = 0;
     uint32_t offset = 0;
     for (; num_cells; cpu_cell++, num_cells--) {
@@ -1658,8 +1671,8 @@ shape_impl(
     group_state.last_gpu_cell = first_gpu_cell + (num_cells ? num_cells - 1 : 0);
     load_hb_buffer(first_cpu_cell, num_cells, tc, &lc);
     if (dir != DIRECTION_GUESS) hb_buffer_set_direction(harfbuzz_buffer, dir == DIRECTION_RTL ? HB_DIRECTION_RTL : HB_DIRECTION_LTR);
-    group_state.backward.active = dir == DIRECTION_GUESS && hb_buffer_get_direction(harfbuzz_buffer) == HB_DIRECTION_RTL;
-    if (group_state.backward.active) load_backward_run(first_cpu_cell, num_cells, tc, &lc);
+    backward_run.active = dir == DIRECTION_GUESS && hb_buffer_get_direction(harfbuzz_buffer) == HB_DIRECTION_RTL;
+    if (backward_run.active) load_backward_run(first_cpu_cell, num_cells, tc, &lc);
 
     size_t num_features = fobj->num_ffs_hb_features;
     if (num_features && !disable_ligature) num_features--; // the last feature is always -calt
@@ -1762,16 +1775,16 @@ ligature_type_from_glyph_name(const char *glyph_name, SpacerStrategy strategy) {
 
 // Called per glyph from group_normal(): when gcc outlines it, every shaped run pays the call
 static inline __attribute__((always_inline)) unsigned int
-consume_cells_for_glyph(uint32_t cluster, uint32_t num_codepoints_used_by_glyph, const TextCache *tc, ListOfChars *lc) {
+consume_cells_for_glyph(const bool backward, uint32_t cluster, uint32_t num_codepoints_used_by_glyph, const TextCache *tc, ListOfChars *lc) {
     // Returns the number of cells completed by the glyph, which is the last
     // glyph of its cluster when num_codepoints_used_by_glyph is non-zero
     unsigned int num_cells_consumed = 0;
-    if (G(backward).active) {
+    if (backward) {
         // Clusters only decrease, so once the glyph is done every codepoint
         // from cluster to the end of the text has been used, completing every
         // remaining cell that starts there
         if (!num_codepoints_used_by_glyph) return 0;
-        BackwardRun *b = &G(backward);
+        BackwardRun *b = &backward_run;
         while (b->num_remaining && b->cells[b->num_remaining - 1].first_codepoint >= cluster)
             num_cells_consumed += b->cells[--b->num_remaining].width;
         num_cells_consumed = MIN(num_cells_consumed, G(num_cells) - G(cell_idx));
@@ -1875,7 +1888,7 @@ static LigatureType *ligature_types = NULL;
 static size_t ligature_types_sz = 0;
 
 static inline __attribute__((always_inline)) void
-group_iosevka(Font *font, hb_font_t *hbf, const TextCache *tc, ListOfChars *lc) {
+group_iosevka(const bool backward, Font *font, hb_font_t *hbf, const TextCache *tc, ListOfChars *lc) {
     // Group as per algorithm discussed in: https://github.com/be5invis/Iosevka/issues/1007
     if (ligature_types_sz <= G(num_glyphs)) {
         ligature_types_sz = G(num_glyphs) + 16;
@@ -1925,14 +1938,14 @@ group_iosevka(Font *font, hb_font_t *hbf, const TextCache *tc, ListOfChars *lc) 
                 current_group->num_cells += num_left;
                 G(cell_idx) += num_left;
             }
-        } else current_group->num_cells += consume_cells_for_glyph(cluster, num_codepoints_used_by_glyph, tc, lc);
+        } else current_group->num_cells += consume_cells_for_glyph(backward, cluster, num_codepoints_used_by_glyph, tc, lc);
         if (end_current_group && current_group->num_cells) G(group_idx)++;
         G(glyph_idx)++;
     }
 }
 
 static inline __attribute__((always_inline)) void
-group_normal(Font *font, hb_font_t *hbf, const TextCache *tc, ListOfChars *lc) {
+group_normal(const bool backward, Font *font, hb_font_t *hbf, const TextCache *tc, ListOfChars *lc) {
     /* Now distribute the glyphs into groups of cells
      * Considerations to keep in mind:
      * Group sizes should be as small as possible for best performance
@@ -1958,7 +1971,7 @@ group_normal(Font *font, hb_font_t *hbf, const TextCache *tc, ListOfChars *lc) {
         glyph_index glyph_id = G(info)[G(glyph_idx)].codepoint;
         LigatureType ligature_type = ligature_type_for_glyph(hbf, glyph_id, font->spacer_strategy);
         cluster = G(info)[G(glyph_idx)].cluster;
-        if (G(backward).active) {
+        if (backward) {
             // the cell cursor does not follow the glyphs, use the first codepoint of the glyph's cluster
             char_type cc = shape_buffer.codepoints[cluster];
             G(current_cell_data).current_codepoint = (cc == VS15 || cc == VS16) ? 0 : cc;
@@ -2017,7 +2030,7 @@ group_normal(Font *font, hb_font_t *hbf, const TextCache *tc, ListOfChars *lc) {
                 G(cell_idx) += num_left;
             }
         } else {
-            unsigned int num_cells_consumed = consume_cells_for_glyph(cluster, num_codepoints_used_by_glyph, tc, lc);
+            unsigned int num_cells_consumed = consume_cells_for_glyph(backward, cluster, num_codepoints_used_by_glyph, tc, lc);
             if (num_cells_consumed) {
                 current_group->num_cells += num_cells_consumed;
                 if (!is_special) { // not a ligature, end the group
@@ -2035,6 +2048,12 @@ group_normal(Font *font, hb_font_t *hbf, const TextCache *tc, ListOfChars *lc) {
     }
 }
 
+// Kept out of line so the left to right grouping carries no direction tests
+static __attribute__((noinline)) void
+group_backward(Font *font, hb_font_t *hbf, const TextCache *tc, ListOfChars *lc) {
+    if (font->spacer_strategy == SPACERS_IOSEVKA) group_iosevka(true, font, hbf, tc, lc);
+    else group_normal(true, font, hbf, tc, lc);
+}
 
 static inline __attribute__((always_inline)) float
 shape_run_impl(
@@ -2065,8 +2084,9 @@ shape_run_impl(
     if (font->spacer_strategy == SPACER_STRATEGY_UNKNOWN) detect_spacer_strategy(hbf, font, tc);
     if (dir == DIRECTION_GUESS) shape(first_cpu_cell, first_gpu_cell, num_cells, hbf, font, disable_ligature, tc);
     else shape_directed(first_cpu_cell, first_gpu_cell, num_cells, hbf, font, disable_ligature, tc, dir);
-    if (font->spacer_strategy == SPACERS_IOSEVKA) group_iosevka(font, hbf, tc, lc);
-    else group_normal(font, hbf, tc, lc);
+    if (backward_run.active) group_backward(font, hbf, tc, lc);
+    else if (font->spacer_strategy == SPACERS_IOSEVKA) group_iosevka(false, font, hbf, tc, lc);
+    else group_normal(false, font, hbf, tc, lc);
 #if 0
         static char dbuf[1024];
         // You can also generate this easily using hb-shape --show-extents --cluster-level=1 --shapers=ot /path/to/font/file text
@@ -2894,8 +2914,8 @@ finalize(void) {
     free(group_state.groups);
     free(group_state.info_storage);
     free(group_state.pos_storage);
-    free(group_state.backward.cells);
-    group_state.backward = (BackwardRun){0};
+    free(backward_run.cells);
+    backward_run = (BackwardRun){0};
     group_state.groups = NULL;
     group_state.info_storage = NULL;
     group_state.pos_storage = NULL;
