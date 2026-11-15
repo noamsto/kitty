@@ -1,7 +1,9 @@
 #!/usr/bin/env python
 # License: GPLv3
 
+import shutil
 import struct
+import subprocess
 from collections import namedtuple
 
 from kitty.fast_data_types import test_screen_update_cell_data
@@ -676,3 +678,67 @@ class TestBidiReorder(BaseTest):
         self.ae(self.refresh(s, 1), (2, 1, 0, 3, 4))
         s.scroll(1, True)
         self.ae(self.refresh(s, 0), (2, 1, 0, 3, 4))
+
+    def test_bdsm_explicit_disables_reordering(self):
+        # CSI 8 l changes only what rows written afterwards are stamped with
+        s = self.screen()
+        for y in range(2):
+            parse_bytes(s, f'\x1b[{y + 1};1H'.encode())
+            s.draw(MIXED)
+        before = self.uploaded(s, 0), self.uploaded(s, 1)
+        self.ae([self.v2l(s, y) for y in range(2)], [MIXED_V2L] * 2)
+        reordered = self.fresh_sprites(MIXED, cols=10)
+        f = self.create_screen(cols=10, lines=2, options={})  # never sent CSI 8 h
+        f.draw(MIXED)
+        plain = self.sprites(self.uploaded(f, 0))
+        parse_bytes(s, b'\x1b[8l')
+        self.ae((self.uploaded(s, 0), self.uploaded(s, 1)), before)
+        # overwriting a stamped row keeps its stamp
+        parse_bytes(s, b'\x1b[1;1H')
+        s.draw(MIXED)
+        self.ae((self.refresh(s, 0), self.sprites(self.uploaded(s, 0))), (MIXED_V2L, reordered))
+        # a fresh row is not stamped
+        parse_bytes(s, b'\x1b[4;1H')
+        s.draw(MIXED)
+        self.ae((self.refresh(s, 3), self.memo(s, 3), self.sprites(self.uploaded(s, 3))), (None, NONE, plain))
+        self.ae(self.v2l(s, 0), MIXED_V2L)
+
+    def test_tmux_like_opt_out(self):
+        # an application on the alternate screen toggling BDSM leaves the main screen's rows as they were
+        for end in (b'\x1b[8l\x1b[8h', b'\x1b[8l'):
+            with self.subTest(end=end):
+                s = self.screen()
+                s.draw(MIXED)
+                parse_bytes(s, b'\r\n')
+                s.draw(A)
+                v2l = [self.refresh(s, y) for y in range(2)]
+                self.ae(v2l[0], MIXED_V2L)
+                self.assertIsNotNone(v2l[1])
+                sprites = [self.sprites(self.uploaded(s, y)) for y in range(2)]
+                memos = [self.memo(s, y) for y in range(2)]
+                parse_bytes(s, b'\x1b[?1049h\x1b[8h')
+                s.draw(MIXED)
+                parse_bytes(s, b'\x1b[8l')
+                s.draw(A)
+                parse_bytes(s, b'\x1b[8h' + end + b'\x1b[?1049l')
+                self.ae([self.refresh(s, y) for y in range(2)], v2l)
+                self.ae([self.sprites(self.uploaded(s, y)) for y in range(2)], sprites)
+                self.ae([self.memo(s, y) for y in range(2)], memos)
+
+    def test_arabic_joining_font(self):
+        if not shutil.which('fc-match'):
+            self.skipTest('fc-match is not available')
+        path = subprocess.run(['fc-match', '-f', '%{file}', ':charset=0627'], capture_output=True, text=True).stdout.strip()
+        if not path:
+            self.skipTest('no font covers U+0627')
+        word = 'سلام'  # seen lam alef meem: joins to its neighbours in a shaping font
+        with setup_for_testing(main_face_path=path):
+            alone = self.fresh_sprites(word, cols=4)
+            letters = [self.fresh_sprites(ch, cols=1) for ch in word]
+            if alone[::-1] == [x[0] for x in letters]:
+                self.skipTest(f'{path} does not join Arabic letters')
+            s = self.screen(cols=10)
+            s.draw('ab ' + word)
+            v2l = (0, 1, 2, 6, 5, 4, 3) + ID10[7:]
+            self.ae(self.refresh(s, 0), v2l)
+            self.ae(self.sprites(self.uploaded(s, 0))[3:7], alone)
