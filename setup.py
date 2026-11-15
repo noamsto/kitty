@@ -412,19 +412,19 @@ def xxhash_flags() -> tuple[list[str], list[str]]:
     return pkg_config('libxxhash', '--cflags-only-I'), pkg_config('libxxhash', '--libs')
 
 
-def at_least_version(package: str, major: int, minor: int = 0) -> None:
-    q = f'{major}.{minor}'
+def at_least_version(package: str, major: int, minor: int = 0, patch: int = 0) -> None:
+    q = f'{major}.{minor}.{patch}' if patch else f'{major}.{minor}'
     if subprocess.run([PKGCONFIG, package, f'--atleast-version={q}']).returncode != 0:
-        qmajor = qminor = 0
+        qmajor = qminor = qpatch = 0
         try:
             ver = subprocess.check_output([PKGCONFIG, package, '--modversion']).decode('utf-8').strip()
-            m = re.match(r'(\d+).(\d+)', ver)
+            m = re.match(r'(\d+).(\d+)(?:.(\d+))?', ver)
             if m is not None:
-                qmajor, qminor = map(int, m.groups())
+                qmajor, qminor, qpatch = (int(x or 0) for x in m.groups())
         except Exception:
             ver = 'not found'
-        if qmajor < major or (qmajor == major and qminor < minor):
-            raise SystemExit(f'{error(package)} >= {major}.{minor} is required, found version: {ver}')
+        if (qmajor, qminor, qpatch) < (major, minor, patch):
+            raise SystemExit(f'{error(package)} >= {q} is required, found version: {ver}')
 
 
 def cc_version() -> Tuple[List[str], Tuple[int, int]]:
@@ -812,6 +812,7 @@ def kitty_env(args: Options) -> Env:
         platform_libs.extend(pkg_config('libbrotlidec', '--libs'))
     cflags.extend(pkg_config('harfbuzz', '--cflags-only-I'))
     platform_libs.extend(pkg_config('harfbuzz', '--libs'))
+    at_least_version('fribidi', 1, 0, 8)  # CVE-2019-18397
     cflags.extend(pkg_config('fribidi', '--cflags-only-I'))
     platform_libs.extend(pkg_config('fribidi', '--libs'))
     pylib = get_python_flags(args, cflags)
