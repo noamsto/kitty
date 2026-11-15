@@ -1040,7 +1040,8 @@ class TestBidiReorder(BaseTest):
             self.frame(f)
             return self.vmaps(f)[0], self.lv(f, 0), self.fresh_sprites(text, pixel_scroll=False)
 
-        # at scroll 2 the view keeps its lines, but the two of them that moved from the screen into the history resolve;
+        # at scroll 2 the view keeps its lines: the one pushed into the history gets a new id, and the screen line below it
+        # resolves because the index dropped the screen entries;
         # at scroll 10 the view slides over the ring and every row shows another line
         for scroll, resolves in ((2, 2), (10, 4)):
             with self.subTest(scroll=scroll):
@@ -1263,7 +1264,7 @@ class TestBidiReorder(BaseTest):
         s.pause_rendering(True, 1000)
         self.frame(s)
         s.resize(5, 6)
-        self.ae(self.frame(s)[0], 3)  # the three paragraphs with a right-to-left run
+        self.ae(self.frame(s)[0], 3)  # P2 and P3 on the screen, and P1 in the pixel scroll row above it
         # the oracle never rendered at the old size, so it holds no entry a stale lookup could reuse
         f = self.filled(rows)
         f.resize(5, 6)
