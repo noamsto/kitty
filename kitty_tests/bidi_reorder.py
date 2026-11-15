@@ -381,3 +381,68 @@ class TestBidiReorder(BaseTest):
         s.test_update_overlay_text('')
         self.ae((self.refresh(s, 0), styles(self.uploaded(s, 0))[:6]), ((0, 1, 2, 5, 4, 3) + ID10[6:], visual))
         self.assert_shaped(s, 0, self.fresh_sprites('abc' + A, cols=10))
+
+    def test_split_paragraph_reshapes_lower_part(self):
+        # the split changes row 1 to 0,0,0,1,0: paused frames show the snapshot, so a split made during the pause shows once unpaused
+        def row1(s):
+            # sprites and levels of row 1 in a new frame
+            return self.sprites(self.uploaded(s, 1)), self.levels(s, 1)
+
+        fresh = self.fresh_sprites('(12ב')
+        for split_before_pause, paused_frames in ((False, 0), (False, 1), (False, 2), (True, 1), (True, 2)):
+            with self.subTest(split_before_pause=split_before_pause, paused_frames=paused_frames):
+                s = self.paragraph('אבגדה', '(12ב')
+                unsplit = row1(s)
+                self.ae((unsplit[1], self.memo(s, 1)), ((1, 2, 2, 1, 0), RTL))
+                self.assertNotEqual(unsplit[0], fresh)
+                split = (fresh, (0, 0, 0, 1, 0))
+                in_snapshot = split if split_before_pause else unsplit
+                if split_before_pause:
+                    self.split(s)
+                if paused_frames:
+                    s.pause_rendering(True, 1000)
+                for _ in range(paused_frames):
+                    self.ae(row1(s), in_snapshot)
+                if not split_before_pause:
+                    self.split(s)
+                    if paused_frames:
+                        self.ae(row1(s), in_snapshot)
+                self.ae(s.linebuf.dirty_lines(), [0])  # paused frames shape the snapshot's rows, not the live ones
+                if paused_frames:
+                    s.pause_rendering(False)
+                self.ae(row1(s), split)
+
+    def test_snapshot_carries_stamp(self):
+        # no live frame runs, so only the snapshot's own flag can give a paused frame maps
+        s = self.create_screen(cols=10, lines=5, scrollback=5, options={})
+        visual = (0, 1, 2, 5, 4, 3)
+        for stamped in (False, True):
+            with self.subTest(stamped=stamped):
+                if stamped:
+                    parse_bytes(s, b'\x1b[8h\r')
+                draw_coloured(s, 'abc' + A)
+                logical = [s.cell_style_idx(0, x) for x in range(6)]
+                s.pause_rendering(True, 1000)
+                row, v2l = styles(self.uploaded(s, 0))[:6], self.v2l(s, 0)
+                s.pause_rendering(False)
+                if stamped:
+                    self.ae((v2l, row), (visual + ID10[6:], [logical[v] for v in visual]))
+                else:
+                    self.ae((v2l, row), (None, logical))
+
+    def test_paused_style_table_gc_keeps_permutation(self):
+        # the paused walker uploads every snapshot row, so a full re-upload after a style remap is still in visual order
+        s = self.screen(cols=5)
+        parse_bytes(s, b'\x1b[3H')
+        draw_coloured(s, 'abcde', first_colour=100)
+        s.erase_in_line(2)
+        s.cursor_position(1, 1)
+        draw_coloured(s, NSI)
+        test_screen_update_cell_data(s)
+        s.pause_rendering(True, 1000)
+        test_screen_update_cell_data(s)
+        before = [s.cell_style_idx(0, x) for x in range(5)]
+        s.test_gc_style_table()
+        logical = [s.cell_style_idx(0, x) for x in range(5)]
+        self.assertNotEqual(before, logical)
+        self.ae(styles(self.uploaded(s, 0)), [logical[NSI_V2L[v]] for v in range(5)])

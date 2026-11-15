@@ -4618,6 +4618,7 @@ screen_pause_rendering(Screen *self, bool pause, int for_in_ms) {
             return false;
         }
     }
+    self->paused_rendering.linebuf->bidi_stamped = self->linebuf->bidi_stamped;
     Line line = {.text_cache = self->text_cache};
     for (index_type y = 0; y < num_rows; y++) {
         index_type lnum;
@@ -4987,19 +4988,26 @@ bidi_render_line(Screen *self, BidiMaps *b, FONTS_DATA_HANDLE fonts_data, Line *
     b->render_count++;
 }
 
-// Not inlined, so that screen_update_cell_data() pays one branch for it
-__attribute__((noinline)) static bool
-update_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE fonts_data, bool cursor_has_moved, bool is_overlay_active, bool force_history_render) {
-    if (OPT(force_ltr)) return false;
+// The screen's maps, allocated by its first walker upload, sized for the render rows and set up for an upload from source
+static BidiMaps *
+bidi_maps_for_upload(Screen *self, const LineBuf *source) {
     BidiMaps *b = self->bidi_maps;
     if (!b) {
         if (!(b = self->bidi_maps = calloc(1, sizeof(BidiMaps)))) fatal("Out of memory");
         b->force_ltr_seen = OPT(force_ltr);
     }
-    const unsigned int render_lines = render_lines_for_screen(self);
-    if (!bidi_maps_ensure(b, render_lines, self->columns)) fatal("Out of memory allocating bidi maps");
-    b->source = self->linebuf;
+    if (!bidi_maps_ensure(b, render_lines_for_screen(self), self->columns)) fatal("Out of memory allocating bidi maps");
+    b->source = source;
     b->valid = false;
+    return b;
+}
+
+// Not inlined, so that screen_update_cell_data() pays one branch for it
+__attribute__((noinline)) static bool
+update_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE fonts_data, bool cursor_has_moved, bool is_overlay_active, bool force_history_render) {
+    if (OPT(force_ltr)) return false;
+    BidiMaps *b = bidi_maps_for_upload(self, self->linebuf);
+    const unsigned int render_lines = render_lines_for_screen(self);
     const BidiRows src = {
         .screen = self,
         .linebuf = self->linebuf,
@@ -5048,6 +5056,38 @@ update_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE fonts_data,
     b->valid = true;
     return true;
 }
+
+// Not inlined, so that screen_update_cell_data() pays one branch for it. The
+// snapshot's rows are the render rows and its paragraphs are its own: its top
+// row continues no row above it.
+__attribute__((noinline)) static bool
+update_paused_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE fonts_data) {
+    if (OPT(force_ltr)) return false;
+    LineBuf *linebuf = self->paused_rendering.linebuf;
+    BidiMaps *b = bidi_maps_for_upload(self, linebuf);
+    const BidiRows src = {.screen = self, .linebuf = linebuf, .lowest = 0, .end = (int)linebuf->ynum, .to_render_row = 0};
+    const index_type row_offset = self->paused_rendering.pixel_scroll;
+    bool continued = false;
+    for (index_type y = 0; y < linebuf->ynum;) {
+        const index_type last = (index_type)bidi_map_paragraph(b, &src, (int)y, &continued, BIDI_NO_RENDER_ROW);
+        for (; y <= last; y++) {
+            linebuf_init_line(linebuf, y);
+            Line *line = linebuf->line;
+            const uint8_t *levels = b->active[y] ? b->levels + (size_t)y * b->cols : NULL;
+            // As in the paused loop of screen_update_cell_data(), plus the rows whose levels changed
+            if (line->attrs.has_dirty_text || bidi_levels_differ(line, levels)) {
+                const index_type lnum = y < row_offset ? self->lines : y - row_offset;
+                bidi_render_line(self, b, fonts_data, line, lnum, &self->paused_rendering.cursor, levels);
+                if (line->attrs.has_dirty_text && screen_has_marker(self)) mark_text_in_line(self->marker, line, &self->as_ansi_buf);
+                linebuf_mark_line_clean(linebuf, y);
+            }
+            if (levels) update_line_data_permuted(line, y, address, b->v2l + (size_t)y * b->cols);
+            else update_line_data(line, y, address);
+        }
+    }
+    b->valid = true;
+    return true;
+}
 // }}}
 
 void
@@ -5058,18 +5098,20 @@ screen_update_cell_data(Screen *self, void *address, FONTS_DATA_HANDLE fonts_dat
             // The GPU buffer was invalidated so every row must be written. The
             // paused linebuf has exactly render_lines_for_screen() rows.
             const index_type row_offset = self->paused_rendering.pixel_scroll;
-            for (index_type y = 0; y < linebuf->ynum; y++) {
-                linebuf_init_line(linebuf, y);
-                if (linebuf->line->attrs.has_dirty_text) {
-                    // The extra leading row is never the cursor row
-                    const index_type lnum = y < row_offset ? self->lines : y - row_offset;
-                    render_line(fonts_data, linebuf->line, lnum, &self->paused_rendering.cursor, self->disable_ligatures, self->lc);
-                    // Cell images are not rendered here: this would modify the live grman using snapshot row numbers
-                    if (linebuf->line->attrs.has_dirty_text && screen_has_marker(self)) mark_text_in_line(self->marker, linebuf->line, &self->as_ansi_buf);
-                    linebuf_mark_line_clean(linebuf, y);
+            if (UNLIKELY(linebuf->bidi_stamped) && update_paused_cell_data_bidi(self, address, fonts_data)) {
+            } else
+                for (index_type y = 0; y < linebuf->ynum; y++) {
+                    linebuf_init_line(linebuf, y);
+                    if (linebuf->line->attrs.has_dirty_text) {
+                        // The extra leading row is never the cursor row
+                        const index_type lnum = y < row_offset ? self->lines : y - row_offset;
+                        render_line(fonts_data, linebuf->line, lnum, &self->paused_rendering.cursor, self->disable_ligatures, self->lc);
+                        // Cell images are not rendered here: this would modify the live grman using snapshot row numbers
+                        if (linebuf->line->attrs.has_dirty_text && screen_has_marker(self)) mark_text_in_line(self->marker, linebuf->line, &self->as_ansi_buf);
+                        linebuf_mark_line_clean(linebuf, y);
+                    }
+                    update_line_data(linebuf->line, y, address);
                 }
-                update_line_data(linebuf->line, y, address);
-            }
         }
         return;
     }
