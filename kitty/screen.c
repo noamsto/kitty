@@ -5000,6 +5000,8 @@ bidi_scrolled_id(uint64_t id, uint64_t k, uint64_t pushed, bool on_main) {
 //   zeroes its count but keeps num_pushed, with no generation bump), so a pushed row can be gone: the verify then rejects
 //   the paragraph, and ids naming cleared lines never collide with a live line's id, which keeps a kept entry correct.
 // The rows scrolled in get no entry, and a pushed row is forced dirty, so the walker checks it when on or below the view.
+// para_rows moves with the base direction inside it and is never renamed: the walker compares it with the record of the
+// current first row, so a direction changed since the context misses.
 static void
 bidi_cache_use_context(Screen *self, BidiMaps *b, const BidiCacheContext *now, bool live) {
     const BidiCacheContext c = b->ctx;
@@ -5081,6 +5083,9 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued, in
     const int min_render_row = y0 + src->to_render_row, end_render_row = MIN(last + src->to_render_row + 1, (int)b->rows);
     const uint64_t first_id = bidi_row_id(src, first), last_id = bidi_row_id(src, last);
     const uint32_t num_rows = (uint32_t)(last - first + 1);
+    // The paragraph takes the record of its first row
+    const LineAttrs lead = *bidi_row_attrs(src, first);
+    const uint32_t key_rows = num_rows | (uint32_t)(lead.bidi_rtl | lead.bidi_auto << 1) << BIDI_KEY_DIR_SHIFT;
     // A hit: the same lines with the same text in the same paragraph at the same render rows as when the maps were last written
     // A shortcut: the same as a hit except that dirty rows may have signatures to check, and no row is above the view
     bool hit = cacheable, shortcut = cacheable && first == y0;
@@ -5100,7 +5105,7 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued, in
         } else if ((index_type)r == skip_render_row) cacheable = false;
         else if (hit || shortcut) {
             const uint64_t id = bidi_row_id(src, y);
-            const bool same = id && b->row_id[r] == id && b->para_first[r] == first_id && b->para_last[r] == last_id && b->para_rows[r] == num_rows;
+            const bool same = id && b->row_id[r] == id && b->para_first[r] == first_id && b->para_last[r] == last_id && b->para_rows[r] == key_rows;
             hit = hit && same && !a->has_dirty_text;
             shortcut = shortcut && same && (!a->has_dirty_text || b->sig_valid[r]);
         }
@@ -5117,30 +5122,33 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued, in
         rtl |= a->bidi_stamp == BIDI_STAMP_RTL;
         placeholders |= a->has_image_placeholders;
     }
+    const bool resolved = (rtl || lead.bidi_rtl) && !placeholders;
     // FriBidi reads only the fed types after the retype, the brackets, n_trim (the blank tail), the base direction and the row
-    // layout; the signature captures all of them per row, and the N0 budget decision follows from them. A row above the view is
-    // excluded because a recycled history row there need not change any checked row. Any other input fed to FriBidi, such as a
-    // paragraph direction or a leading mark, must join this condition. Rows below the view are clean here, so the dirty rows are
-    // all on view.
-    if (cacheable && shortcut && rtl && !placeholders) {
+    // layout; the signature captures all of them per row but the base direction, which is in the key that the hit and the
+    // shortcut compare, and the N0 budget decision follows from them. A row above the view is excluded because a recycled
+    // history row there need not change any checked row. Rows below the view are clean here, so the dirty rows are all on view.
+    if (cacheable && shortcut && resolved) {
         bool same = true;
         for (int y = first; y <= last && same; y++) {
             if (bidi_row_attrs(src, y)->has_dirty_text) same = bidi_row_signature_matches(b, around[y - y0], tc, (index_type)(y + src->to_render_row));
         }
         if (same) return last;
     }
-    const bool resolved = rtl && !placeholders;
     if (resolved) {
-        bidi_resolve_paragraph(b, around + (first - y0), last - first + 1, tc, first + src->to_render_row, min_render_row, skip_render_row);
+        bidi_resolve_paragraph(
+            b, around + (first - y0), last - first + 1, tc, bidi_record_base(lead), first + src->to_render_row, min_render_row, skip_render_row);
     } else {
-        for (int r = min_render_row; r < end_render_row; r++) bidi_set_row_inactive(b, r);
+        for (int r = min_render_row; r < end_render_row; r++) {
+            bidi_set_row_inactive(b, r);
+            b->rtl[r] = false;
+        }
     }
     const bool keep = cacheable && (!resolved || b->resolve_cacheable);
     for (int r = min_render_row; r < end_render_row; r++) {
         b->row_id[r] = keep ? bidi_row_id(src, r - src->to_render_row) : 0;
         b->para_first[r] = first_id;
         b->para_last[r] = last_id;
-        b->para_rows[r] = num_rows;
+        b->para_rows[r] = key_rows;
         b->sig_valid[r] = keep && resolved && b->resolve_signed;
     }
     return last;
@@ -5217,6 +5225,7 @@ update_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE fonts_data,
             bidi_set_row_inactive(b, r);
             b->row_id[r] = 0;
             b->sig_valid[r] = false;
+            b->rtl[r] = false;
             update_line_data_blank(self->columns, r++, address);
             continue;
         }
@@ -8927,6 +8936,15 @@ test_bidi_levels(Screen *self, PyObject *val) {
 }
 
 static PyObject *
+test_bidi_paragraph_rtl(Screen *self, PyObject *val) {
+    const index_type r = PyLong_AsUnsignedLong(val);
+    if (PyErr_Occurred()) return NULL;
+    const BidiMaps *b = self->bidi_maps;
+    if (!screen_bidi_maps_usable(self) || r >= b->rows) Py_RETURN_NONE;
+    return PyBool_FromLong(b->rtl[r]);
+}
+
+static PyObject *
 test_bidi_set_generation(Screen *self, PyObject *val) {
     const unsigned long long n = PyLong_AsUnsignedLongLong(val);
     if (PyErr_Occurred()) return NULL;
@@ -9066,6 +9084,7 @@ static PyMethodDef methods[] = {
     METHODB(test_bidi_state, METH_NOARGS),
     METHODB(test_bidi_v2l, METH_O),
     METHODB(test_bidi_levels, METH_O),
+    METHODB(test_bidi_paragraph_rtl, METH_O),
     METHODB(test_bidi_counts, METH_NOARGS),
     METHODB(test_bidi_set_generation, METH_O),
     METHODB(test_bidi_set_scrolls, METH_O),
