@@ -4667,8 +4667,7 @@ screen_pause_rendering(Screen *self, bool pause, int for_in_ms) {
     if (record_ids) {
         bm->paused_rows = num_rows;
         bm->paused_ctx = (BidiCacheContext){
-            self->linebuf, self->linebuf->bidi_generation, self->linebuf->bidi_scrolls, self->historybuf->num_pushed,
-            (int)(self->scrolled_by + row_offset)};
+            self->linebuf, self->linebuf->bidi_generation, self->linebuf->bidi_scrolls, self->historybuf->num_pushed, (int)(self->scrolled_by + row_offset)};
     }
     copy_selections(&self->paused_rendering.selections, &self->selections);
     copy_selections(&self->paused_rendering.url_ranges, &self->url_ranges);
@@ -5201,16 +5200,11 @@ update_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE fonts_data,
     BidiMaps *b = bidi_maps_for_upload(self, self->linebuf);
     if (OPT(force_ltr)) return false;
     const int to_render_row = (int)self->scrolled_by + pixel_scroll_enabled(self);
-    const BidiCacheContext now = {
-        self->linebuf, self->linebuf->bidi_generation, self->linebuf->bidi_scrolls, self->historybuf->num_pushed, to_render_row};
+    const BidiCacheContext now = {self->linebuf, self->linebuf->bidi_generation, self->linebuf->bidi_scrolls, self->historybuf->num_pushed, to_render_row};
     bidi_cache_use_context(self, b, &now, true);
     const unsigned int render_lines = render_lines_for_screen(self);
     const BidiRows src = {
-        .screen = self,
-        .linebuf = self->linebuf,
-        .lowest = -(int)self->historybuf->count,
-        .end = self->lines,
-        .to_render_row = to_render_row};
+        .screen = self, .linebuf = self->linebuf, .lowest = -(int)self->historybuf->count, .end = self->lines, .to_render_row = to_render_row};
     // The IME pre-edit row has no map, so it is shaped and uploaded in logical order
     const index_type preedit_render_row = is_overlay_active ? self->overlay_line.ynum + src.to_render_row : BIDI_NO_RENDER_ROW;
     Line line = {.text_cache = self->text_cache};

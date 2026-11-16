@@ -2043,6 +2043,7 @@ class TestBidiReorder(BaseTest):
         # one line per frame at the bottom: only the new line's paragraph resolves, whatever the pixel scroll row holds
         for pixel_scroll in (False, True):
             with self.subTest(pixel_scroll=pixel_scroll):
+
                 def build():
                     return self.follow_screen(pixel_scroll=pixel_scroll)
 
@@ -2083,7 +2084,7 @@ class TestBidiReorder(BaseTest):
 
     def test_follow_paused(self):
         # a paused frame follows the scrolls up to the pause only, an unpaused one the rest
-        a, b, c = 'אבג', 'אב12', 'אבגדה'
+        a, b = 'אבג', 'אב12'
 
         def build():
             return self.follow_screen()
@@ -2190,6 +2191,7 @@ class TestBidiReorder(BaseTest):
         )
         for name, text, edit, resolves in cases:
             with self.subTest(name):
+
                 def scroll(s):
                     if edit:
                         self.put(s, 1, 1, edit)
