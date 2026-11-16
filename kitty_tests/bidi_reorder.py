@@ -1946,8 +1946,8 @@ class TestBidiReorder(BaseTest):
             for o in applied[:frozen] if paused else applied:
                 o(f)
             self.frame(f)
-            # a snapshot resolves its top row alone, so one continued from history, or a scrolled-back view, differs from live
-            if paused and (f.scrolled_by or f.historybuf.endswith_wrap()):
+            # a snapshot resolves its top row alone, so one continued from history differs from live
+            if paused and f.historybuf.endswith_wrap():
                 continue
             self.ae(self.state(s), self.state(f), f'seed {seed}, op {i} ({name})')
         return shortcuts
