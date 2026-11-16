@@ -37,6 +37,10 @@ typedef struct BidiMaps {
     // the first and last rows and the row count of the paragraph that wrote it. Screen ids are valid under the context only.
     uint64_t *row_id, *para_first, *para_last;
     uint32_t *para_rows;
+    // rows*cols like levels: per cell a char starts in, the FriBidi type or bracket the last resolve fed for it and whether it
+    // was a blank, 0 in the other cells; meaningful only where sig_valid
+    uint32_t *sig;
+    bool *sig_valid;
     const void *ctx_linebuf; // NULL: no screen-row entries
     uint64_t ctx_gen;
     // The live ids of the paused snapshot's rows and the live context, recorded when rendering was paused
@@ -46,6 +50,10 @@ typedef struct BidiMaps {
     uint64_t paused_ctx_gen;
     // The last resolve may be cached: false when it met a cell spanning several rows or ran out of memory
     bool resolve_cacheable;
+    // The last resolve ran FriBidi to success without skipping N0, so the signatures it wrote capture all its inputs
+    bool resolve_signed;
+    // For tests: resolve the trailing blanks of a paragraph instead of trimming them
+    bool no_trim;
     index_type cols, rows;
     // The LineBuf the maps were made from: the active linebuf, or the paused snapshot
     const void *source;
@@ -91,6 +99,8 @@ bool bidi_resolve_paragraph(
     index_type min_render_row,
     index_type skip_render_row);
 void bidi_set_row_inactive(BidiMaps *b, index_type render_row);
+// Whether the row's cells would give the signature stored for render_row; overwrites the scratch
+bool bidi_row_signature_matches(BidiMaps *b, const CPUCell *cells, const TextCache *tc, index_type render_row);
 void bidi_cache_invalidate(BidiMaps *b);
 // Drops the entries that mention a screen row, for when the screen rows were moved or the shown buffer changed
 void bidi_cache_drop_screen_entries(BidiMaps *b);
