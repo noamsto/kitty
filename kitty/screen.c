@@ -4666,8 +4666,8 @@ screen_pause_rendering(Screen *self, bool pause, int for_in_ms) {
     }
     if (record_ids) {
         bm->paused_rows = num_rows;
-        bm->paused_ctx_linebuf = self->linebuf;
-        bm->paused_ctx_gen = self->linebuf->bidi_generation;
+        bm->paused_ctx = (BidiCacheContext){
+            self->linebuf, self->linebuf->bidi_generation, self->linebuf->bidi_scrolls, self->historybuf->num_pushed, (int)(self->scrolled_by + row_offset)};
     }
     copy_selections(&self->paused_rendering.selections, &self->selections);
     copy_selections(&self->paused_rendering.url_ranges, &self->url_ranges);
@@ -4941,13 +4941,88 @@ bidi_row_id(const BidiRows *src, int y) {
     return bidi_history_line_id(src->screen->historybuf, (index_type)(-(y + 1)));
 }
 
-// Drops the entries that mention a screen row when the screen rows are read under another context than they were written
+// Whether every row of the paragraph with this key that scrolled into history from screen row y < k is on record at its old
+// render row, still in history, and fed FriBidi the same as when the paragraph's maps were written
+static bool
+bidi_pushed_rows_verify(Screen *self, BidiMaps *b, const BidiCacheContext *c, uint64_t k, uint64_t first, uint64_t last, uint32_t num_rows) {
+    const uint64_t first_y = first & BIDI_ID_SCREEN ? (first & ~BIDI_ID_SCREEN) - 1 : 0;
+    for (uint64_t y = first_y; y < k; y++) {
+        const uint64_t lnum = k - 1 - y, r = y + (uint64_t)c->view;
+        if (lnum >= self->historybuf->count || r >= b->rows) return false;
+        if (b->row_id[r] != (BIDI_ID_SCREEN | (y + 1)) || b->para_first[r] != first || b->para_last[r] != last || b->para_rows[r] != num_rows) return false;
+        if (!bidi_row_signature_matches(b, historybuf_cpu_cells(self->historybuf, (index_type)lnum), self->text_cache, (index_type)r)) return false;
+    }
+    return true;
+}
+
+// Drops the entries of a paragraph holding both old rows k - 1 and k unless its pushed rows verify. Its rows above the view
+// are exempt from the walker's dirty test, and a row edited before its push lost that evidence when the push forced it dirty.
 static void
-bidi_cache_use_context(BidiMaps *b, const void *linebuf, uint64_t generation) {
-    if (b->ctx_linebuf == linebuf && b->ctx_gen == generation) return;
-    bidi_cache_drop_screen_entries(b);
-    b->ctx_linebuf = linebuf;
-    b->ctx_gen = generation;
+bidi_cache_check_straddlers(Screen *self, BidiMaps *b, const BidiCacheContext *c, uint64_t k, bool can_verify) {
+    uint64_t ok_first = 0, ok_last = 0;
+    uint32_t ok_rows = 0;
+    for (index_type r = 0; r < b->rows; r++) {
+        const uint64_t first = b->para_first[r], last = b->para_last[r];
+        const uint32_t num_rows = b->para_rows[r];
+        if (!b->row_id[r] || !(last & BIDI_ID_SCREEN) || (last & ~BIDI_ID_SCREEN) <= k) continue;
+        if ((first & BIDI_ID_SCREEN) && (first & ~BIDI_ID_SCREEN) > k) continue;
+        if (first == ok_first && last == ok_last && num_rows == ok_rows) continue;
+        if (can_verify && bidi_pushed_rows_verify(self, b, c, k, first, last, num_rows)) {
+            ok_first = first;
+            ok_last = last;
+            ok_rows = num_rows;
+            continue;
+        }
+        for (index_type q = 0; q < b->rows; q++) {
+            if (b->para_first[q] == first && b->para_last[q] == last && b->para_rows[q] == num_rows) b->row_id[q] = 0;
+        }
+    }
+}
+
+// The id after k full-height scrolls of the line whose id was id, 0 for an alt screen row scrolled out
+static inline uint64_t
+bidi_scrolled_id(uint64_t id, uint64_t k, uint64_t pushed, bool on_main) {
+    if (!(id & BIDI_ID_SCREEN)) return id;
+    const uint64_t i = id & ~BIDI_ID_SCREEN;
+    if (i > k) return id - k;
+    // Old row i - 1 is history line k - i
+    return on_main ? pushed - (k - i) : 0;
+}
+
+// The screen-row entries are kept while the context's buffer and counters are unchanged, follow their lines through a pure
+// full-height scroll by k rows, and are dropped otherwise. A follow needs:
+// - the same buffer and generation: every row move or clear other than a full-height index, and the clear of the row it
+//   scrolled in, bumps the generation, so old row y >= k is now row y - k with its cells and dirty bit, an edit since the
+//   context having left it dirty;
+// - 0 < k < lines: else no old row is still on the screen;
+// - the history grown by exactly k on the main screen and by 0 on the alt screen: each scroll pushed its top row, so old row
+//   y < k is history line k - 1 - y, while the alt screen discards it. This does not exclude a clear of the history (CSI ? 3 J
+//   zeroes its count but keeps num_pushed, with no generation bump), so a pushed row can be gone: the verify then rejects
+//   the paragraph, and ids naming cleared lines never collide with a live line's id, which keeps a kept entry correct.
+// The rows scrolled in get no entry, and a pushed row is forced dirty, so the walker checks it when on or below the view.
+static void
+bidi_cache_use_context(Screen *self, BidiMaps *b, const BidiCacheContext *now, bool live) {
+    const BidiCacheContext c = b->ctx;
+    b->ctx = *now;
+    if (c.linebuf == now->linebuf && c.gen == now->gen && c.scrolls == now->scrolls) return;
+    const uint64_t k = now->scrolls - c.scrolls;
+    const bool on_main = now->linebuf == self->main_linebuf;
+    if (!c.linebuf || c.linebuf != now->linebuf || c.gen != now->gen || !k || k >= self->lines || now->pushed - c.pushed != (on_main ? k : 0)) {
+        bidi_cache_drop_screen_entries(b);
+        return;
+    }
+    bidi_cache_check_straddlers(self, b, &c, k, live && on_main);
+    for (index_type r = 0; r < b->rows; r++) {
+        if (!b->row_id[r]) continue;
+        b->row_id[r] = bidi_scrolled_id(b->row_id[r], k, now->pushed, on_main);
+        b->para_first[r] = bidi_scrolled_id(b->para_first[r], k, now->pushed, on_main);
+        b->para_last[r] = bidi_scrolled_id(b->para_last[r], k, now->pushed, on_main);
+        if (!b->para_last[r]) b->row_id[r] = 0;
+    }
+    // A line shown at render row r under c is shown at r - d now
+    const int64_t d = (int64_t)k - ((int64_t)now->view - c.view);
+    if (d > 0 && d < (int64_t)b->rows) bidi_cache_move_rows(b, (index_type)d);
+    b->shift_count++;
 }
 
 static const CPUCell *
@@ -5126,14 +5201,12 @@ update_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE fonts_data,
     // Allocated even under force_ltr, so that a later change of it is realised
     BidiMaps *b = bidi_maps_for_upload(self, self->linebuf);
     if (OPT(force_ltr)) return false;
-    bidi_cache_use_context(b, self->linebuf, self->linebuf->bidi_generation);
+    const int to_render_row = (int)self->scrolled_by + pixel_scroll_enabled(self);
+    const BidiCacheContext now = {self->linebuf, self->linebuf->bidi_generation, self->linebuf->bidi_scrolls, self->historybuf->num_pushed, to_render_row};
+    bidi_cache_use_context(self, b, &now, true);
     const unsigned int render_lines = render_lines_for_screen(self);
     const BidiRows src = {
-        .screen = self,
-        .linebuf = self->linebuf,
-        .lowest = -(int)self->historybuf->count,
-        .end = self->lines,
-        .to_render_row = (int)self->scrolled_by + pixel_scroll_enabled(self)};
+        .screen = self, .linebuf = self->linebuf, .lowest = -(int)self->historybuf->count, .end = self->lines, .to_render_row = to_render_row};
     // The IME pre-edit row has no map, so it is shaped and uploaded in logical order
     const index_type preedit_render_row = is_overlay_active ? self->overlay_line.ynum + src.to_render_row : BIDI_NO_RENDER_ROW;
     Line line = {.text_cache = self->text_cache};
@@ -5191,7 +5264,7 @@ update_paused_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE font
     if (OPT(force_ltr)) return false;
     // Without ids for this snapshot every id is 0, under a context no live frame has
     const bool have_ids = b->paused_ids && b->paused_rows == linebuf->ynum;
-    bidi_cache_use_context(b, have_ids ? b->paused_ctx_linebuf : NULL, have_ids ? b->paused_ctx_gen : 0);
+    bidi_cache_use_context(self, b, have_ids ? &b->paused_ctx : &(const BidiCacheContext){0}, false);
     const BidiRows src = {
         .screen = self,
         .linebuf = linebuf,
@@ -8835,6 +8908,19 @@ test_bidi_set_generation(Screen *self, PyObject *val) {
 }
 
 static PyObject *
+test_bidi_set_scrolls(Screen *self, PyObject *val) {
+    const unsigned long long n = PyLong_AsUnsignedLongLong(val);
+    if (PyErr_Occurred()) return NULL;
+    self->linebuf->bidi_scrolls = (uint64_t)n;
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+test_bidi_shifts(Screen *self, PyObject *args UNUSED) {
+    return PyLong_FromUnsignedLongLong(self->bidi_maps ? self->bidi_maps->shift_count : 0);
+}
+
+static PyObject *
 test_bidi_trim(Screen *self, PyObject *flag) {
     const int trim = PyObject_IsTrue(flag);
     if (trim < 0) return NULL;
@@ -8955,6 +9041,8 @@ static PyMethodDef methods[] = {
     METHODB(test_bidi_levels, METH_O),
     METHODB(test_bidi_counts, METH_NOARGS),
     METHODB(test_bidi_set_generation, METH_O),
+    METHODB(test_bidi_set_scrolls, METH_O),
+    METHODB(test_bidi_shifts, METH_NOARGS),
     METHODB(test_bidi_trim, METH_O),
     METHODB(test_bidi_flag_misses, METH_NOARGS),
     METHODB(test_bidi_visual_x, METH_VARARGS),

@@ -1035,10 +1035,11 @@ class TestBidiReorder(BaseTest):
             self.frame(f)
             return self.vmaps(f)[0], self.lv(f, 0), self.fresh_sprites(text, pixel_scroll=False)
 
-        # at scroll 2 the view keeps its lines: the one pushed into the history gets a new id, and the screen line below it
-        # resolves because the index dropped the screen entries;
-        # at scroll 10 the view slides over the ring and every row shows another line
-        for scroll, resolves in ((2, 2), (10, 4)):
+        # at scroll 2 the view keeps its lines: the index renames the pushed line to its history id and the screen line in place,
+        # so nothing resolves;
+        # at scroll 10 the view is capped at the full ring and slides over it: the follow moves the entries up one row, so only
+        # the pushed line, never cached below the view, resolves
+        for scroll, resolves in ((2, 0), (10, 1)):
             with self.subTest(scroll=scroll):
                 s = ring()
                 self.ae(s.historybuf.count, 4)
@@ -1079,7 +1080,8 @@ class TestBidiReorder(BaseTest):
         self.ae(self.frame(s), (0, 0))
 
     def test_cache_view_change_resolves_again(self):
-        # every trigger changes which line a render row shows (or the layout) without a dirty row: no entry may be trusted
+        # every trigger changes which line a render row shows (or the layout) without a dirty row: the entries are dropped, except
+        # that a full-height index follows its lines and keeps them
         rows = self.CACHE_ROWS[:2] + ['אב', 'xyz', 'אבגדה']
         hist = ['אבג', 'abאב', 'אב12', 'xyz', 'אבגדה', 'a', 'אבג abc']
         long_row = 'אבגדהוזחטיכלמ'
@@ -1117,20 +1119,23 @@ class TestBidiReorder(BaseTest):
         rev = tuple(range(12, -1, -1))
         # (name, build, trigger, expected maps, compare with a fresh screen, expected resolves or None for some)
         cases = (
-            ('index', lambda: self.filled(rows), lambda s: parse_bytes(s, b'\x1b[5;1H\x1bD'), self.plain_maps(rows[1:], lines=5), True, None),
+            # a full-height index follows the lines instead of dropping them: nothing resolves, and the line pushed into the pixel scroll
+            # row is a dirty one-row paragraph that the shortcut verifies
+            ('index', lambda: self.filled(rows), lambda s: parse_bytes(s, b'\x1b[5;1H\x1bD'), self.plain_maps(rows[1:], lines=5), True, 0),
             ('reverse index', lambda: self.filled(rows), lambda s: parse_bytes(s, b'\x1b[1;1H\x1bM'), self.plain_maps([''] + rows[:-1]), True, None),
             ('insert then delete line', net_zero_build, net_zero, (None, None, None, rev[3:], None), True, None),
             ('scrollback view', lambda: self.history(hist), up, self.plain_maps(hist[5:], 5, lines=3), False, None),
             ('view crossing bottom edge', bottom_build, up, (None, None, None, m[0], m[1]), False, None),
             ('view crossing top edge', top_build, down, (m[1], m[2], None, None, None), False, None),
-            # the view stays on the same lines: only the line pushed from the screen into the history changes its identity
+            # entries follow here too: the view stays on the same lines, the pushed line is renamed to its history id and the shortcut
+            # verifies it on view; the new row is below the view
             (
                 'history add while scrolled',
                 lambda: self.history(hist[:6], 2),
                 lambda s: parse_bytes(s, '\x1b[3;1H\nאב'.encode()),
                 self.plain_maps(hist[2:5], 5),
                 True,
-                1,
+                0,
             ),
             ('resize rewrap', lambda: self.drawn(long_row), lambda s: s.resize(5, 13), (rev, None, None, None, None), True, None),
         )
@@ -1226,14 +1231,14 @@ class TestBidiReorder(BaseTest):
         self.ae((self.vmaps(s)[0], self.frame(s)[0]), (self.ABC_A, 0))
 
     def test_cache_counter_wrap(self):
-        # the generation wraps from UINT64_MAX to 0: rows moved by the index must not hit the entries of the lines they replace
+        # the generation wraps from UINT64_MAX to 0: rows moved by the delete must not hit the entries of the lines they replace
         rows = ['אבג abc', 'abc אבג', 'אבגדה abc', 'a אב', 'abcd אבגדה']
         s = self.filled(rows)
         s.test_bidi_set_generation(0xFFFFFFFFFFFFFFFF)
         self.warm(s)
         before = self.vmaps(s)
         self.ae(len(set(before)), 5)
-        parse_bytes(s, b'\x1b[5;1H\x1bD')
+        parse_bytes(s, b'\x1b[1;1H\x1b[M')
         self.assertGreaterEqual(self.frame(s)[0], 1)
         self.ae(self.vmaps(s), self.plain_maps(rows[1:], lines=5))
         self.assertNotIn(self.vmaps(s)[0], before[:1])
@@ -1851,7 +1856,10 @@ class TestBidiReorder(BaseTest):
     DIFF_GROUPS = ('0123456789', 'אבגדהוזחט', 'abcdefghij', '()[]')
     DIFF_POOL = 'אבגדהוזחט' * 3 + 'abcdefghij' * 3 + '0123456789' * 2 + '  ' * 2 + '()!.'
 
-    def diff_op(self, rng, s, paused, first=False):
+    # extra (kinds, weights) of diff_op for streaming at the bottom, about 30% of the ops on top of the default ones
+    STREAM_MIX = (('stream', 'streamk', 'su'), (20, 13, 10))
+
+    def diff_op(self, rng, s, paused, first=False, mix=None):
         # (name, function of a screen): the arguments are fixed here so that a fresh screen replays the same operation
         L, C = s.lines, s.columns
         y, x = rng.randrange(L), rng.randrange(C)
@@ -1861,10 +1869,11 @@ class TestBidiReorder(BaseTest):
             return 'unpause', lambda s: s.pause_rendering(False)
         if s.scrolled_by and rng.random() < 0.4:
             return 'fwd', lambda s: s.scroll(s.historybuf.count, False)
-        kind = 'wrap' if first else rng.choices(
-            ('same', 'change', 'wrap', 'wide', 'osc66', 'scale2', 'il', 'dl', 'index', 'region', 'back', 'fwd', 'pause', 'ech', 'ich', 'crlf'),
-            (60, 6, 8, 2, 2, 1, 2, 2, 3, 2, 3, 1, 3, 2, 2, 2),
-        )[0]
+        kinds = ('same', 'change', 'wrap', 'wide', 'osc66', 'scale2', 'il', 'dl', 'index', 'region', 'back', 'fwd', 'pause', 'ech', 'ich', 'crlf')
+        weights = (60, 6, 8, 2, 2, 1, 2, 2, 3, 2, 3, 1, 3, 2, 2, 2)
+        if mix:
+            kinds, weights = kinds + mix[0], weights + mix[1]
+        kind = 'wrap' if first else rng.choices(kinds, weights)[0]
 
         def at(text):
             return lambda s: (s.cursor_position(y + 1, x + 1), s.draw(text))
@@ -1872,6 +1881,13 @@ class TestBidiReorder(BaseTest):
         def csi(seq):
             return lambda s: (s.cursor_position(y + 1, 1), parse_bytes(s, seq))
 
+        if kind in ('stream', 'streamk'):
+            texts = [''.join(rng.choices(self.DIFF_POOL, k=rng.randrange(3, 2 * C))) for _ in range(1 if kind == 'stream' else rng.randrange(2, 4))]
+            data = ''.join(text + '\r\n' for text in texts).encode()
+            return kind, lambda s: (s.cursor_position(L, 1), parse_bytes(s, data))
+        if kind == 'su':
+            seq = f'\x1b[{rng.randrange(1, L + 1)}S'.encode()
+            return 'su', lambda s: parse_bytes(s, seq)
         if kind == 'same':
             # a cell that is the only one of its character in its neighbourhood (not half a wide cell), in a class group
             cells = []
@@ -1918,7 +1934,8 @@ class TestBidiReorder(BaseTest):
             return 'ich', lambda s: (s.cursor_position(y + 1, x + 1), s.insert_characters(n))
         return 'crlf', lambda s: (s.cursor_position(y + 1, x + 1), parse_bytes(s, b'\r\n'))
 
-    def differential(self, seed, count):
+    def differential(self, seed, count, mix=None, follows=None):
+        # follows (a list) gets a 1 for each frame that followed a scroll
         rng = random.Random(seed)
 
         def new():
@@ -1926,7 +1943,7 @@ class TestBidiReorder(BaseTest):
 
         s, applied, shortcuts, paused, frozen = new(), [], 0, False, 0
         for i in range(count):
-            name, op = self.diff_op(rng, s, paused, first=i < 3)
+            name, op = self.diff_op(rng, s, paused, first=i < 3, mix=mix)
             scrolled = s.scrolled_by
             op(s)
             if name in ('pause', 'unpause'):
@@ -1938,7 +1955,10 @@ class TestBidiReorder(BaseTest):
                 # scrolled_by without unpausing
                 paused = paused and not (name in ('back', 'fwd') and s.scrolled_by != scrolled)
             dirty = s.linebuf.dirty_lines() if not paused and not s.scrolled_by else []
+            shifted = s.test_bidi_shifts() if follows is not None else 0
             resolves = self.frame(s)[0]
+            if follows is not None:
+                follows.append(int(s.test_bidi_shifts() > shifted))
             # a dirty row inside a paragraph with maps that nothing resolved again: the shortcut kept them
             if not resolves and any(self.vmaps(s)[y] is not None for y in dirty):
                 shortcuts += 1
@@ -1984,3 +2004,401 @@ class TestBidiReorder(BaseTest):
         counts = [self.differential(seed, count) for seed in range(seeds)]
         # summed because a single seed's count varies
         self.assertGreaterEqual(sum(counts), seeds * count // 15, counts)
+
+    def test_follow_random_differential(self):
+        # streaming ops among the shortcut differential's: the maps equal a fresh replay's after every frame
+        seeds = int(os.environ.get('KITTY_BIDI_DIFF_SEEDS', 3))
+        count = int(os.environ.get('KITTY_BIDI_DIFF_OPS', 150))
+        follows = []
+        for seed in range(seeds):
+            self.differential(seed, count, mix=self.STREAM_MIX, follows=follows)
+        # summed so that the test cannot pass without ever following
+        self.assertGreaterEqual(sum(follows), seeds * count // 20, follows)
+
+    # Following a full-height index: the cache keeps the paragraphs of the lines that moved
+    FOLLOW_ROWS = ['דהו', 'zxc', 'זחט', 'lkj']  # screen rows 0..3 of a 10x5 screen, the bottom row blank
+    FOLLOW_TEXTS = ('אבג', 'xyz', 'אב12', 'abc', 'אבגדה', 'qrs', 'ב(12)', 'tuv', 'אבגד.', 'a b')
+
+    def shifts(self, s):
+        return s.test_bidi_shifts()
+
+    def stream(self, s, *texts):
+        # one line per text, from the bottom row: each CRLF scrolls the screen by one
+        s.cursor_position(s.lines, 1)
+        parse_bytes(s, ''.join(t + '\r\n' for t in texts).encode())
+
+    def follow_screen(self, **opts):
+        return self.filled(self.FOLLOW_ROWS, scrollback=20, **opts)
+
+    def streamed_state(self, build, batches, op=None):
+        # maps and levels of a fresh screen replaying the batches (and op after them), rendered once
+        f = build()
+        for texts in batches:
+            self.stream(f, *texts)
+        if op:
+            op(f)
+        self.frame(f)
+        return self.state(f)
+
+    def test_follow_stream_bottom(self):
+        # one line per frame at the bottom: only the new line's paragraph resolves, whatever the pixel scroll row holds
+        for pixel_scroll in (False, True):
+            with self.subTest(pixel_scroll=pixel_scroll):
+
+                def build():
+                    return self.follow_screen(pixel_scroll=pixel_scroll)
+
+                s = build()
+                self.warm(s)
+                done, shifted = [], self.shifts(s)
+                for text in self.FOLLOW_TEXTS:
+                    self.stream(s, text)
+                    done.append((text,))
+                    shifted += 1
+                    self.ae(self.frame(s)[0], int(any('א' <= c <= 'ת' for c in text)), text)
+                    self.ae(self.shifts(s), shifted, text)
+                    self.ae(self.state(s), self.streamed_state(build, done), text)
+
+    def test_follow_multi_line_frames(self):
+        # k lines in one frame follow when k < lines; k >= lines replaces the whole screen and drops as before
+        rtl = ['אבג', 'אב12', 'אבגדה', 'ב(12)', 'אבגד.', 'דהו', 'זחט']
+
+        def build():
+            return self.follow_screen(pixel_scroll=False)
+
+        # (op, whether it follows, the RTL paragraphs on view after it, which all resolve when nothing is kept)
+        cases = (
+            ('3 lines', lambda s: self.stream(s, *rtl[:3]), True, 3),  # the 3 new ones; the Latin row moved up
+            # lines - 1: only the old bottom row stays (now row 0, holding the first new line); no old content survives
+            ('4 lines', lambda s: self.stream(s, *rtl[:4]), True, 4),
+            ('5 lines', lambda s: self.stream(s, *rtl[:5]), False, 4),  # lines 2..5 on rows 0..3
+            ('CSI 5 S', lambda s: parse_bytes(s, b'\x1b[5S'), False, 0),  # a blank screen
+            ('7 lines', lambda s: self.stream(s, *rtl), False, 4),  # lines 4..7 on rows 0..3
+        )
+        for name, op, follows, resolves in cases:
+            with self.subTest(name):
+                s = build()
+                self.warm(s)
+                before = self.shifts(s)
+                op(s)
+                self.ae(self.frame(s)[0], resolves)
+                self.ae(self.shifts(s), before + follows)
+                self.ae(self.state(s), self.streamed_state(build, [], op))
+
+    def test_follow_paused(self):
+        # a paused frame follows the scrolls up to the pause only, an unpaused one the rest
+        a, b = 'אבג', 'אב12'
+
+        def build():
+            return self.follow_screen()
+
+        # lines streamed only while paused: the paused frame is the cached one
+        s = build()
+        self.warm(s)
+        before = self.shifts(s)
+        s.pause_rendering(True, 1000000)
+        self.stream(s, a, b)
+        self.ae((self.frame(s)[0], self.shifts(s)), (0, before))
+        f = build()
+        self.frame(f)
+        exempt = self.snapshot_top_rows(f)
+        self.ae(tuple(x[exempt:] for x in self.state(s)), tuple(x[exempt:] for x in self.state(f)))
+        s.pause_rendering(False)
+        self.ae((self.frame(s)[0], self.shifts(s)), (2, before + 1))
+        self.ae(self.state(s), self.streamed_state(build, [(a, b)]))
+
+        # a line before the pause is followed by the paused frame, a line after it by the unpaused one
+        s = build()
+        self.warm(s)
+        before = self.shifts(s)
+        self.stream(s, a)
+        s.pause_rendering(True, 1000000)
+        self.stream(s, b)
+        self.ae((self.frame(s)[0], self.shifts(s)), (1, before + 1))
+        up_to_pause = self.follow_screen()
+        self.stream(up_to_pause, a)
+        self.frame(up_to_pause)
+        exempt = self.snapshot_top_rows(up_to_pause)
+        self.ae(tuple(x[exempt:] for x in self.state(s)), tuple(x[exempt:] for x in self.state(up_to_pause)))
+        s.pause_rendering(False)
+        self.ae((self.frame(s)[0], self.shifts(s)), (1, before + 2))
+        self.ae(self.state(s), self.streamed_state(build, [(a,), (b,)]))
+
+    def test_follow_paused_scrolled_back(self):
+        # a paused frame of a scrolled-back view follows with the view's offset: its renamed rows are looked up at the paused view
+        lines = ['אבג', 'abאב', 'אב12', 'xyz', 'אבגדה', 'a', 'אבג abc', 'ב(12)', 'אב אב', 'ab', 'אבגדה1', 'xx']
+        a, b = 'אב', 'אבג'
+
+        def build():
+            s = self.screen(cols=5, lines=6, scrollback=20, pixel_scroll=False)
+            for text in lines:
+                parse_bytes(s, text.encode() + b'\r\n')
+            self.frame(s)
+            s.scroll(2, True)
+            return s
+
+        def fresh(view, *texts):
+            f = build()
+            for text in texts:
+                self.stream(f, text)
+            f.scroll(view - f.scrolled_by, True)
+            self.frame(f)
+            return f
+
+        s = build()
+        self.warm(s)
+        before = self.shifts(s)
+        self.stream(s, a)
+        self.ae(s.scrolled_by, 3)
+        s.pause_rendering(True, 1000000)
+        self.stream(s, b)
+        self.ae(s.scrolled_by, 4)
+        self.ae((self.frame(s)[0], self.shifts(s)), (0, before + 1))
+        f = fresh(3, a)
+        exempt = self.snapshot_top_rows(f)
+        self.ae(tuple(x[exempt:] for x in self.state(s)), tuple(x[exempt:] for x in self.state(f)))
+        s.pause_rendering(False)
+        self.ae((self.frame(s)[0], self.shifts(s)), (1, before + 2))  # the paragraph of the line streamed while paused
+        self.ae(self.state(s), self.state(fresh(4, a, b)))
+
+    def test_follow_scrolled_back(self):
+        # output while scrolled back anchors the view on its lines: the screen paragraphs in view are renamed and need no resolve
+        lines = ['אבג', 'abאב', 'אב12', 'xyz', 'אבגדה', 'a', 'אבג abc', 'ב(12)', 'אב אב', 'ab', 'אבגדה1', 'xx']
+
+        def build():
+            s = self.screen(cols=5, lines=6, scrollback=20, pixel_scroll=False)
+            for text in lines:
+                parse_bytes(s, text.encode() + b'\r\n')
+            return s
+
+        s = build()
+        self.frame(s)
+        s.scroll(2, True)
+        self.warm(s)
+        streamed = ['אב', 'cd', 'אבג']
+        before = self.shifts(s)
+        for i, text in enumerate(streamed):
+            self.stream(s, text)
+            self.ae(s.scrolled_by, 3 + i)
+            self.ae(self.frame(s)[0], 0, text)
+            self.ae(self.shifts(s), before + i + 1, text)
+        f = build()
+        self.frame(f)
+        for text in streamed:
+            self.stream(f, text)
+        f.scroll(s.scrolled_by, True)
+        self.frame(f)
+        self.ae(self.state(s), self.state(f))
+        self.assertTrue(any(self.vmaps(s)))
+
+    def test_follow_alt_screen(self):
+        # the alternate screen follows too: its pushed rows are discarded rather than renamed into the history
+        def build():
+            s = self.screen(cols=10, lines=5, scrollback=20)
+            parse_bytes(s, b'\x1b[?1049h\x1b[8h')
+            self.fill(s, self.FOLLOW_ROWS)
+            return s
+
+        s = build()
+        self.assertTrue(s.is_using_alternate_linebuf())
+        self.warm(s)
+        done, shifted = [], self.shifts(s)
+        for text in ('אבג', 'אב12', 'אבגדה', 'ב(12)', 'אבגד.'):
+            self.stream(s, text)
+            done.append((text,))
+            shifted += 1
+            self.ae(self.frame(s)[0], 1, text)
+            self.ae(self.shifts(s), shifted, text)
+            self.ae(self.state(s), self.streamed_state(build, done), text)
+        self.ae(s.historybuf.count, 0)
+
+    def test_follow_straddler_across_top(self):
+        # a paragraph pushed into the history by its first rows keeps its entries only if every pushed row still matches them
+        rtl, latin = 'אבגד.12 34abcde', 'abcdefghijklmno'  # 15 cells: 3 rows of 5
+        wide = 'abcde' + 'abcא ' + ' 12 x' + 'xyzab'  # 20 cells: 4 rows of 5, the second pushed row decides the levels
+
+        def build(lines, text):
+            s = self.screen(cols=5, lines=lines, scrollback=20, pixel_scroll=False)
+            s.draw(text)
+            s.cursor_position(lines, 1)
+            return s
+
+        # (name, lines, paragraph, edit (row, column, text) before the scroll, lines streamed, resolves)
+        cases = (
+            ('unchanged', 4, rtl, None, 1, 0),
+            ('same-class edit', 4, rtl, (1, 1, 'ב'), 1, 0),
+            ('other-class edit', 4, rtl, (1, 1, 'a'), 1, 1),
+            ('unresolved paragraph gains RTL', 4, latin, (1, 1, 'א'), 1, 1),
+            ('second pushed row unchanged', 5, wide, (2, 4, 'א'), 2, 0),
+            ('second pushed row same-class edit', 5, wide, (2, 4, 'ב'), 2, 0),
+            ('second pushed row other-class edit', 5, wide, (2, 4, 'b'), 2, 0),  # the paragraph is left-to-right: nothing to resolve
+        )
+        for name, lines, text, edit, k, resolves in cases:
+            with self.subTest(name):
+
+                def scroll(s):
+                    if edit:
+                        self.put(s, *edit)
+                    self.stream(s, *['xy'] * k)
+
+                s = build(lines, text)
+                continued = [s.linebuf.is_continued(y) for y in range(1, lines)]
+                self.assertEqual(continued, [True] * (len(text) // 5 - 1) + [False] * (lines - len(text) // 5))
+                self.warm(s)
+                before = self.shifts(s)
+                scroll(s)
+                self.ae((s.historybuf.count, s.historybuf.endswith_wrap(), s.linebuf.is_continued(1)), (k, True, len(text) // 5 > k + 1))
+                self.ae((self.frame(s)[0], self.shifts(s)), (resolves, before + 1))
+                f = build(lines, text)
+                scroll(f)
+                self.frame(f)
+                self.ae(self.state(s), self.state(f))
+
+    def test_follow_cleared_history(self):
+        # CSI ? 3 J empties the history without a generation bump, so the pushed rows of a later scroll can be gone from it.
+        # It also blanks the screen rows, so the straddling paragraph is dropped on the signature check, not kept.
+        def build():
+            s = self.screen(cols=5, lines=4, scrollback=20, pixel_scroll=False)
+            s.draw('אבגד.12 34abcde')
+            s.cursor_position(4, 1)
+            return s
+
+        for frame_between in (True, False):
+            with self.subTest(frame_between=frame_between):
+                s = build()
+                self.warm(s)
+                before = self.shifts(s)
+                self.stream(s, 'xy')
+                if frame_between:
+                    self.frame(s)
+                    self.ae((s.historybuf.count, self.shifts(s)), (1, before + 1))
+                parse_bytes(s, b'\x1b[?3J')
+                self.ae(s.historybuf.count, 0)
+                self.stream(s, 'zw')
+                # without the frame in between, 2 rows were pushed and the older one is gone
+                self.ae(s.historybuf.count, 1)
+                self.frame(s)
+                self.ae(self.shifts(s), before + 1 + frame_between)
+                f = build()
+                self.stream(f, 'xy')
+                parse_bytes(f, b'\x1b[?3J')
+                self.stream(f, 'zw')
+                self.frame(f)
+                self.ae(self.state(s), self.state(f))
+
+    def test_follow_straddler_kept_across_clear_scrollback(self):
+        # clear_scrollback empties the history but keeps the screen rows, so the straddling paragraph's rows still match their
+        # entries, one of which has a para_first naming a cleared history line. Nothing resolves, as in a fresh replay: the
+        # rows left on screen start in the middle of the paragraph, and the kept entries show as renders a replay would redo.
+        def build():
+            s = self.screen(cols=5, lines=4, scrollback=20, pixel_scroll=False)
+            s.draw('אבגד.12 34abcde')
+            s.cursor_position(4, 1)
+            return s
+
+        for frame_between in (True, False):
+            with self.subTest(frame_between=frame_between):
+                s = build()
+                self.warm(s)
+                before = self.shifts(s)
+                self.stream(s, 'xy')
+                if frame_between:
+                    self.frame(s)
+                    self.ae((s.historybuf.count, self.shifts(s)), (1, before + 1))
+                s.clear_scrollback()
+                self.ae((s.historybuf.count, str(s.line(0))), (0, '12 34'))
+                self.stream(s, 'zw')
+                # without the frame in between, 2 rows were pushed and the older one is gone
+                self.ae(s.historybuf.count, 1)
+                resolves, renders = self.frame(s)
+                # the scroll before the clear is followed in its own frame, the one after it in this frame
+                self.ae((resolves, self.shifts(s)), (0, before + 1 + frame_between))
+                f = build()
+                self.stream(f, 'xy')
+                f.clear_scrollback()
+                self.stream(f, 'zw')
+                fresh_resolves, fresh_renders = self.frame(f)
+                self.ae(fresh_resolves, 0)
+                self.assertLess(renders, fresh_renders)
+                self.ae(self.state(s), self.state(f))
+
+    def test_follow_other_moves_drop(self):
+        # every other way to move or clear rows still drops the screen entries, even with a followable scroll in the same interval
+        def build():
+            return self.filled(['דהו', 'זחט', 'אבג', 'דהז'], scrollback=20, pixel_scroll=False)
+
+        def build_alt():
+            s = self.screen(scrollback=20, pixel_scroll=False)
+            parse_bytes(s, b'\x1b[?1049h\x1b[8h')
+            self.fill(s, ['דהו', 'זחט', 'אבג', 'דהז'])
+            return s
+
+        def build_prompt():
+            s = self.screen(cols=10, lines=4, scrollback=30, pixel_scroll=False)
+            s.draw('before\r\n')
+            parse_bytes(s, b'\x1b]133;A\a')
+            s.draw('$ p1\r\n')
+            parse_bytes(s, b'\x1b]133;C\a')
+            s.draw('o0 אב\r\nאבג o1\r\n')
+            parse_bytes(s, b'\x1b]133;A\a')
+            s.draw('$ l0\r\nאבגדהוזחטיכלמ\r\nabc אבג\r\nl3\r\nl4')
+            return s
+
+        def at(y, seq):
+            return lambda s: (s.cursor_position(y, 1), parse_bytes(s, seq))
+
+        def scroll_until_prompt(s):
+            s.cursor_position(2, 1)
+            s.scroll_until_cursor_prompt(False)
+            # one scroll that pushes nothing after the streamed one that does: fewer pushes than scrolls, 2 scrolls < 5 lines
+            self.ae(s.historybuf.count, 1)
+
+        def erase_prompt(s):
+            count = s.historybuf.count
+            self.assertTrue(s.erase_last_command())
+            self.assertLess(s.historybuf.count, count)
+
+        # the streamed line is 'אבד' on row 3; the RTL paragraphs on view after the op all resolve, as the entries are dropped
+        cases = (
+            ('region index', build, lambda s: (parse_bytes(s, b'\x1b[2;4r'), at(4, b'\x1bD\x1b[r')(s)), 3),  # rows 1..3 scroll: 3 left
+            # the alternate screen pushes nothing, so only the counters tell the region scroll from a full-height one
+            ('region index on the alternate screen', build_alt, lambda s: (parse_bytes(s, b'\x1b[2;4r'), at(4, b'\x1bD\x1b[r')(s)), 3),
+            ('insert line', build, at(2, b'\x1b[L'), 4),
+            ('delete line', build, at(2, b'\x1b[M'), 3),
+            ('reverse index', build, at(1, b'\x1bM'), 4),  # the bottom row is lost
+            ('erase to end of display', build, at(2, b'\x1b[J'), 1),  # only row 0 is left
+            ('scroll until prompt', build, scroll_until_prompt, 3),
+            ('prompt erase', build_prompt, erase_prompt, 2),  # the streamed line overwrote 'l4': 'abc אבג' and 'אבד' on view
+            ('erase into scrollback', build, at(1, b'\x1b[22J'), 0),  # a blank screen
+        )
+        for name, make, op, resolves in cases:
+            with self.subTest(name):
+                s = make()
+                self.warm(s)
+                before = self.shifts(s)
+                self.stream(s, 'אבד')
+                op(s)
+                got = self.frame(s)[0]
+                self.ae(self.shifts(s), before)
+                f = make()
+                self.stream(f, 'אבד')
+                op(f)
+                self.frame(f)
+                self.ae(self.state(s), self.state(f))
+                self.ae(got, resolves)
+
+    def test_follow_counter_wrap(self):
+        # the scroll counter wraps from UINT64_MAX to 0 between two followed frames
+        def build():
+            return self.follow_screen()
+
+        s = build()
+        s.test_bidi_set_scrolls(0xFFFFFFFFFFFFFFFF)
+        self.warm(s)
+        done, shifted = [], self.shifts(s)
+        for text in ('אבג', 'אב12', 'אבגדה'):
+            self.stream(s, text)
+            done.append((text,))
+            shifted += 1
+            self.ae((self.frame(s)[0], self.shifts(s)), (1, shifted), text)
+            self.ae(self.state(s), self.streamed_state(build, done), text)
