@@ -575,9 +575,11 @@ class TestBidi(BaseTest):
                     self.ae(self.records(s, 0), [RTL], el)
                     pb(s, CUP(1) + 'xyz')
                     self.ae(self.records(s, 0), [RTL], el)
-                s = marked()
-                pb(s, '\x1b[2J' + CUP(1) + 'xyz')
-                self.ae(self.records(s, 0), [AUTO])
+                # ED 0 at the cursor row erases it as EL does, so it keeps the record; ED 1 and ED 2 clear the row's attributes
+                for ed, want in (('J', RTL), ('1J', AUTO), ('2J', AUTO)):
+                    s = marked()
+                    pb(s, CUP(1) + '\x1b[' + ed + CUP(1) + 'xyz')
+                    self.ae(self.records(s, 0), [want], ed)
                 s = marked()
                 pb(s, CUP(1) + '\x1b[L' + CUP(1) + 'xyz')
                 self.ae(self.records(s, 0, 1), [AUTO, RTL])
@@ -587,6 +589,11 @@ class TestBidi(BaseTest):
                 s = marked()
                 pb(s, '\x1bc')
                 self.ae(self.records(s, 0), [NONE])
+                s = self.screen(lines=5)
+                pb(s, IA + CUP(5))
+                self.draw_marked(s, RLM, 'abc', split)
+                pb(s, '\n')
+                self.ae(self.records(s, 3, 4), [RTL, NONE])
 
     def test_leading_mark_provisional_limit(self):
         for split in (False, True):
