@@ -123,6 +123,13 @@ CPUCell *linebuf_cpu_cells_for_line(LineBuf *lb, index_type idx);
 void linebuf_clear(LineBuf *, char_type ch);
 void linebuf_clear_lines(LineBuf *self, const Cursor *cursor, index_type start, index_type end);
 void linebuf_index(LineBuf *self, index_type top, index_type bottom);
+// Must precede linebuf_index() for buffers the bidi paragraph cache sees. The guard mirrors linebuf_index()'s early return.
+static inline void
+linebuf_count_index(LineBuf *self, index_type top, index_type bottom) {
+    if (LIKELY(!self->bidi_stamped) || top >= self->ynum - 1 || bottom >= self->ynum || bottom <= top) return;
+    if (LIKELY(bottom - top == self->ynum - 1)) self->bidi_scrolls++;
+    else self->bidi_generation++;
+}
 void linebuf_reverse_index(LineBuf *self, index_type top, index_type bottom);
 void linebuf_clear_line(LineBuf *self, index_type y, bool clear_attrs);
 void linebuf_clear_line_text(LineBuf *self, index_type y);

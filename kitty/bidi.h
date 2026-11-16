@@ -29,6 +29,14 @@ bidi_codepoint_may_reorder(char_type ch) {
     return ch <= 0xfdff || ch - 0xfe70 <= 0xfefe - 0xfe70 || ch - 0x10800 <= 0x10fff - 0x10800 || ch - 0x1e800 <= 0x1efff - 0x1e800;
 }
 
+// What the screen-row entries of the paragraph cache were written under
+typedef struct BidiCacheContext {
+    const void *linebuf;   // NULL: no screen-row entries
+    uint64_t gen, scrolls; // the linebuf's counters
+    uint64_t pushed;       // historybuf->num_pushed
+    int view;              // to_render_row: screen row y is shown at render row y + view
+} BidiCacheContext;
+
 typedef struct BidiMaps {
     uint16_t *v2l;   // rows*cols, row-major by render row: the logical cell shown at each visual column
     uint8_t *levels; // rows*cols, the embedding level of each logical cell
@@ -41,13 +49,11 @@ typedef struct BidiMaps {
     // was a blank, 0 in the other cells; meaningful only where sig_valid
     uint32_t *sig;
     bool *sig_valid;
-    const void *ctx_linebuf; // NULL: no screen-row entries
-    uint64_t ctx_gen;
+    BidiCacheContext ctx;
     // The live ids of the paused snapshot's rows and the live context, recorded when rendering was paused
     uint64_t *paused_ids;
     index_type paused_rows, paused_cap;
-    const void *paused_ctx_linebuf;
-    uint64_t paused_ctx_gen;
+    BidiCacheContext paused_ctx;
     // The last resolve may be cached: false when it met a cell spanning several rows or ran out of memory
     bool resolve_cacheable;
     // The last resolve ran FriBidi to success without skipping N0, so the signatures it wrote capture all its inputs
@@ -65,7 +71,7 @@ typedef struct BidiMaps {
     bool force_ltr_seen;
     // The last selection upload was permuted by the maps
     bool selection_used_maps;
-    unsigned long long resolve_count, render_count; // for tests
+    unsigned long long resolve_count, render_count, shift_count; // for tests
     // reusable scratch
     FriBidiChar *text;
     FriBidiCharType *types;
@@ -104,6 +110,8 @@ bool bidi_row_signature_matches(BidiMaps *b, const CPUCell *cells, const TextCac
 void bidi_cache_invalidate(BidiMaps *b);
 // Drops the entries that mention a screen row, for when the screen rows were moved or the shown buffer changed
 void bidi_cache_drop_screen_entries(BidiMaps *b);
+// Moves every render row's map and cache entry up by 0 < d < rows rows, leaving the bottom d rows with neither
+void bidi_cache_move_rows(BidiMaps *b, index_type d);
 
 // The queries below are the identity, or false, for a row without a map.
 // The visual column of the left edge of the logical cell x spanning span cells
