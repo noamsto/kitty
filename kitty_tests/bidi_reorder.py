@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 # License: GPLv3
 
+import os
+import random
 import shutil
 import struct
 import subprocess
@@ -1442,3 +1444,494 @@ class TestBidiReorder(BaseTest):
                 self.ae(self.vmaps(s), self.vmaps(f))
                 self.assertNotEqual(self.vmaps(s), before)
                 self.ae(self.frame(s), (0, 0))
+
+    MIXED3 = 'alpha שלום beta עולם (12) gamma'[:30]  # three 10 column rows, one paragraph
+    MIXED3_STATE = (  # (maps, levels)
+        ((0, 1, 2, 3, 4, 5, 9, 8, 7, 6),) * 2 + ((4, 2, 3, 1, 0, 5, 6, 7, 8, 9), None),
+        ((0,) * 6 + (1,) * 4,) * 2 + ((1, 1, 2, 2, 1, 0, 0, 0, 0, 0), None),
+    )
+
+    def dirty(self, s):
+        return s.linebuf.dirty_lines()
+
+    def warmed(self, text, **opts):
+        s = self.drawn(text, **opts)
+        self.warm(s)
+        return s
+
+    def stacked(self, lines):
+        s = self.screen(cols=5, lines=3, scrollback=10)
+        for line in lines:
+            s.draw(line)
+        return s
+
+    def same_as(self, s, f):
+        # s has the maps and levels of a fresh screen f that only saw the final text
+        self.frame(f)
+        self.ae(self.state(s), self.state(f))
+
+    def test_cache_same_class_edit_skips_resolve(self):
+        # a dirty row that feeds FriBidi the same classes, brackets and cell layout keeps its paragraph's maps without resolving
+        s = self.screen(lines=4, scrollback=0)
+        s.draw(self.MIXED3)
+        self.ae([self.frame(s)[0], self.frame(s)[0]], [1, 0])
+        self.ae((self.state(s), self.dirty(s)), (self.MIXED3_STATE, []))
+        self.put(s, 1, 1, 'x')
+        self.ae(self.dirty(s), [0])
+        self.ae(self.frame(s)[0], 0)
+        self.ae(self.state(s), self.MIXED3_STATE)
+        f = self.drawn('x' + self.MIXED3[1:], lines=4, scrollback=0)
+        fbuf = test_screen_update_cell_data(f)
+        self.ae(self.state(s), self.state(f))
+        want = [self.sprites(gpu_row(f, fbuf, y)) for y in range(3)]
+        self.assertTrue(all(map(any, want)), 'a blank fresh row')
+        buf = test_screen_update_cell_data(s)
+        self.ae([self.sprites(gpu_row(s, buf, y)) for y in range(3)], want)
+
+    def test_cache_level_changing_edits_resolve(self):
+        # an edit that changes a class, a bracket or the layout resolves again and gives a fresh screen's levels and maps
+        wide = {'lines': 1, 'scrollback': 0}
+        # (name, screen options, text, col of the edit, edit, text after, levels before, levels after)
+        cases = (
+            ('i bracket', {}, 'א(ב)c', 2, '[', 'א[ב)c', (1, 1, 1, 1, 0) + (0,) * 5, (1, 1, 1, 0, 0) + (0,) * 5),
+            ('ii class', {}, 'אa!ב', 2, 'ג', 'אג!ב', (1, 0, 0, 1) + (0,) * 6, (1, 1, 1, 1) + (0,) * 6),
+            ('iii layout', {'cols': 5}, '中בגd', 1, 'aבג中', 'aבג中', (0, 0, 1, 1, 0), (0, 1, 1, 0, 0)),
+            ('vi interior continuation', wide, 'א!aב', 2, '😀', 'א😀ב', (1, 0, 0, 1) + (0,) * 6, (1, 1, 1, 1) + (0,) * 6),
+            ('vii trailing continuation', {**wide, 'cols': 5}, 'אבג!ד', 4, '😀', 'אבג😀', (1, 1, 1, 1, 1), (1, 1, 1, 0, 0)),
+        )
+        for name, opts, text, col, new, final, levels0, levels1 in cases:
+            with self.subTest(name):
+                s = self.warmed(text, **opts)
+                self.ae(self.lv(s, 0), levels0)
+                self.put(s, 1, col, new)
+                self.ae((str(s.linebuf.line(0)), self.frame(s)[0], self.lv(s, 0)), (final, 1, levels1))
+                self.same_as(s, self.drawn(final, **opts))
+        with self.subTest('iv dirty row below the view'):
+            # one paragraph over a history row and linebuf rows 0-2, scrolled up by one: z on row 2 is below the view
+            s = self.stacked(('אבגדה', 'אבגדה', '12 3!', 'abcde'))
+            self.ae(s.historybuf.count, 1)
+            self.frame(s)
+            s.scroll(1, True)
+            self.frame(s)
+            self.warm(s)
+            self.put(s, 3, 2, 'z')
+            self.ae((s.scrolled_by, self.dirty(s)), (1, [2]))
+            self.ae((self.frame(s)[0], self.lv(s, 2)), (1, (2, 2, 1, 2, 0)))
+            s.scroll(1, False)
+            self.frame(s)
+            self.same_as(s, self.stacked(('אבגדה', 'אבגדה', '12 3!', 'azcde')))
+        with self.subTest('v explicit embedding then a blank'):
+            # ב/, an OSC 66 cell holding RLO, then EM SPACE (WS, not a blank): a blank for it keeps class WS, so the trim must not drop it
+            def rlo(last):
+                s = self.screen(cols=4, lines=1, scrollback=0)
+                s.draw('ב/')
+                parse_bytes(s, '\x1b]66;w=1;‮\x07'.encode())
+                s.draw(last)
+                self.ae(str(s.linebuf.line(0))[2], '‮')
+                return s
+
+            s = rlo(' ')
+            self.warm(s)
+            self.put(s, 1, 4, ' ')
+            self.ae(self.frame(s)[0], 1)
+            self.same_as(s, rlo(' '))
+
+    def test_cache_bypass_between_resolves(self):
+        # A resolves MIXED3; B draws a scale-2 multicell (paragraph inactive); C restores the cells: same FriBidi input as A, B's maps
+        s = self.screen(lines=4, scrollback=0)
+        s.draw(self.MIXED3)
+        self.ae(self.frame(s)[0], 1)
+        self.warm(s)
+        self.ae(self.vmaps(s), self.MIXED3_STATE[0])
+        s.cursor_position(1, 1)
+        draw_multicell(s, 'x', scale=2)
+        self.ae([s.linebuf.is_continued(y) for y in range(4)], [False, True, True, False])
+        self.frame(s)
+        self.ae(self.vmaps(s), (None,) * 4)
+        self.put(s, 1, 1, self.MIXED3[:2])
+        self.put(s, 2, 1, self.MIXED3[10:12])
+        self.ae(str(s.linebuf.line(0)) + str(s.linebuf.line(1)), self.MIXED3[:20])
+        self.ae([s.linebuf.is_continued(y) for y in range(4)], [False, True, True, False])  # same bounds as in A: only the signatures differ
+        self.ae(self.frame(s)[0], 1)
+        self.ae(self.state(s), self.MIXED3_STATE)
+
+    def test_trailing_blank_trim_keeps_maps(self):
+        # dropping the blanks at a paragraph's end before resolving must not change any row's maps. The trim is exact for
+        # FriBidi but not for the N0 budget threshold (it scales with the trimmed length), so these cases stay far from it.
+        def wrapped_blank(s):
+            s.draw('א' * 10)
+            s.draw('ב')
+            s.cursor_position(2, 1)
+            s.erase_characters(1)
+            self.assertTrue(s.linebuf.is_continued(1))
+
+        def rlo_cell(s):  # draw drops a zero-width Cf, an OSC 66 cell keeps it; untrimmed, blanks after the RLO set the eos of the run before
+            s.draw('ב/')
+            parse_bytes(s, '\x1b]66;w=1;‮\x07'.encode())
+            self.ae(str(s.linebuf.line(0))[2], '‮')
+
+        cases = {
+            'neutral then blanks': lambda s: s.draw('אבג!'),
+            'brackets': lambda s: s.draw('אבג (x)'),
+            'ES next to EN': lambda s: s.draw('אב 1+'),
+            'ET after EN': lambda s: s.draw('אב 12%'),
+            'ET': lambda s: s.draw('אב $'),
+            'spaces after R': lambda s: s.draw('אבג   '),
+            'blank last row': wrapped_blank,
+            'wide char': lambda s: s.draw('אב中'),
+            'LTR start': lambda s: s.draw('abc אב'),
+            'RLO cell': rlo_cell,
+        }
+        for name, build in cases.items():
+            with self.subTest(name):
+                screens = []
+                for trim in (True, False):
+                    s = self.screen()
+                    s.test_bidi_trim(trim)
+                    build(s)
+                    screens.append(s)
+                counts = [self.frame(s)[0] for s in screens]
+                for s in screens:
+                    self.warm(s)
+                self.ae(self.state(screens[0]), self.state(screens[1]))
+                if name == 'ES next to EN':
+                    self.ae(counts, [1, 1])
+
+    PARA_ROW = 'ב1aגd'  # R EN L R L: a digit, a Latin and a Hebrew letter in columns 1-4, so an edit never touches the soft-wrap column
+
+    def frame_buf(self, s):
+        before = s.test_bidi_counts()[0]
+        buf = test_screen_update_cell_data(s)
+        return s.test_bidi_counts()[0] - before, buf
+
+    def assert_same_as_fresh(self, s, buf, f, msg=''):
+        # maps, levels and sprites of the frame whose upload is buf equal those of a fresh screen f rendered once
+        fbuf = test_screen_update_cell_data(f)
+        self.ae(self.state(s), self.state(f), msg)
+        want = [self.sprites(gpu_row(f, fbuf, y)) for y in range(s.lines)]
+        self.assertTrue(any(map(any, want)), 'blank fresh rows')
+        self.ae([self.sprites(gpu_row(s, buf, y)) for y in range(s.lines)], want, msg)
+
+    def test_shortcut_class_changing_edits_miss(self):
+        # an edit that changes what FriBidi is fed (a class, a bracket, the layout, a blank) resolves once
+        def drawn(text):
+            return lambda: self.drawn(text)
+
+        cases = (
+            ('latin to hebrew', drawn('abc אבג'), lambda s: self.put(s, 1, 2, 'ב')),
+            ('bracket added', drawn('אבג abc'), lambda s: self.put(s, 1, 4, '(')),
+            ('bracket removed', drawn('א(ב)c'), lambda s: self.put(s, 1, 2, '!')),
+            ('( to [', drawn('א(ב)c'), lambda s: self.put(s, 1, 2, '[')),
+            ('blank to EM SPACE on the last row tail', drawn('אבג abc'), lambda s: self.put(s, 1, 10, ' ')),
+        )
+        for name, build, trigger in cases:
+            with self.subTest(name):
+                self.trigger_case(build, trigger, resolves=1)
+        with self.subTest('cell turning into a continuation and back'):
+            s = self.warmed('אבג!abc')
+            self.put(s, 1, 5, '中')  # replaces the cells of a and b
+            self.ae(self.frame(s)[0], 1)
+            self.same_as(s, self.drawn('אבג!中c'))
+            self.put(s, 1, 5, 'ab')
+            self.ae(self.frame(s)[0], 1)
+            self.same_as(s, self.drawn('אבג!abc'))
+
+    def test_shortcut_blank_bit_at_budget_boundary(self):
+        # 'א(ב)' and 33 pairs: scan 1123 against 16 per char. n_trim is 70 with a U+0020 tail, so 1120 and the budget fires
+        # and N0 is skipped; an EM SPACE tail (WS, not a blank) keeps n_trim 71, so 1136 and N0 pairs the brackets. The two
+        # texts feed FriBidi the same types and brackets and differ only in the blank bit
+        text = 'א(ב)' + '()' * 33
+
+        def build(tail):
+            s = self.screen(cols=80, lines=1, scrollback=0)
+            s.draw(text + tail)
+            self.ae(str(s.linebuf.line(0)), text + tail)
+            return s
+
+        s = build(' ')
+        self.warm(s)
+        warmed = self.state(s)
+        self.ae(self.state(self.same_state(build(' '))), warmed)
+        self.put(s, 1, 71, ' ')
+        self.ae(self.frame(s)[0], 1)
+        self.same_as(s, build(' '))
+        self.assertNotEqual(self.state(s), warmed, 'the budget firing must change the maps')
+
+    def same_state(self, s):
+        self.frame(s)
+        return s
+
+    def test_shortcut_same_class_edits(self):
+        # a dirty row that feeds FriBidi the same classes keeps the maps of a 4-row soft-wrapped paragraph; the signatures
+        # stay valid after a shortcut, so a second edit shortcuts too
+        edits = {'digit': (2, '57'), 'latin': (3, 'xq'), 'hebrew': (1, 'תש')}
+        for row in (0, 1, 3):
+            for kind, (col, chars) in edits.items():
+                with self.subTest(row=row, kind=kind):
+                    rows = [self.PARA_ROW] * 4
+                    s = self.paragraph(*rows)
+                    self.ae([s.linebuf.is_continued(y) for y in range(4)], [False, True, True, True])
+                    self.ae(self.frame(s)[0], 1)
+                    self.ae(self.frame(s)[0], 0)
+                    self.assertTrue(all(self.vmaps(s)[:4]))
+                    for ch in chars:
+                        rows[row] = rows[row][: col - 1] + ch + rows[row][col:]
+                        self.put(s, row + 1, col, ch)
+                        self.ae(self.dirty(s), [row])
+                        resolves, buf = self.frame_buf(s)
+                        self.ae(resolves, 0, f'edit {ch}')
+                        self.assert_same_as_fresh(s, buf, self.paragraph(*rows), f'edit {ch}')
+
+    def test_shortcut_keeps_memo_current(self):
+        # ! and U+0606 are both ON, the second in the RTL blocks: the shortcut keeps the maps but the edited row's RTL memo
+        # (it holds no other RTL block char; row 0 is what makes the paragraph resolve) must follow the text
+        def build(mid):
+            return self.paragraph('אבגדה', f'ab{mid}cd')
+
+        s = build('!')
+        self.warm(s)
+        memos = []
+        for mid in ('؆', '!', '؆'):
+            self.put(s, 2, 3, mid)
+            self.ae(self.frame(s)[0], 0)
+            f = build(mid)
+            self.frame(f)
+            memos.append(self.memo(f, 1))
+            self.ae([self.memo(s, y) for y in range(2)], [self.memo(f, y) for y in range(2)])
+            self.ae(self.state(s), self.state(f))
+        self.ae(memos, [RTL, IMPLICIT, RTL])
+
+    def test_shortcut_never_with_rows_above_view(self):
+        # A history-only paragraph p0 p1 p2 p3, scrolled back so p0 is above the view. p0 is popped back to the screen and
+        # pushed again as p0' with other classes (the last strong before the number starting p1 changes), p1..p3 pushed
+        # again unchanged, so their ids, texts and signatures are as before and only p0 differs. The shortcut must not trust
+        # the dirty on-view rows: p1's levels change.
+        p0, p0b, p1, p2, p3 = 'abcd.', 'אבגד.', '12 34', 'אבגדה', 'ab cd'
+        up = 3
+
+        def build(first):
+            s = self.screen(cols=5, lines=3, scrollback=10, pixel_scroll=False)
+            s.draw(first + p1 + p2 + p3)
+            parse_bytes(s, b'\r\nx1\r\nx2\r\nx3')
+            s.scroll(up, True)
+            self.ae((s.historybuf.count, s.scrolled_by), (4, up))
+            return s
+
+        def hist(s):
+            return [str(s.historybuf.line(i)) for i in range(s.historybuf.count)]
+
+        s = build(p0)
+        self.warm(s)
+        before, before_state = hist(s), self.state(s)
+        self.ae(before, [p3, p2, p1, p0])
+        s.scroll(up, False)
+        self.frame(s)
+        s.reverse_scroll(3, True)
+        s.reverse_scroll(1, True)
+        self.ae([str(s.line(y)) for y in range(3)], [p0, p1, p2])
+        self.ae([s.linebuf.is_continued(y) for y in range(3)], [False, True, True])
+        self.put(s, 1, 1, p0b[:4])
+        s.cursor_position(3, 5)
+        s.draw(p2[-1] + p3)  # p2's last cell again, then p3 as its continuation, which pushes p0'
+        parse_bytes(s, b'\r\nx1\r\nx2\r\nx3')
+        s.scroll(up, True)
+        self.ae((s.historybuf.count, s.scrolled_by), (4, up))
+        self.ae(hist(s), [p3, p2, p1, p0b], 'only the row above the view differs')
+        self.assertLessEqual({0, 1, 2}, set(s.historybuf.dirty_lines()), 'the on-view rows are dirty again')
+        self.assertGreaterEqual(self.frame(s)[0], 1)
+        f = build(p0b)
+        self.frame(f)
+        self.ae(self.state(s), self.state(f))
+        self.assertNotEqual(self.state(s), before_state, 'p1 must change levels, or the test cannot see the hole')
+
+    def test_shortcut_n0_budget(self):
+        # signatures exist only when the N0 budget did not fire: a same-class edit past it resolves, and so does an edit that
+        # moves the paragraph across the threshold
+        with self.subTest('past the budget'):
+            s = self.screen(cols=200, lines=2, scrollback=0)
+            s.draw('א(ב)' + '()' * 40)
+            self.warm(s)
+            for ch in 'גד':
+                self.put(s, 1, 3, ch)
+                self.ae(self.frame(s)[0], 1)
+            f = self.screen(cols=200, lines=2, scrollback=0)
+            f.draw('א(ד)' + '()' * 40)
+            self.same_as(s, f)
+
+        def crossing(name, text, col, new, final):
+            with self.subTest(name):
+                def build(t):
+                    s = self.screen(cols=80, lines=1, scrollback=0)
+                    s.draw(t)
+                    return s
+
+                s = build(text)
+                self.warm(s)
+                warmed = self.state(s)
+                self.put(s, 1, col, new)
+                self.ae(self.frame(s)[0], 1)
+                self.same_as(s, build(final))
+                self.assertNotEqual(self.state(s), warmed)
+
+        pairs = 'א(ב)' + '()' * 33  # 70 chars, scan 1123 > 1120: the budget fires
+        crossing('removing a bracket goes under', pairs, 69, '!', pairs[:68] + '!)')
+        under = 'א(ב)' + '()' * 32  # 68 chars, scan 1057; an open bracket 66 from the last letter makes 1123 > 16 * 69
+        crossing('adding a bracket goes over', under + '!', 69, '(', under + '(')
+
+    def test_shortcut_paused(self):
+        # an edit before the pause shortcuts in the paused frame, one during the pause after the unpause
+        rows = [self.PARA_ROW] * 4
+        s = self.paragraph(*rows)
+        self.warm(s)
+        self.put(s, 2, 3, 'x')
+        rows1 = list(rows)
+        rows1[1] = 'ב1xגd'
+        s.pause_rendering(True, 100000)
+        resolves, buf = self.frame_buf(s)
+        self.ae(resolves, 0)
+        self.assert_same_as_fresh(s, buf, self.paragraph(*rows1), 'paused')
+        s.pause_rendering(False)
+        resolves, buf = self.frame_buf(s)
+        self.ae(resolves, 0)
+        self.assert_same_as_fresh(s, buf, self.paragraph(*rows1), 'unpaused')
+        s.pause_rendering(True, 100000)
+        self.put(s, 3, 2, '9')
+        rows2 = list(rows1)
+        rows2[2] = 'ב9aגd'
+        resolves, buf = self.frame_buf(s)
+        self.ae(resolves, 0)
+        self.assert_same_as_fresh(s, buf, self.paragraph(*rows1), 'edit during the pause is not shown')
+        s.pause_rendering(False)
+        resolves, buf = self.frame_buf(s)
+        self.ae(resolves, 0)
+        self.assert_same_as_fresh(s, buf, self.paragraph(*rows2), 'edit after the unpause')
+
+    def test_shortcut_mode_toggles(self):
+        # with signatures stored (a same-class edit shortcut first), force_ltr and the trim flag make the next frame resolve
+        rows = [self.PARA_ROW] * 4
+        s = self.paragraph(*rows)
+        self.warm(s)
+        self.put(s, 1, 2, '5')
+        self.ae(self.frame(s)[0], 0)
+        rows[0] = 'ב5aגd'
+        for force_ltr in (True, False):
+            self.set_options({'force_ltr': force_ltr})
+            s.test_bidi_check_mode()
+            resolves = self.frame(s)[0]
+        self.assertGreater(resolves, 0)
+        self.same_as(s, self.paragraph(*rows))
+        self.ae(self.frame(s)[0], 0)
+        self.put(s, 1, 2, '6')
+        self.ae(self.frame(s)[0], 0)
+        s.test_bidi_trim(False)
+        self.assertGreater(self.frame(s)[0], 0)
+        f = self.paragraph(*rows[:0], 'ב6aגd', *rows[1:])
+        f.test_bidi_trim(False)
+        self.same_as(s, f)
+
+    DIFF_GROUPS = ('0123456789', 'אבגדהוזחט', 'abcdefghij', '()[]')
+    DIFF_POOL = 'אבגדהוזחט' * 3 + 'abcdefghij' * 3 + '0123456789' * 2 + '  ' * 2 + '()!.'
+
+    def diff_op(self, rng, s, paused, first=False):
+        # (name, function of a screen): the arguments are fixed here so that a fresh screen replays the same operation
+        L, C = s.lines, s.columns
+        y, x = rng.randrange(L), rng.randrange(C)
+        n = rng.randrange(1, 4)
+        # a paused or scrolled-back screen gets back to the live bottom soon, where the shortcut applies
+        if paused and rng.random() < 0.4:
+            return 'unpause', lambda s: s.pause_rendering(False)
+        if s.scrolled_by and rng.random() < 0.4:
+            return 'fwd', lambda s: s.scroll(s.historybuf.count, False)
+        kind = 'wrap' if first else rng.choices(
+            ('same', 'change', 'wrap', 'wide', 'osc66', 'scale2', 'il', 'dl', 'index', 'region', 'back', 'fwd', 'pause', 'ech', 'ich', 'crlf'),
+            (60, 6, 8, 2, 2, 1, 2, 2, 3, 2, 3, 1, 3, 2, 2, 2),
+        )[0]
+
+        def at(text):
+            return lambda s: (s.cursor_position(y + 1, x + 1), s.draw(text))
+
+        def csi(seq):
+            return lambda s: (s.cursor_position(y + 1, 1), parse_bytes(s, seq))
+
+        if kind == 'same':
+            # a cell that is the only one of its character in its neighbourhood (not half a wide cell), in a class group
+            cells = []
+            for yy in range(L):
+                line = s.line(yy)
+                for xx in range(1, C - 1):
+                    ch = line[xx]
+                    if len(ch) == 1 and line[xx - 1] != ch != line[xx + 1] and any(ch in g for g in self.DIFF_GROUPS):
+                        cells.append((yy, xx, ch))
+            if not cells:
+                return 'noop', lambda s: None
+            y, x, ch = rng.choice(cells)
+            group = next(g for g in self.DIFF_GROUPS if ch in g)
+            return 'same', at(ch if group == self.DIFF_GROUPS[3] else rng.choice(group))
+        if kind == 'change':
+            return 'change', at(rng.choice(self.DIFF_POOL))
+        if kind == 'wrap':
+            text = ''.join(rng.choices(self.DIFF_POOL, k=rng.randrange(12, 36)))
+            return 'wrap', lambda s: (s.cursor_position(y + 1, 1), s.draw(text))
+        if kind == 'wide':
+            return 'wide', at('中')
+        if kind == 'osc66':
+            ch = rng.choice(self.DIFF_POOL)
+            return 'osc66', lambda s: (s.cursor_position(y + 1, x + 1), parse_bytes(s, f'\x1b]66;w=2;{ch}\x07'.encode()))
+        if kind == 'scale2':
+            return 'scale2', lambda s: (s.cursor_position(y + 1, x + 1), draw_multicell(s, 'x', scale=2))
+        if kind == 'il':
+            return 'il', csi(b'\x1b[L')
+        if kind == 'dl':
+            return 'dl', csi(b'\x1b[M')
+        if kind == 'index':
+            return 'index', lambda s: (s.cursor_position(L, 1), parse_bytes(s, b'\x1bD'))
+        if kind == 'region':
+            return 'region', lambda s: (parse_bytes(s, b'\x1b[2;4r'), s.cursor_position(4, 1), parse_bytes(s, b'\x1bD\x1b[r'))
+        if kind == 'back':
+            return 'back', lambda s: s.scroll(n, True)
+        if kind == 'fwd':
+            return 'fwd', lambda s: s.scroll(n, False)
+        if kind == 'pause':
+            return ('unpause', lambda s: s.pause_rendering(False)) if paused else ('pause', lambda s: s.pause_rendering(True, 1000000))
+        if kind == 'ech':
+            return 'ech', lambda s: (s.cursor_position(y + 1, x + 1), s.erase_characters(n))
+        if kind == 'ich':
+            return 'ich', lambda s: (s.cursor_position(y + 1, x + 1), s.insert_characters(n))
+        return 'crlf', lambda s: (s.cursor_position(y + 1, x + 1), parse_bytes(s, b'\r\n'))
+
+    def differential(self, seed, count):
+        rng = random.Random(seed)
+
+        def new():
+            return self.screen(cols=8, lines=5, scrollback=20)
+
+        s, applied, shortcuts, paused = new(), [], 0, False
+        for i in range(count):
+            name, op = self.diff_op(rng, s, paused, first=i < 3)
+            op(s)
+            if name in ('pause', 'unpause'):
+                paused = name == 'pause'
+            else:
+                applied.append(op)
+            dirty = s.linebuf.dirty_lines() if not paused and not s.scrolled_by else []
+            resolves = self.frame(s)[0]
+            # a dirty row inside a paragraph with maps that nothing resolved again: the shortcut kept them
+            if not resolves and any(self.vmaps(s)[y] is not None for y in dirty):
+                shortcuts += 1
+            if paused:
+                continue
+            f = new()
+            for o in applied:
+                o(f)
+            self.frame(f)
+            self.ae(self.state(s), self.state(f), f'seed {seed}, op {i} ({name})')
+        return shortcuts
+
+    def test_shortcut_random_differential(self):
+        # after every frame the maps and levels equal those of a fresh screen replaying the operations so far and rendering once
+        seeds = int(os.environ.get('KITTY_BIDI_DIFF_SEEDS', 3))
+        count = int(os.environ.get('KITTY_BIDI_DIFF_OPS', 150))
+        for seed in range(seeds):
+            with self.subTest(seed=seed):
+                shortcuts = self.differential(seed, count)
+                self.assertGreaterEqual(shortcuts, 10, f'seed {seed}: frames that kept the maps of a paragraph with dirty rows')

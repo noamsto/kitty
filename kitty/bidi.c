@@ -17,6 +17,8 @@ free_row_maps(BidiMaps *b) {
     free(b->para_first);
     free(b->para_last);
     free(b->para_rows);
+    free(b->sig);
+    free(b->sig_valid);
     b->v2l = NULL;
     b->levels = NULL;
     b->active = NULL;
@@ -24,6 +26,8 @@ free_row_maps(BidiMaps *b) {
     b->para_first = NULL;
     b->para_last = NULL;
     b->para_rows = NULL;
+    b->sig = NULL;
+    b->sig_valid = NULL;
     b->ctx_linebuf = NULL;
     b->rows = 0;
     b->cols = 0;
@@ -56,7 +60,10 @@ bidi_maps_ensure(BidiMaps *b, index_type rows, index_type cols) {
     b->para_first = calloc(rows, sizeof(b->para_first[0]));
     b->para_last = calloc(rows, sizeof(b->para_last[0]));
     b->para_rows = calloc(rows, sizeof(b->para_rows[0]));
-    if (!b->v2l || !b->levels || !b->active || !b->row_id || !b->para_first || !b->para_last || !b->para_rows) {
+    b->sig = malloc(cells * sizeof(b->sig[0]));
+    b->sig_valid = calloc(rows, sizeof(b->sig_valid[0]));
+    if (!b->v2l || !b->levels || !b->active || !b->row_id || !b->para_first || !b->para_last || !b->para_rows || !b->sig ||
+        !b->sig_valid) {
         free_row_maps(b);
         return false;
     }
@@ -118,12 +125,33 @@ feed_row(BidiMaps *b, const CPUCell *cells, const TextCache *tc, uint32_t r, uin
     return n;
 }
 
+static void
+retype_controls(BidiMaps *b, uint32_t n) {
+    for (uint32_t i = 0; i < n; i++) {
+        // Drawn normally a bidi control is a combining char FriBidi never sees; OSC 66 can start a cell with one, and FriBidi is quadratic in sibling isolates
+        if (b->types[i] & (FRIBIDI_MASK_ISOLATE | FRIBIDI_MASK_EXPLICIT)) b->types[i] = FRIBIDI_TYPE_ON;
+    }
+}
+
+#define SIG_BRACKET (1u << 31)
+#define SIG_BLANK (1u << 30)
+
+// Exact: FriBidi type values use bits below 30, and fribidi_get_bracket_types() gives a bracket only to an ON char, so the
+// bracket form implies the type. The blank bit is needed because the trim drops only chars fed as U+0020 (U+2003 is WS
+// too), and n_trim scales the N0 budget threshold.
+static inline uint32_t
+sig_of(FriBidiCharType type, FriBidiBracketType bracket, FriBidiChar ch) {
+    return (bracket != FRIBIDI_NO_BRACKET ? SIG_BRACKET | (FRIBIDI_IS_BRACKET_OPEN(bracket) ? 1u << 21 : 0) | FRIBIDI_BRACKET_ID(bracket) : (uint32_t)type) |
+           (ch == ' ' ? SIG_BLANK : 0);
+}
+
 // Resolves the levels of the paragraph's characters into b->para_levels.
 // Returns how many characters FriBidi resolved, the rest being blanks at level
 // 0, or 0 when the resolve failed or left every level at 0.
 static uint32_t
 resolve_levels(BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const TextCache *tc) {
     b->resolve_cacheable = true;
+    b->resolve_signed = false;
     if (!num_rows || num_rows > BIDI_MAX_PARAGRAPH_ROWS) return 0;
     if (!ensure_scratch(b, (size_t)num_rows * b->cols)) {
         b->resolve_cacheable = false;
@@ -145,11 +173,10 @@ resolve_levels(BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const
     // embedding could they set the eos of the run before them (X10), and the
     // retype below leaves none.
     uint32_t n_trim = n;
-    while (n_trim > b->row_start[num_rows - 1] && b->text[n_trim - 1] == ' ') n_trim--;
-    for (uint32_t i = 0; i < n_trim; i++) {
-        // Drawn normally a bidi control is a combining char FriBidi never sees; OSC 66 can start a cell with one, and FriBidi is quadratic in sibling isolates
-        if (b->types[i] & (FRIBIDI_MASK_ISOLATE | FRIBIDI_MASK_EXPLICIT)) b->types[i] = FRIBIDI_TYPE_ON;
+    if (!b->no_trim) {
+        while (n_trim > b->row_start[num_rows - 1] && b->text[n_trim - 1] == ' ') n_trim--;
     }
+    retype_controls(b, n_trim);
     if (!n_trim) return 0;
     fribidi_get_bracket_types(b->text, (FriBidiStrIndex)n, b->types, b->brackets);
     // FriBidi before 1.0.17 walks back to the previous strong char for every unresolved bracket pair (N0); scan bounds
@@ -160,7 +187,8 @@ resolve_levels(BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const
         if (b->types[i] & (FRIBIDI_MASK_LETTER | FRIBIDI_MASK_NUMBER)) last = i;
         else if (FRIBIDI_IS_BRACKET_OPEN(b->brackets[i])) scan += (uint64_t)(i - last);
     }
-    if (scan > (uint64_t)BIDI_N0_SCAN_PER_CHAR * n_trim) {
+    const bool budget_fired = scan > (uint64_t)BIDI_N0_SCAN_PER_CHAR * n_trim;
+    if (budget_fired) {
         for (uint32_t i = 0; i < n; i++) b->brackets[i] = FRIBIDI_NO_BRACKET;
     }
     FriBidiParType base_dir = FRIBIDI_PAR_LTR;
@@ -168,6 +196,7 @@ resolve_levels(BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const
     // Returns the highest level plus one: 0 is a failure, which must not be cached, and 1 is a paragraph with every level 0
     const FriBidiLevel max_level = fribidi_get_par_embedding_levels_ex(b->types, b->brackets, (FriBidiStrIndex)n_trim, &base_dir, b->para_levels);
     if (!max_level) b->resolve_cacheable = false;
+    else b->resolve_signed = !budget_fired;
     if (max_level <= 1) return 0;
     for (uint32_t i = n_trim; i < n; i++) b->para_levels[i] = 0;
     return n_trim;
@@ -221,6 +250,41 @@ write_row(BidiMaps *b, index_type render_row, uint32_t row_first_char, uint32_t 
     if (differs) b->changed = true;
 }
 
+static void
+write_signature(BidiMaps *b, index_type render_row, uint32_t row_first_char, uint32_t row_end_char) {
+    uint32_t *sig = row_of(sig);
+    index_type c = 0;
+    for (uint32_t i = row_first_char; i < row_end_char; i++) {
+        for (const index_type col = b->cell_of_char[i] & 0xffff; c < col; c++) sig[c] = 0;
+        sig[c++] = sig_of(b->types[i], b->brackets[i], b->text[i]);
+    }
+    for (; c < b->cols; c++) sig[c] = 0;
+}
+
+bool
+bidi_row_signature_matches(BidiMaps *b, const CPUCell *cells, const TextCache *tc, index_type render_row) {
+    if (render_row >= b->rows || !b->sig_valid[render_row] || !ensure_scratch(b, b->cols)) return false;
+    const uint32_t n = feed_row(b, cells, tc, 0, 0);
+    if (n == UINT32_MAX) return false;
+    fribidi_get_bidi_types(b->text, (FriBidiStrIndex)n, b->types);
+    // Over all n, as a resolve without the trim would: the trimmed blanks are WS, which the retype leaves alone
+    retype_controls(b, n);
+    fribidi_get_bracket_types(b->text, (FriBidiStrIndex)n, b->types, b->brackets);
+    const uint32_t *sig = row_of(sig);
+    index_type c = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        // No signature is 0, so a char starting in a cell that used to be a continuation, or the reverse, never matches
+        for (const index_type col = b->cell_of_char[i] & 0xffff; c < col; c++) {
+            if (sig[c]) return false;
+        }
+        if (sig[c++] != sig_of(b->types[i], b->brackets[i], b->text[i])) return false;
+    }
+    for (; c < b->cols; c++) {
+        if (sig[c]) return false;
+    }
+    return true;
+}
+
 bool
 bidi_resolve_paragraph(
     BidiMaps *b,
@@ -238,6 +302,8 @@ bidi_resolve_paragraph(
     for (unsigned r = 0; r < num_rows; r++) {
         const int render_row = first_render_row + (int)r;
         if (render_row < (int)min_render_row || render_row >= (int)b->rows || (index_type)render_row == skip_render_row) continue;
+        // Also when FriBidi left every level at 0 and n_trim is 0
+        if (b->resolve_signed) write_signature(b, (index_type)render_row, b->row_start[r], b->row_start[r + 1]);
         if (!n_trim) {
             bidi_set_row_inactive(b, (index_type)render_row);
             continue;
