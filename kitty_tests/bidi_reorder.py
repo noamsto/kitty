@@ -1080,7 +1080,8 @@ class TestBidiReorder(BaseTest):
         self.ae(self.frame(s), (0, 0))
 
     def test_cache_view_change_resolves_again(self):
-        # every trigger changes which line a render row shows (or the layout) without a dirty row: no entry may be trusted
+        # every trigger changes which line a render row shows (or the layout) without a dirty row: the entries are dropped, except
+        # that a full-height index follows its lines and keeps them
         rows = self.CACHE_ROWS[:2] + ['אב', 'xyz', 'אבגדה']
         hist = ['אבג', 'abאב', 'אב12', 'xyz', 'אבגדה', 'a', 'אבג abc']
         long_row = 'אבגדהוזחטיכלמ'
@@ -1118,16 +1119,16 @@ class TestBidiReorder(BaseTest):
         rev = tuple(range(12, -1, -1))
         # (name, build, trigger, expected maps, compare with a fresh screen, expected resolves or None for some)
         cases = (
-            # a full-height index follows the lines: nothing resolves, and the line pushed into the pixel scroll row is a dirty one-row
-            # paragraph that the shortcut verifies
+            # a full-height index follows the lines instead of dropping them: nothing resolves, and the line pushed into the pixel scroll
+            # row is a dirty one-row paragraph that the shortcut verifies
             ('index', lambda: self.filled(rows), lambda s: parse_bytes(s, b'\x1b[5;1H\x1bD'), self.plain_maps(rows[1:], lines=5), True, 0),
             ('reverse index', lambda: self.filled(rows), lambda s: parse_bytes(s, b'\x1b[1;1H\x1bM'), self.plain_maps([''] + rows[:-1]), True, None),
             ('insert then delete line', net_zero_build, net_zero, (None, None, None, rev[3:], None), True, None),
             ('scrollback view', lambda: self.history(hist), up, self.plain_maps(hist[5:], 5, lines=3), False, None),
             ('view crossing bottom edge', bottom_build, up, (None, None, None, m[0], m[1]), False, None),
             ('view crossing top edge', top_build, down, (m[1], m[2], None, None, None), False, None),
-            # the view stays on the same lines: the pushed line is renamed to its history id and the shortcut verifies it on view; the
-            # new row is below the view
+            # entries follow here too: the view stays on the same lines, the pushed line is renamed to its history id and the shortcut
+            # verifies it on view; the new row is below the view
             (
                 'history add while scrolled',
                 lambda: self.history(hist[:6], 2),
@@ -2068,6 +2069,7 @@ class TestBidiReorder(BaseTest):
         # (op, whether it follows, the RTL paragraphs on view after it, which all resolve when nothing is kept)
         cases = (
             ('3 lines', lambda s: self.stream(s, *rtl[:3]), True, 3),  # the 3 new ones; the Latin row moved up
+            ('4 lines', lambda s: self.stream(s, *rtl[:4]), True, 4),  # lines - 1: only the top row of the old screen stays
             ('5 lines', lambda s: self.stream(s, *rtl[:5]), False, 4),  # lines 2..5 on rows 0..3
             ('CSI 5 S', lambda s: parse_bytes(s, b'\x1b[5S'), False, 0),  # a blank screen
             ('7 lines', lambda s: self.stream(s, *rtl), False, 4),  # lines 4..7 on rows 0..3
@@ -2121,6 +2123,43 @@ class TestBidiReorder(BaseTest):
         self.ae((self.frame(s)[0], self.shifts(s)), (1, before + 2))
         self.ae(self.state(s), self.streamed_state(build, [(a,), (b,)]))
 
+    def test_follow_paused_scrolled_back(self):
+        # a paused frame of a scrolled-back view follows with the view's offset: its renamed rows are looked up at the paused view
+        lines = ['אבג', 'abאב', 'אב12', 'xyz', 'אבגדה', 'a', 'אבג abc', 'ב(12)', 'אב אב', 'ab', 'אבגדה1', 'xx']
+        a, b = 'אב', 'אבג'
+
+        def build():
+            s = self.screen(cols=5, lines=6, scrollback=20, pixel_scroll=False)
+            for text in lines:
+                parse_bytes(s, text.encode() + b'\r\n')
+            self.frame(s)
+            s.scroll(2, True)
+            return s
+
+        def fresh(view, *texts):
+            f = build()
+            for text in texts:
+                self.stream(f, text)
+            f.scroll(view - f.scrolled_by, True)
+            self.frame(f)
+            return f
+
+        s = build()
+        self.warm(s)
+        before = self.shifts(s)
+        self.stream(s, a)
+        self.ae(s.scrolled_by, 3)
+        s.pause_rendering(True, 1000000)
+        self.stream(s, b)
+        self.ae(s.scrolled_by, 4)
+        self.ae((self.frame(s)[0], self.shifts(s)), (0, before + 1))
+        f = fresh(3, a)
+        exempt = self.snapshot_top_rows(f)
+        self.ae(tuple(x[exempt:] for x in self.state(s)), tuple(x[exempt:] for x in self.state(f)))
+        s.pause_rendering(False)
+        self.ae((self.frame(s)[0], self.shifts(s)), (1, before + 2))  # the paragraph of the line streamed while paused
+        self.ae(self.state(s), self.state(fresh(4, a, b)))
+
     def test_follow_scrolled_back(self):
         # output while scrolled back anchors the view on its lines: the screen paragraphs in view are renamed and need no resolve
         lines = ['אבג', 'abאב', 'אב12', 'xyz', 'אבגדה', 'a', 'אבג abc', 'ב(12)', 'אב אב', 'ab', 'אבגדה1', 'xx']
@@ -2173,39 +2212,75 @@ class TestBidiReorder(BaseTest):
         self.ae(s.historybuf.count, 0)
 
     def test_follow_straddler_across_top(self):
-        # a paragraph pushed into the history by its first row keeps its entries only if that row still matches them
+        # a paragraph pushed into the history by its first rows keeps its entries only if every pushed row still matches them
         rtl, latin = 'אבגד.12 34abcde', 'abcdefghijklmno'  # 15 cells: 3 rows of 5
+        wide = 'abcde' + 'abcא ' + ' 12 x' + 'xyzab'  # 20 cells: 4 rows of 5, the second pushed row decides the levels
 
-        def build(text):
-            s = self.screen(cols=5, lines=4, scrollback=20, pixel_scroll=False)
+        def build(lines, text):
+            s = self.screen(cols=5, lines=lines, scrollback=20, pixel_scroll=False)
             s.draw(text)
-            s.cursor_position(4, 1)
+            s.cursor_position(lines, 1)
             return s
 
-        # (name, paragraph, edit of row 0 before the scroll, resolves)
+        # (name, lines, paragraph, edit (row, column, text) before the scroll, lines streamed, resolves)
         cases = (
-            ('unchanged', rtl, None, 0),
-            ('same-class edit', rtl, 'ב', 0),
-            ('other-class edit', rtl, 'a', 1),
-            ('unresolved paragraph gains RTL', latin, 'א', 1),
+            ('unchanged', 4, rtl, None, 1, 0),
+            ('same-class edit', 4, rtl, (1, 1, 'ב'), 1, 0),
+            ('other-class edit', 4, rtl, (1, 1, 'a'), 1, 1),
+            ('unresolved paragraph gains RTL', 4, latin, (1, 1, 'א'), 1, 1),
+            ('second pushed row unchanged', 5, wide, (2, 4, 'א'), 2, 0),
+            ('second pushed row same-class edit', 5, wide, (2, 4, 'ב'), 2, 0),
+            ('second pushed row other-class edit', 5, wide, (2, 4, 'b'), 2, 0),  # the paragraph is left-to-right: nothing to resolve
         )
-        for name, text, edit, resolves in cases:
+        for name, lines, text, edit, k, resolves in cases:
             with self.subTest(name):
 
                 def scroll(s):
                     if edit:
-                        self.put(s, 1, 1, edit)
-                    self.stream(s, 'xy')
+                        self.put(s, *edit)
+                    self.stream(s, *['xy'] * k)
 
-                s = build(text)
-                self.assertEqual([s.linebuf.is_continued(y) for y in (1, 2, 3)], [True, True, False])
+                s = build(lines, text)
+                continued = [s.linebuf.is_continued(y) for y in range(1, lines)]
+                self.assertEqual(continued, [True] * (len(text) // 5 - 1) + [False] * (lines - len(text) // 5))
                 self.warm(s)
                 before = self.shifts(s)
                 scroll(s)
-                self.ae((s.historybuf.count, s.historybuf.endswith_wrap(), s.linebuf.is_continued(1)), (1, True, True))
+                self.ae((s.historybuf.count, s.historybuf.endswith_wrap(), s.linebuf.is_continued(1)), (k, True, len(text) // 5 > k + 1))
                 self.ae((self.frame(s)[0], self.shifts(s)), (resolves, before + 1))
-                f = build(text)
+                f = build(lines, text)
                 scroll(f)
+                self.frame(f)
+                self.ae(self.state(s), self.state(f))
+
+    def test_follow_cleared_history(self):
+        # CSI ? 3 J empties the history without a generation bump, so the pushed rows of a later scroll can be gone from it
+        def build():
+            s = self.screen(cols=5, lines=4, scrollback=20, pixel_scroll=False)
+            s.draw('אבגד.12 34abcde')
+            s.cursor_position(4, 1)
+            return s
+
+        for frame_between in (True, False):
+            with self.subTest(frame_between=frame_between):
+                s = build()
+                self.warm(s)
+                before = self.shifts(s)
+                self.stream(s, 'xy')
+                if frame_between:
+                    self.frame(s)
+                    self.ae((s.historybuf.count, self.shifts(s)), (1, before + 1))
+                parse_bytes(s, b'\x1b[?3J')
+                self.ae(s.historybuf.count, 0)
+                self.stream(s, 'zw')
+                # without the frame in between, 2 rows were pushed and the older one is gone
+                self.ae(s.historybuf.count, 1)
+                self.frame(s)
+                self.ae(self.shifts(s), before + 1 + frame_between)
+                f = build()
+                self.stream(f, 'xy')
+                parse_bytes(f, b'\x1b[?3J')
+                self.stream(f, 'zw')
                 self.frame(f)
                 self.ae(self.state(s), self.state(f))
 
