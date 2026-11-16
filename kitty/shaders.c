@@ -1039,6 +1039,8 @@ cell_update_uniform_block(
 
         uint32_t bg_colors0, bg_colors1, bg_colors2, bg_colors3, bg_colors4, bg_colors5, bg_colors6, bg_colors7;
         float bg_opacities0, bg_opacities1, bg_opacities2, bg_opacities3, bg_opacities4, bg_opacities5, bg_opacities6, bg_opacities7;
+
+        uint32_t cursor_beam_mirrored;
     };
     // Send the uniform data
     ColorProfile *cp = screen->paused_rendering.expires_at ? &screen->paused_rendering.color_profile : screen->color_profile;
@@ -1112,8 +1114,9 @@ cell_update_uniform_block(
             rd->cursor_y1 += 1;
             rd->cursor_y2 += 1;
         }
-        CursorShape cs = (cursor->is_focused || OPT(cursor_shape_unfocused) == NO_CURSOR_SHAPE) ? cursor->shape : OPT(cursor_shape_unfocused);
+        CursorShape cs = cursor_shape_drawn(cursor->is_focused, cursor->shape);
         rd->cursor_shape = cs;
+        rd->cursor_beam_mirrored = cs == CURSOR_BEAM && cursor->beam_mirrored;
         color_type cell_fg = rd->default_fg, cell_bg = rd->bg_colors0;
         index_type cell_color_x = cursor->x;
         bool reversed = false;
@@ -1164,6 +1167,7 @@ cell_update_uniform_block(
         if (!cursor->is_visible) {
             // Move the main cursor off screen so that only it is hidden, the
             // extra cursors keep their shape and colors.
+            rd->cursor_beam_mirrored = 0;
             rd->cursor_x1 = screen->columns + 1;
             rd->cursor_x2 = screen->columns;
             rd->cursor_y1 = screen->lines + 1;
@@ -1171,6 +1175,7 @@ cell_update_uniform_block(
         }
     } else {
         rd->cursor_shape = 0;
+        rd->cursor_beam_mirrored = 0;
         rd->cursor_x1 = screen->columns + 1;
         rd->cursor_x2 = screen->columns;
         rd->cursor_y1 = screen->lines + 1;

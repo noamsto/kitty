@@ -354,14 +354,7 @@ bidi_row_signature_matches(BidiMaps *b, const CPUCell *cells, const TextCache *t
 
 bool
 bidi_resolve_paragraph(
-    BidiMaps *b,
-    const CPUCell *const *rows,
-    unsigned num_rows,
-    const TextCache *tc,
-    FriBidiParType base,
-    int first_render_row,
-    index_type min_render_row,
-    index_type skip_render_row) {
+    BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const TextCache *tc, FriBidiParType base, int first_render_row, index_type min_render_row) {
     FriBidiParType dir = base;
     uint32_t n_trim = 0;
     const bool reorder = resolve_levels(b, rows, num_rows, tc, &dir, &n_trim);
@@ -373,10 +366,6 @@ bidi_resolve_paragraph(
     for (unsigned r = 0; r < num_rows; r++) {
         const int render_row = first_render_row + (int)r;
         if (render_row < (int)min_render_row || render_row >= (int)b->rows) continue;
-        if ((index_type)render_row == skip_render_row) {
-            b->rtl[render_row] = false;
-            continue;
-        }
         b->rtl[render_row] = rtl;
         // Also when FriBidi left every level at 0 and n_trim is 0
         if (b->resolve_signed) write_signature(b, (index_type)render_row, b->row_start[r], b->row_start[r + 1]);

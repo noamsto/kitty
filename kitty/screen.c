@@ -110,6 +110,7 @@ static void deactivate_overlay_line(Screen *self);
 static void update_overlay_position(Screen *self);
 static void render_overlay_line(Screen *self, Line *line, FONTS_DATA_HANDLE fonts_data);
 static void update_overlay_line_data(Screen *self, uint8_t *data);
+static void update_overlay_ime_position(Screen *self);
 
 #define CALLBACK(...)                                                               \
     if (self->callbacks != Py_None) {                                               \
@@ -5287,11 +5288,11 @@ bidi_extend_paragraph_up(const BidiRows *src, const CPUCell **around, int y0, in
 
 // Finds the paragraph of row y0, or a window of BIDI_MAX_PARAGRAPH_ROWS rows of it
 // around y0, refreshes the RTL memo of its dirty stamped rows, and writes or drops
-// the map of each of its rows from y0's render row on except skip_render_row. On
+// the map of each of its rows from y0's render row on. On
 // entry *continued is false if y0 is known not to continue the row above; on return
 // it says whether the last row continues into the next. Returns the last row.
 static int
-bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued, index_type skip_render_row) {
+bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued) {
     // The cells of row y are at around[y - y0]
     const CPUCell *window[2 * BIDI_MAX_PARAGRAPH_ROWS - 1], **around = window + BIDI_MAX_PARAGRAPH_ROWS - 1;
     around[0] = bidi_row_cells(src, y0);
@@ -5333,8 +5334,7 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued, in
         else if (r >= (int)b->rows) {
             hit &= !a->has_dirty_text;
             shortcut &= !a->has_dirty_text;
-        } else if ((index_type)r == skip_render_row) cacheable = false;
-        else if (hit || shortcut) {
+        } else if (hit || shortcut) {
             const uint64_t id = bidi_row_id(src, y);
             const bool same = id && b->row_id[r] == id && b->para_first[r] == first_id && b->para_last[r] == last_id && b->para_rows[r] == key_rows;
             hit = hit && same && !a->has_dirty_text;
@@ -5366,8 +5366,7 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued, in
         if (same) return last;
     }
     if (resolved) {
-        bidi_resolve_paragraph(
-            b, around + (first - y0), last - first + 1, tc, bidi_record_base(lead), first + src->to_render_row, min_render_row, skip_render_row);
+        bidi_resolve_paragraph(b, around + (first - y0), last - first + 1, tc, bidi_record_base(lead), first + src->to_render_row, min_render_row);
     } else {
         for (int r = min_render_row; r < end_render_row; r++) {
             bidi_set_row_inactive(b, r);
@@ -5446,8 +5445,7 @@ update_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE fonts_data,
     const unsigned int render_lines = render_lines_for_screen(self);
     const BidiRows src = {
         .screen = self, .linebuf = self->linebuf, .lowest = -(int)self->historybuf->count, .end = self->lines, .to_render_row = to_render_row};
-    // The IME pre-edit row has no map, so it is shaped and uploaded in logical order
-    const index_type preedit_render_row = is_overlay_active ? self->overlay_line.ynum + src.to_render_row : BIDI_NO_RENDER_ROW;
+    const index_type overlay_render_row = is_overlay_active ? self->overlay_line.ynum + src.to_render_row : UINT_MAX;
     Line line = {.text_cache = self->text_cache};
     bool continued = true;
     for (unsigned int r = 0; r < render_lines;) {
@@ -5460,12 +5458,11 @@ update_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE fonts_data,
             update_line_data_blank(self->columns, r++, address);
             continue;
         }
-        const int last = MIN(bidi_map_paragraph(b, &src, y0, &continued, preedit_render_row), (int)render_lines - 1 - src.to_render_row);
+        const int last = MIN(bidi_map_paragraph(b, &src, y0, &continued), (int)render_lines - 1 - src.to_render_row);
         for (int y = y0; y <= last; y++, r++) {
             index_type lnum = 0;
             bool is_history = false;
             render_line_for_virtual_y(self, y + (int)self->scrolled_by, &line, &lnum, &is_history);
-            if (r == preedit_render_row) bidi_set_row_inactive(b, r);
             const uint8_t *levels = b->active[r] ? b->levels + (size_t)r * b->cols : NULL;
             // As in the loop of screen_update_cell_data(), plus the rows whose levels changed
             if (is_history) {
@@ -5481,7 +5478,7 @@ update_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE fonts_data,
                 bidi_render_line(self, b, fonts_data, &line, lnum, self->cursor, levels);
                 screen_render_line_graphics(self, &line, y);
                 if (line.attrs.has_dirty_text && screen_has_marker(self)) mark_text_in_line(self->marker, &line, &self->as_ansi_buf);
-                if (r == preedit_render_row) render_overlay_line(self, &line, fonts_data);
+                if (r == overlay_render_row) render_overlay_line(self, &line, fonts_data);
                 linebuf_mark_line_clean(self->linebuf, lnum);
             }
             if (levels) update_line_data_permuted(&line, r, address, b->v2l + (size_t)r * b->cols);
@@ -5490,7 +5487,12 @@ update_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE fonts_data,
     }
     b->valid = true;
     // The cursor info was collected from the maps of the previous frame
-    self->cursor_render_info.visual_x = screen_cursor_render_x(self, self->cursor_render_info.x, self->cursor_render_info.y);
+    self->cursor_render_info.visual_x = screen_cursor_render_x(
+        self,
+        self->cursor_render_info.x,
+        self->cursor_render_info.y,
+        cursor_shape_drawn(self->cursor_render_info.is_focused, self->cursor_render_info.shape),
+        &self->cursor_render_info.beam_mirrored);
     return true;
 }
 
@@ -5517,7 +5519,7 @@ update_paused_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE font
     const int row_offset = paused_snapshot_row_offset(self);
     bool continued = false;
     for (index_type y = 0; y < linebuf->ynum;) {
-        const index_type last = (index_type)bidi_map_paragraph(b, &src, (int)y, &continued, BIDI_NO_RENDER_ROW);
+        const index_type last = (index_type)bidi_map_paragraph(b, &src, (int)y, &continued);
         for (; y <= last; y++) {
             linebuf_init_line(linebuf, y);
             Line *line = linebuf->line;
@@ -5534,7 +5536,12 @@ update_paused_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE font
         }
     }
     b->valid = true;
-    self->cursor_render_info.visual_x = screen_cursor_render_x(self, self->cursor_render_info.x, self->cursor_render_info.y);
+    self->cursor_render_info.visual_x = screen_cursor_render_x(
+        self,
+        self->cursor_render_info.x,
+        self->cursor_render_info.y,
+        cursor_shape_drawn(self->cursor_render_info.is_focused, self->cursor_render_info.shape),
+        &self->cursor_render_info.beam_mirrored);
     return true;
 }
 
@@ -5608,11 +5615,14 @@ cell_span(const CPUCell *c) {
 static bool cell_is_blank(const CPUCell *c);
 
 // The column the cursor at x on linebuf row y is drawn at: the visual column
-// of its cell, except on a blank cell or the pending wrap column after a
-// right-to-left character, where it is the column visually left of that
-// character, as the next right-to-left character goes there
-index_type
-screen_cursor_render_x(Screen *self, index_type x, index_type y) {
+// of its cell. After a right-to-left character a beam goes to the column
+// visually left of it, as the next right-to-left character goes there, and a
+// block, underline or hollow cursor does too when on a blank cell or the
+// pending wrap column. A beam on a right-to-left cell is drawn at the right
+// edge of the cell, flagged by mirrored.
+static index_type
+cursor_visual_in_row(Screen *self, index_type x, index_type y, CursorShape shape, bool *mirrored) {
+    *mirrored = false;
     if (!screen_bidi_maps_usable(self)) return x;
     const BidiMaps *b = self->bidi_maps;
     const index_type render_row = y + rendered_scrolled_by(self) + pixel_scroll_enabled(self);
@@ -5620,15 +5630,63 @@ screen_cursor_render_x(Screen *self, index_type x, index_type y) {
     // The paused snapshot is indexed by render row, as the maps are
     const CPUCell *cells = self->paused_rendering.expires_at ? linebuf_cpu_cells_for_line(self->paused_rendering.linebuf, render_row)
                                                              : linebuf_cpu_cells_for_line(self->linebuf, y);
-    if (x > 0 && (x == self->columns || (x < self->columns && cell_is_blank(cells + x)))) {
+    if (x > 0 && x <= self->columns) {
         index_type p = x - 1;
         while (p && cells[p].is_multicell && cells[p].x) p--;
         if (bidi_cell_is_rtl(b, render_row, p)) {
             const index_type left = bidi_visual_x(b, render_row, p, cell_span(cells + p));
-            return left ? left - 1 : 0;
+            if (shape == CURSOR_BEAM) {
+                *mirrored = left > 0;
+                return left ? left - 1 : 0;
+            }
+            if (x == self->columns || cell_is_blank(cells + x)) return left ? left - 1 : 0;
         }
     }
-    return x < self->columns ? bidi_visual_x(b, render_row, x, cell_span(cells + x)) : x;
+    if (x >= self->columns) return x;
+    const index_type span = cell_span(cells + x);
+    const index_type visual = bidi_visual_x(b, render_row, x, span);
+    if (shape != CURSOR_BEAM || !bidi_cell_is_rtl(b, render_row, x)) return visual;
+    *mirrored = true;
+    return visual + span - 1;
+}
+
+bool
+screen_overlay_visual_start(Screen *self, index_type *start) {
+    const OverlayLine *ol = &self->overlay_line;
+    if (!ol->is_active || self->paused_rendering.expires_at || !screen_bidi_maps_usable(self)) return false;
+    const BidiMaps *b = self->bidi_maps;
+    const index_type render_row = ol->ynum + self->scrolled_by + pixel_scroll_enabled(self);
+    if (render_row >= b->rows || !b->active[render_row]) return false;
+    const index_type n = MIN(ol->text_len, self->columns);
+    bool mirrored;
+    const index_type c = cursor_visual_in_row(self, ol->xstart, ol->ynum, CURSOR_BEAM, &mirrored);
+    // A mirrored beam is an RTL insertion point: the block grows leftwards from it
+    *start = MIN(mirrored ? c + 1 - MIN(n, c + 1) : c, self->columns - n);
+    return true;
+}
+
+index_type
+screen_cursor_render_x(Screen *self, index_type x, index_type y, CursorShape shape, bool *mirrored) {
+    if (screen_is_overlay_active(self)) {
+        index_type start;
+        if (screen_overlay_visual_start(self, &start)) {
+            // The pre-edit block is drawn left to right
+            *mirrored = false;
+            return start + self->overlay_line.cursor_x - screen_overlay_line_start(self);
+        }
+    }
+    return cursor_visual_in_row(self, x, y, shape, mirrored);
+}
+
+index_type
+screen_ime_anchor_x(Screen *self) {
+    index_type x;
+    if (screen_is_overlay_active(self)) return screen_overlay_visual_start(self, &x) ? x : screen_overlay_line_start(self);
+    if (self->paused_rendering.expires_at) return self->cursor->x;
+    bool mirrored;
+    x = cursor_visual_in_row(self, self->cursor->x, self->cursor->y, CURSOR_BEAM, &mirrored);
+    // A mirrored beam is on its cell's right edge, so the insertion point is the next cell
+    return mirrored ? MIN(x + 1, self->columns - 1) : x;
 }
 // }}}
 
@@ -5701,6 +5759,7 @@ screen_update_cell_data(Screen *self, void *address, FONTS_DATA_HANDLE fonts_dat
             render_overlay_line(self, self->linebuf->line, fonts_data);
         }
         update_overlay_line_data(self, address);
+        update_overlay_ime_position(self);
     }
 }
 
@@ -6801,7 +6860,14 @@ render_overlay_line(Screen *self, Line *line, FONTS_DATA_HANDLE fonts_data) {
     line_save_cells(line, 0, line->xnum, ol.render_cells, ol.cpu_cells);
     line_reset_cells(line, 0, line->xnum, ol.original_line.render_cells, ol.original_line.cpu_cells);
     ol.is_dirty = false;
-    const index_type x = screen_overlay_line_start(self), y = MIN(ol.ynum + self->scrolled_by, self->lines - 1);
+#undef ol
+}
+
+// Runs after the upload, as the maps are not valid for the frame while render_overlay_line() runs in the row loop
+static void
+update_overlay_ime_position(Screen *self) {
+#define ol self->overlay_line
+    const index_type x = screen_ime_anchor_x(self), y = MIN(ol.ynum + self->scrolled_by, self->lines - 1);
     // The IME is anchored at the start of the pre-edit text, see prepare_ime_position_update_event()
     if (ol.last_ime_pos.x != x || ol.last_ime_pos.y != y) {
         ol.last_ime_pos.x = x;
@@ -6815,6 +6881,13 @@ static void
 update_overlay_line_data(Screen *self, uint8_t *data) {
     const int render_row_offset = pixel_scroll_enabled(self);
     const size_t base = sizeof(CellGPUData) * (self->overlay_line.ynum + self->scrolled_by + render_row_offset) * self->columns;
+    index_type start;
+    if (screen_overlay_visual_start(self, &start)) {
+        // The row was uploaded through its map, only the pre-edit block goes over it
+        const index_type s = screen_overlay_line_start(self), n = MIN(self->overlay_line.text_len, self->columns);
+        cells_for_gpu(self->overlay_line.cpu_cells + s, self->overlay_line.render_cells + s, n, (CellGPUData *)(data + base) + start);
+        return;
+    }
     cells_for_gpu(self->overlay_line.cpu_cells, self->overlay_line.render_cells, self->columns, (CellGPUData *)(data + base));
 }
 
@@ -9226,9 +9299,63 @@ test_bidi_is_rtl(Screen *self, PyObject *args) {
 }
 
 static PyObject *
+test_cursor_visual(Screen *self, PyObject *args) {
+    unsigned x, y;
+    int shape;
+    if (!PyArg_ParseTuple(args, "IIi", &x, &y, &shape)) return NULL;
+    bool mirrored;
+    const index_type col = cursor_visual_in_row(self, x, y, shape, &mirrored);
+    return Py_BuildValue("IO", col, mirrored ? Py_True : Py_False);
+}
+
+static void
+test_cursor_picked(Screen *self, index_type *x, index_type *y) {
+    if (screen_is_overlay_active(self)) *x = self->overlay_line.cursor_x, *y = self->overlay_line.ynum;
+    else {
+        const Cursor *c = self->paused_rendering.expires_at ? &self->paused_rendering.cursor : self->cursor;
+        *x = c->x, *y = c->y;
+    }
+}
+
+static index_type
+test_cursor_render_picked(Screen *self, CursorShape shape, bool focused, bool *mirrored) {
+    index_type x, y;
+    test_cursor_picked(self, &x, &y);
+    return screen_cursor_render_x(self, x, y, cursor_shape_drawn(focused, shape), mirrored);
+}
+
+static PyObject *
+test_cursor_render_info(Screen *self, PyObject *args) {
+    int shape = -1;
+    int focused = 1;
+    if (!PyArg_ParseTuple(args, "|ip", &shape, &focused)) return NULL;
+    if (shape >= 0) {
+        test_cursor_picked(self, &self->cursor_render_info.x, &self->cursor_render_info.y);
+        self->cursor_render_info.shape = shape;
+        self->cursor_render_info.is_focused = focused;
+    }
+    return Py_BuildValue("IO", self->cursor_render_info.visual_x, self->cursor_render_info.beam_mirrored ? Py_True : Py_False);
+}
+
+static PyObject *
+test_cursor_render(Screen *self, PyObject *args) {
+    int shape;
+    int focused = 1;
+    if (!PyArg_ParseTuple(args, "i|p", &shape, &focused)) return NULL;
+    bool mirrored;
+    const index_type col = test_cursor_render_picked(self, shape, focused, &mirrored);
+    return Py_BuildValue("IO", col, mirrored ? Py_True : Py_False);
+}
+
+static PyObject *
+test_ime_anchor_x(Screen *self, PyObject *a UNUSED) {
+    return PyLong_FromUnsignedLong(screen_ime_anchor_x(self));
+}
+
+static PyObject *
 test_cursor_render_x(Screen *self, PyObject *a UNUSED) {
-    const Cursor *c = self->paused_rendering.expires_at ? &self->paused_rendering.cursor : self->cursor;
-    return PyLong_FromUnsignedLong(screen_cursor_render_x(self, c->x, c->y));
+    bool mirrored;
+    return PyLong_FromUnsignedLong(test_cursor_render_picked(self, CURSOR_BLOCK, true, &mirrored));
 }
 
 static PyObject *
@@ -9307,7 +9434,11 @@ static PyMethodDef methods[] = {
     METHODB(test_bidi_logical_x, METH_VARARGS),
     METHODB(test_bidi_logical_click, METH_VARARGS),
     METHODB(test_bidi_is_rtl, METH_VARARGS),
+    METHODB(test_cursor_visual, METH_VARARGS),
+    METHODB(test_cursor_render, METH_VARARGS),
+    METHODB(test_cursor_render_info, METH_VARARGS),
     METHODB(test_cursor_render_x, METH_NOARGS),
+    METHODB(test_ime_anchor_x, METH_NOARGS),
     METHODB(test_apply_selection, METH_O),
     METHODB(test_bidi_mode_changed, METH_NOARGS),
     METHODB(test_bidi_check_mode, METH_NOARGS),
