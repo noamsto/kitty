@@ -421,6 +421,7 @@ class TestScreen(BaseTest):
                 if i + 1 < s.lines:
                     parse_bytes(s, b'\r\n')
             self.assertTrue(s.pause_rendering(True, 5000))
+            parse_bytes(s, b'\x1b[H\x1b[2JXXXX')  # live screen changes, the snapshot must not
             for r, text in enumerate(texts):
                 self.ae(str(s.paused_cursor_line(r)), text, f'{pixel_scroll=} {r=}')
             with self.assertRaises(IndexError):
