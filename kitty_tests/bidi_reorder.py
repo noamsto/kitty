@@ -565,17 +565,19 @@ class TestBidiReorder(BaseTest):
                 self.assertIsNone(self.v2l(s, y))
                 self.assert_shaped(s, y, self.fresh_sprites('(12)'))
 
-    def test_preedit_row_bypass(self):
-        # the pre-edit row has no map and is uploaded in logical order, then has its map again once the overlay closes
+    def test_overlay_row_keeps_map(self):
+        # the pre-edit row keeps its map and is uploaded through it, then is as before once the overlay closes
         s = self.screen()
         draw_coloured(s, 'abc' + A)
+        # moved explicitly: left at x 6, right after the RTL run, the beam rule mirrors and the block would land over b/c
+        s.cursor_position(1, 9)
         logical = [s.cell_style_idx(0, x) for x in range(6)]
-        visual = [logical[v] for v in (0, 1, 2, 5, 4, 3)]
-        self.ae((self.refresh(s, 0), styles(self.uploaded(s, 0))[:6]), ((0, 1, 2, 5, 4, 3) + ID10[6:], visual))
+        visual = [logical[v] for v in MIXED_V2L[:6]]
+        self.ae((self.refresh(s, 0), styles(self.uploaded(s, 0))[:6]), (MIXED_V2L, visual))
         s.test_update_overlay_text('xy')
-        self.ae((self.refresh(s, 0), styles(self.uploaded(s, 0))[:6]), (None, logical))
+        self.ae((self.refresh(s, 0), styles(self.uploaded(s, 0))[:6]), (MIXED_V2L, visual))
         s.test_update_overlay_text('')
-        self.ae((self.refresh(s, 0), styles(self.uploaded(s, 0))[:6]), ((0, 1, 2, 5, 4, 3) + ID10[6:], visual))
+        self.ae((self.refresh(s, 0), styles(self.uploaded(s, 0))[:6]), (MIXED_V2L, visual))
         self.assert_shaped(s, 0, self.fresh_sprites('abc' + A, cols=10))
 
     def test_split_paragraph_reshapes_lower_part(self):
@@ -1402,9 +1404,8 @@ class TestBidiReorder(BaseTest):
                 self.ae(self.state(s), self.state(f))
                 self.ae(self.frame(s), (0, 0))
 
-    def test_cache_placeholder_and_preedit_rows_never_hit(self):
-        # a paragraph with an image placeholder row is never resolved, whatever entries its rows had; the pre-edit row's
-        # paragraph resolves in every frame while the overlay is shown
+    def test_cache_placeholder_rows_never_hit(self):
+        # a paragraph with an image placeholder row is never resolved, whatever entries its rows had
         s = self.paragraph('אבגדה', '(12ב')
         self.warm(s)
         self.ae((self.frame(s)[0], self.vmaps(s)[0] is not None), (0, True))  # the unchanged paragraph is cached
@@ -1412,16 +1413,6 @@ class TestBidiReorder(BaseTest):
         self.assertTrue(s.linebuf.is_continued(1))
         for _ in range(3):
             self.ae((self.frame(s)[0], self.vmaps(s)[:2]), (0, (None, None)))
-        s = self.paragraph('אבגדה', '(12ב')
-        self.warm(s)
-        s.test_update_overlay_text('xy')
-        self.ae([self.frame(s)[0] > 0 for _ in range(3)], [True] * 3)
-        s.test_update_overlay_text('')
-        self.assertGreater(self.frame(s)[0], 0)
-        self.ae(self.frame(s)[0], 0)
-        f = self.paragraph('אבגדה', '(12ב')
-        self.frame(f)
-        self.ae(self.state(s), self.state(f))
 
     def test_cache_changes_during_a_pause(self):
         # lines moved on the live screen while paused, with no row written: the snapshot keeps showing the old rows, and the
@@ -3068,3 +3059,137 @@ class TestBidiReorder(BaseTest):
         test_screen_update_cell_data(s)
         self.ae(s.test_cursor_render(CURSOR_BEAM, True), (5, True))
         self.ae(s.test_cursor_render(CURSOR_BEAM, False), (5, False))
+
+    def preedit_reference(self, text, x, preedit='xy'):
+        # Rows a screen that never sent CSI 8 h uploads for text, cursor at x, without and with the pre-edit
+        f = self.create_screen(cols=10, lines=5, scrollback=5, options={})
+        draw_coloured(f, text)
+        f.cursor_position(1, x + 1)
+        plain = self.uploaded(f, 0)
+        self.assertTrue(any(self.sprites(plain)))
+        f.test_update_overlay_text(preedit)
+        return plain, self.uploaded(f, 0)
+
+    def test_cache_overlay_row(self):
+        # an overlay line on a Hebrew row, then removed: the row keeps its map and every frame resolves nothing
+        s = self.screen()
+        s.draw(MIXED)
+        s.cursor_position(1, 9)
+        self.warm(s)
+        seen = []
+        for overlay, n in (('xy', 3), ('', 1)):
+            s.test_update_overlay_text(overlay)
+            seen += [(self.frame(s)[0], self.v2l(s, 0)) for _ in range(n)]
+        self.ae(seen, [(0, MIXED_V2L)] * 4)
+
+    def test_preedit_rtl_paragraph(self):
+        # The cursor in the blank at x 7 is left of the text; the pre-edit of n cells ends there and extends left (IME anchor at 3 - n)
+        plain_ref, preedit_ref = self.preedit_reference(A + ' ' + A, 7)
+        s = self.screen()
+        parse_bytes(s, b'\x1b[?2501h')
+        draw_coloured(s, A + ' ' + A)
+        row0, v2l0 = self.uploaded(s, 0), self.v2l(s, 0)
+
+        def caret():
+            return s.test_ime_anchor_x(), s.test_cursor_render(CURSOR_BEAM)
+
+        self.ae((v2l0, s.test_cursor_visual(7, 0, CURSOR_BEAM), s.test_ime_anchor_x()), (ID10[::-1], (2, True), 3))
+        self.warm(s)
+        resolves = s.test_bidi_counts()[0]
+        s.test_update_overlay_text('xy')
+        self.ae(caret(), (1, (3, False)))
+        s.test_update_overlay_text('xyz')
+        self.ae(caret(), (0, (3, False)))
+        s.test_update_overlay_text('xy')
+        row = self.uploaded(s, 0)
+        # whole cells are compared: both screens intern the same colours in the same order, so the style indices match
+        self.ae((self.v2l(s, 0), row[:1] + row[3:], row[1:3]), (v2l0, row0[:1] + row0[3:], preedit_ref[7:9]))
+        self.ae(caret(), (1, (3, False)))
+        for _ in range(3):
+            self.frame(s)
+        self.ae(s.test_bidi_counts()[0], resolves)
+        s.test_update_overlay_text('')
+        self.ae((self.uploaded(s, 0), self.v2l(s, 0)), (row0, v2l0))
+        # a stamped row keeps its record, so it stays reordered after the inverted-direction mode is reset
+        parse_bytes(s, b'\x1b[8l')
+        self.ae((self.sprites(self.uploaded(s, 0)), self.v2l(s, 0)), (self.sprites(row0), ID10[::-1]))
+
+    def test_preedit_in_other_rows(self):
+        # LTR cell: the cursor on b follows a Latin letter, the pre-edit block starts at column 1 and extends right
+        _, preedit_ref = self.preedit_reference('abc' + A, 1)
+        s = self.screen()
+        draw_coloured(s, 'abc' + A)
+        s.cursor_position(1, 2)
+        row0 = self.uploaded(s, 0)
+        self.ae((self.v2l(s, 0), s.test_cursor_visual(1, 0, CURSOR_BEAM)), (MIXED_V2L, (1, False)))
+        s.test_update_overlay_text('xy')
+        self.ae((s.test_ime_anchor_x(), s.test_cursor_render(CURSOR_BEAM)), (1, (3, False)))
+        row = self.uploaded(s, 0)
+        self.ae((self.v2l(s, 0), row[:1] + row[3:], row[1:3]), (MIXED_V2L, row0[:1] + row0[3:], preedit_ref[1:3]))
+        # the pre-edit leaves the line record alone
+        s = self.screen()
+        parse_bytes(s, b'\x1b[?2501h')
+        self.fill(s, ['abc def'])
+        self.frame(s)
+        r0 = s.test_bidi_line_record(0)
+        for text in ('\u200fxy', ''):
+            s.test_update_overlay_text(text)
+            self.frame(s)
+        f = self.screen()
+        parse_bytes(f, b'\x1b[?2501h')
+        f.draw('abc def')
+        self.frame(f)
+        self.ae((s.test_bidi_line_record(0), self.vmaps(s)), (r0, self.vmaps(f)))
+        # A Latin row has no map: the pre-edit row is uploaded as a screen without bidi uploads it
+        _, preedit_ref = self.preedit_reference('abc def', 7)
+        s = self.screen()
+        parse_bytes(s, b'\x1b[?2501h')
+        draw_coloured(s, 'abc def')
+        self.frame(s)
+        s.test_update_overlay_text('xy')
+        self.ae((s.test_ime_anchor_x(), s.test_cursor_render(CURSOR_BEAM)), (7, (9, False)))
+        self.ae((self.uploaded(s, 0), self.v2l(s, 0)), (preedit_ref, None))
+
+    def test_ime_anchor_x(self):
+        # the IME anchor is the visual column of the cursor, or of the pre-edit's start
+        s = self.mixed()
+        for x, want in ((0, 0), (3, 6), (6, 3), (8, 8)):
+            s.cursor_position(1, x + 1)
+            test_screen_update_cell_data(s)
+            self.ae(s.test_ime_anchor_x(), want, x)
+        s = self.screen()
+        parse_bytes(s, b'\x1b[2 k')
+        s.draw(MIXED)
+        s.cursor_position(2, 1)
+        parse_bytes(s, b'ab\x1b[2K')
+        self.ae(self.refresh(s, 1), ID10[::-1])
+        self.ae(s.test_ime_anchor_x(), 9)  # beam column 9, mirrored, +1 clamped to the last column
+        # no map: the anchor is the cursor, or the overlay's start
+        s = self.create_screen(cols=10, lines=5, scrollback=5, options={})
+        s.draw(MIXED)
+        s.cursor_position(1, 8)
+        test_screen_update_cell_data(s)
+        self.ae(s.test_ime_anchor_x(), 7)
+        s.test_update_overlay_text('xy')
+        test_screen_update_cell_data(s)
+        self.ae(s.test_ime_anchor_x(), 7)
+        s.cursor_position(1, 10)
+        test_screen_update_cell_data(s)
+        self.ae(s.test_ime_anchor_x(), 8)  # right-aligned: min(9, 10 - 2)
+        s = self.mixed()
+        s.cursor_position(1, 4)
+        test_screen_update_cell_data(s)
+        s.pause_rendering(True, 1000)
+        test_screen_update_cell_data(s)
+        self.ae(s.test_ime_anchor_x(), 3)  # the live logical x
+
+    def test_preedit_block_clamped_left(self):
+        # a pre-edit longer than the room left of the cursor starts at the left edge
+        s = self.screen()
+        parse_bytes(s, b'\x1b[?2501h')
+        draw_coloured(s, A + ' ' + A)
+        _, preedit_ref = self.preedit_reference(A + ' ' + A, 7, 'xyzw')  # the block is right-aligned there, at columns 6-9
+        s.test_update_overlay_text('xyzw')
+        row = self.uploaded(s, 0)
+        self.ae((s.test_cursor_render(CURSOR_BEAM), s.test_ime_anchor_x()), ((4, False), 0))
+        self.ae(row[:4], preedit_ref[6:10])
