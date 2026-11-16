@@ -5135,8 +5135,7 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued) {
         if (same) return last;
     }
     if (resolved) {
-        bidi_resolve_paragraph(
-            b, around + (first - y0), last - first + 1, tc, bidi_record_base(lead), first + src->to_render_row, min_render_row);
+        bidi_resolve_paragraph(b, around + (first - y0), last - first + 1, tc, bidi_record_base(lead), first + src->to_render_row, min_render_row);
     } else {
         for (int r = min_render_row; r < end_render_row; r++) {
             bidi_set_row_inactive(b, r);
@@ -5258,8 +5257,11 @@ update_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE fonts_data,
     b->valid = true;
     // The cursor info was collected from the maps of the previous frame
     self->cursor_render_info.visual_x = screen_cursor_render_x(
-        self, self->cursor_render_info.x, self->cursor_render_info.y,
-        cursor_shape_drawn(self->cursor_render_info.is_focused, self->cursor_render_info.shape), &self->cursor_render_info.beam_mirrored);
+        self,
+        self->cursor_render_info.x,
+        self->cursor_render_info.y,
+        cursor_shape_drawn(self->cursor_render_info.is_focused, self->cursor_render_info.shape),
+        &self->cursor_render_info.beam_mirrored);
     return true;
 }
 
@@ -5304,8 +5306,11 @@ update_paused_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE font
     }
     b->valid = true;
     self->cursor_render_info.visual_x = screen_cursor_render_x(
-        self, self->cursor_render_info.x, self->cursor_render_info.y,
-        cursor_shape_drawn(self->cursor_render_info.is_focused, self->cursor_render_info.shape), &self->cursor_render_info.beam_mirrored);
+        self,
+        self->cursor_render_info.x,
+        self->cursor_render_info.y,
+        cursor_shape_drawn(self->cursor_render_info.is_focused, self->cursor_render_info.shape),
+        &self->cursor_render_info.beam_mirrored);
     return true;
 }
 

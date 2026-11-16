@@ -104,13 +104,7 @@ bidi_record_base(LineAttrs a) {
 // dropped when the resolve fails or leaves its cells in logical order. Returns
 // true if any row got a map.
 bool bidi_resolve_paragraph(
-    BidiMaps *b,
-    const CPUCell *const *rows,
-    unsigned num_rows,
-    const TextCache *tc,
-    FriBidiParType base,
-    int first_render_row,
-    index_type min_render_row);
+    BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const TextCache *tc, FriBidiParType base, int first_render_row, index_type min_render_row);
 void bidi_set_row_inactive(BidiMaps *b, index_type render_row);
 // Whether the row's cells would give the signature stored for render_row; overwrites the scratch
 bool bidi_row_signature_matches(BidiMaps *b, const CPUCell *cells, const TextCache *tc, index_type render_row);

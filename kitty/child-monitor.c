@@ -992,8 +992,8 @@ collect_cursor_info(CursorRenderInfo *ans, Window *w, monotonic_t now, OSWindow 
     ans->shape = cursor->shape ? cursor->shape : OPT(cursor_shape);
     ans->is_focused = focused;
     ans->beam_mirrored = false;
-    ans->visual_x = rd->screen->bidi_maps ?
-        screen_cursor_render_x(rd->screen, ans->x, ans->y, cursor_shape_drawn(focused, ans->shape), &ans->beam_mirrored) : ans->x;
+    ans->visual_x =
+        rd->screen->bidi_maps ? screen_cursor_render_x(rd->screen, ans->x, ans->y, cursor_shape_drawn(focused, ans->shape), &ans->beam_mirrored) : ans->x;
     ans->is_visible = false;
     ans->multicursor_count = 0;
     ans->cursor_opacity = 1;

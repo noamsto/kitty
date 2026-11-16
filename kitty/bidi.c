@@ -354,13 +354,7 @@ bidi_row_signature_matches(BidiMaps *b, const CPUCell *cells, const TextCache *t
 
 bool
 bidi_resolve_paragraph(
-    BidiMaps *b,
-    const CPUCell *const *rows,
-    unsigned num_rows,
-    const TextCache *tc,
-    FriBidiParType base,
-    int first_render_row,
-    index_type min_render_row) {
+    BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const TextCache *tc, FriBidiParType base, int first_render_row, index_type min_render_row) {
     FriBidiParType dir = base;
     uint32_t n_trim = 0;
     const bool reorder = resolve_levels(b, rows, num_rows, tc, &dir, &n_trim);
