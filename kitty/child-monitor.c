@@ -976,7 +976,7 @@ cursor_needs_render(Window *w) {
 }
 
 static bool
-collect_cursor_info(CursorRenderInfo *ans, Window *w, monotonic_t now, OSWindow *os_window) {
+collect_cursor_info(CursorRenderInfo *ans, Window *w, monotonic_t now, OSWindow *os_window, bool focused) {
     WindowRenderData *rd = &w->render_data;
     const Cursor *cursor;
     if (screen_is_overlay_active(rd->screen)) {
@@ -989,7 +989,11 @@ collect_cursor_info(CursorRenderInfo *ans, Window *w, monotonic_t now, OSWindow 
         ans->x = cursor->x;
         ans->y = cursor->y;
     }
-    ans->visual_x = rd->screen->bidi_maps ? screen_cursor_render_x(rd->screen, ans->x, ans->y) : ans->x;
+    ans->shape = cursor->shape ? cursor->shape : OPT(cursor_shape);
+    ans->is_focused = focused;
+    ans->beam_mirrored = false;
+    ans->visual_x =
+        rd->screen->bidi_maps ? screen_cursor_render_x(rd->screen, ans->x, ans->y, cursor_shape_drawn(focused, ans->shape), &ans->beam_mirrored) : ans->x;
     ans->is_visible = false;
     ans->multicursor_count = 0;
     ans->cursor_opacity = 1;
@@ -1020,8 +1024,6 @@ collect_cursor_info(CursorRenderInfo *ans, Window *w, monotonic_t now, OSWindow 
     }
     ans->text_blink_opacity = blink_opacity;
     ans->cursor_opacity = cursor_blinking ? blink_opacity : 1.0f;
-    ans->shape = cursor->shape ? cursor->shape : OPT(cursor_shape);
-    ans->is_focused = os_window->is_focused;
     return cursor_needs_render(w);
 }
 
@@ -1046,11 +1048,11 @@ sync_ime_position_with_cursor(OSWindow *os_window, Window *w) {
     OverlayLine *ol = &screen->overlay_line;
     if (screen_is_overlay_active(screen)) {
         // During a composition the IME is anchored to the pre-edit text, see
-        // render_overlay_line(), so resync with the cursor once it ends.
+        // update_overlay_ime_position(), so resync with the anchor once it ends.
         ol->last_ime_cursor.valid = false;
         return;
     }
-    const index_type x = screen->cursor->x, y = screen->cursor->y;
+    const index_type x = screen_ime_anchor_x(screen), y = screen->cursor->y;
     if (ol->last_ime_cursor.valid && ol->last_ime_cursor.x == x && ol->last_ime_cursor.y == y) return;
     ol->last_ime_cursor.x = x;
     ol->last_ime_cursor.y = y;
@@ -1123,8 +1125,7 @@ prepare_to_render_os_window(
             bool is_active_window = i == tab->active_window;
             if (is_active_window) {
                 *active_window_id = w->id;
-                if (collect_cursor_info(&WD.screen->cursor_render_info, w, now, os_window)) needs_render = true;
-                WD.screen->cursor_render_info.is_focused = os_window->is_focused;
+                if (collect_cursor_info(&WD.screen->cursor_render_info, w, now, os_window, os_window->is_focused)) needs_render = true;
                 if (global_state.ime_used && os_window->is_focused) sync_ime_position_with_cursor(os_window, w);
                 set_os_window_title_from_window(w, os_window);
                 *active_window_bg = window_bg;
@@ -1170,12 +1171,10 @@ prepare_to_render_os_window(
                 }
             } else {
                 if (WD.screen->cursor_render_info.render_even_when_unfocused) {
-                    if (collect_cursor_info(&WD.screen->cursor_render_info, w, now, os_window)) needs_render = true;
-                    WD.screen->cursor_render_info.is_focused = false;
+                    if (collect_cursor_info(&WD.screen->cursor_render_info, w, now, os_window, false)) needs_render = true;
                 } else {
                     if (WD.screen->sgr_blink_was_used) {
-                        if (collect_cursor_info(&WD.screen->cursor_render_info, w, now, os_window)) needs_render = true;
-                        WD.screen->cursor_render_info.is_focused = false;
+                        if (collect_cursor_info(&WD.screen->cursor_render_info, w, now, os_window, false)) needs_render = true;
                     } else {
                         WD.screen->cursor_render_info.text_blink_opacity = 1;
                     }
@@ -1312,6 +1311,9 @@ render_prepared_os_window(
                 draw_cells(trd, os_window, i == tab->active_window, true, false, NULL, w, now);
         }
     }
+    // the sync in prepare_to_render_os_window() read the previous frame's bidi maps
+    if (active_window && global_state.ime_used && os_window->is_focused && active_window->render_data.screen->bidi_maps)
+        sync_ime_position_with_cursor(os_window, active_window);
     draw_rounded_borders(br, active_window_bg, num_visible_windows, all_windows_have_same_bg, os_window);
     setup_os_window_for_rendering(os_window, tab, active_window, false, now);
     if (global_state.thumbnail_callback.os_window == os_window->id) {
