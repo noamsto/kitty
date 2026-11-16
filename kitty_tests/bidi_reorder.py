@@ -2370,6 +2370,9 @@ class TestBidiReorder(BaseTest):
     # extra (kinds, weights) of diff_op for streaming at the bottom, about 30% of the ops on top of the default ones
     STREAM_MIX = (('stream', 'streamk', 'su'), (20, 13, 10))
 
+    # direction ops (SCP, 2501, ED, EL): the paragraph direction changes under a screen full of text
+    DIRECTION_MIX = (('scp', 'auto', 'ed', 'el'), (8, 5, 3, 5))
+
     def diff_op(self, rng, s, paused, first=False, mix=None):
         # (name, function of a screen): the arguments are fixed here so that a fresh screen replays the same operation
         L, C = s.lines, s.columns
@@ -2396,6 +2399,16 @@ class TestBidiReorder(BaseTest):
             texts = [''.join(rng.choices(self.DIFF_POOL, k=rng.randrange(3, 2 * C))) for _ in range(1 if kind == 'stream' else rng.randrange(2, 4))]
             data = ''.join(text + '\r\n' for text in texts).encode()
             return kind, lambda s: (s.cursor_position(L, 1), parse_bytes(s, data))
+        if kind == 'scp':
+            seq = rng.choice((self.SCP_RTL, self.SCP_LTR, b'\x1b[0 k'))
+            return 'scp', lambda s: parse_bytes(s, seq)
+        if kind == 'auto':
+            seq = rng.choice((self.AUTO, b'\x1b[?2501l'))
+            return 'auto', lambda s: parse_bytes(s, seq)
+        if kind == 'ed':
+            return 'ed', csi(rng.choice((b'\x1b[J', b'\x1b[1J', b'\x1b[2J')))
+        if kind == 'el':
+            return 'el', csi(rng.choice((b'\x1b[K', b'\x1b[1K', b'\x1b[2K')))
         if kind == 'su':
             seq = f'\x1b[{rng.randrange(1, L + 1)}S'.encode()
             return 'su', lambda s: parse_bytes(s, seq)
@@ -2445,8 +2458,9 @@ class TestBidiReorder(BaseTest):
             return 'ich', lambda s: (s.cursor_position(y + 1, x + 1), s.insert_characters(n))
         return 'crlf', lambda s: (s.cursor_position(y + 1, x + 1), parse_bytes(s, b'\r\n'))
 
-    def differential(self, seed, count, mix=None, follows=None):
-        # follows (a list) gets a 1 for each frame that followed a scroll
+    def differential(self, seed, count, mix=None, follows=None, rtl_bases=None):
+        # follows (a list) gets a 1 for each frame that followed a scroll; rtl_bases gets a 1 for each frame in which a row has an RTL
+        # paragraph direction although it holds no Hebrew letter, a direction that only a control can have given it
         rng = random.Random(seed)
 
         def new():
@@ -2480,7 +2494,10 @@ class TestBidiReorder(BaseTest):
             self.frame(f)
             exempt = self.snapshot_top_rows(f) if paused else 0
             (vs, ls), (vf, lf) = self.state(s), self.state(f)
-            self.ae((vs[exempt:], ls[exempt:]), (vf[exempt:], lf[exempt:]), f'seed {seed}, op {i} ({name})')
+            ps, pf = [self.prtl(s, y) for y in range(s.lines)], [self.prtl(f, y) for y in range(f.lines)]
+            self.ae((vs[exempt:], ls[exempt:], ps[exempt:]), (vf[exempt:], lf[exempt:], pf[exempt:]), f'seed {seed}, op {i} ({name})')
+            if rtl_bases is not None:
+                rtl_bases.append(int(any(p and not any('֐' <= c <= '׿' for c in str(s.linebuf.line(y))) for y, p in enumerate(ps))))
         return shortcuts
 
     def snapshot_top_rows(self, f):
@@ -2525,6 +2542,19 @@ class TestBidiReorder(BaseTest):
             self.differential(seed, count, mix=self.STREAM_MIX, follows=follows)
         # summed so that the test cannot pass without ever following
         self.assertGreaterEqual(sum(follows), seeds * count // 20, follows)
+
+    def test_direction_random_differential(self):
+        # direction ops, alone and among the streaming ones: the maps, levels and paragraph directions equal a fresh replay's after every frame
+        seeds = int(os.environ.get('KITTY_BIDI_DIFF_SEEDS', 3))
+        count = int(os.environ.get('KITTY_BIDI_DIFF_OPS', 150))
+        both = tuple(a + b for a, b in zip(self.DIRECTION_MIX, self.STREAM_MIX))
+        rtl_bases = []
+        counts = [self.differential(seed, count, mix=self.DIRECTION_MIX, rtl_bases=rtl_bases) for seed in range(seeds)]
+        self.assertGreaterEqual(sum(counts), seeds * count // 20, counts)
+        for seed in range(seeds):
+            self.differential(seed, count, mix=both, rtl_bases=rtl_bases)
+        # summed so that the test cannot pass without ever running under an RTL base
+        self.assertGreater(sum(rtl_bases), 0, rtl_bases)
 
     # Following a full-height index: the cache keeps the paragraphs of the lines that moved
     FOLLOW_ROWS = ['דהו', 'zxc', 'זחט', 'lkj']  # screen rows 0..3 of a 10x5 screen, the bottom row blank
