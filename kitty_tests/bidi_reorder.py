@@ -8,7 +8,7 @@ import struct
 import subprocess
 from collections import namedtuple
 
-from kitty.fast_data_types import CURSOR_BEAM, CURSOR_BLOCK, CURSOR_HOLLOW, CURSOR_UNDERLINE, get_options, test_screen_update_cell_data
+from kitty.fast_data_types import BIDI_MAX_ISOLATES, CURSOR_BEAM, CURSOR_BLOCK, CURSOR_HOLLOW, CURSOR_UNDERLINE, get_options, test_screen_update_cell_data
 from kitty.fonts.render import setup_for_testing
 
 from .base import BaseTest, draw_multicell, parse_bytes
@@ -411,7 +411,7 @@ class TestBidiReorder(BaseTest):
         return [(self.v2l(s, y), self.levels(s, y)) for y in range(lines)]
 
     def assert_controls_resolve_as_neutrals(self, text, cols, lines):
-        # a bidi control written normally is a combining char that never reaches FriBidi; one in an OSC 66 cell resolves as ! does
+        # a combined isolate control reaches FriBidi and an embedding or override does not; one in an OSC 66 cell resolves as ! does
         neutral = self.maps(osc66_controls(text, '!'), cols, lines)
         self.assertIsNotNone(neutral[0][0])
         self.ae(self.maps(osc66_controls(text), cols, lines), neutral)
@@ -428,6 +428,126 @@ class TestBidiReorder(BaseTest):
         self.assert_controls_resolve_as_neutrals('a' + RLO + 'bc' + PDF + 'd' + LRO + 'אב', cols=12, lines=2)
         # nested to FriBidi's deepest level
         self.assert_controls_resolve_as_neutrals((RLE + LRE) * 62 + 'אa', cols=200, lines=50)
+
+    def assert_rows(self, text, cols, rows, pre=b''):
+        # rows: (v2l prefix, levels prefix) of each screen row after one frame of text
+        got = self.maps(pre + text.encode(), cols, len(rows))
+        for y, (v2l, levels) in enumerate(rows):
+            self.assertIsNotNone(got[y][0], f'row {y} has no map')
+            self.ae((got[y][0][: len(v2l)], got[y][1][: len(levels)]), (v2l, levels), f'row {y}')
+
+    def test_combined_isolates_reach_fribidi(self):
+        # each control is written right after a drawn char, so it is stored in that char's cell and takes no column
+        AUTO = b'\x1b[?2501h'
+        cases = (
+            # RLI makes the digits level 2 and the space between them R: a 34 12
+            ('RLI numbers', 'a⁧12 34⁩', 10, b'', [((0, 4, 5, 3, 1, 2), (0, 2, 2, 1, 2, 2))]),
+            # the ! takes the isolate's direction (N2, eos R), so it is shown left of bc
+            ('RLI neutral after letters', 'a⁧bc!⁩', 10, b'', [((0, 3, 1, 2), (0, 2, 2, 1))]),
+            # without the FSI the ! would take the paragraph's L
+            ('FSI over hebrew', 'a⁨א!', 10, b'', [((0, 2, 1), (0, 1, 1))]),
+            # the PDI ends the isolate: c is at the paragraph level
+            ('PDI ends the isolate', 'a⁧!b⁩c', 10, b'', [((0, 2, 1, 3), (0, 1, 2, 0))]),
+            # LRI in an RTL paragraph makes the ! L
+            ('LRI in rtl paragraph', 'א⁦!a⁩ג', 10, AUTO, [((9, 8, 7, 6, 5, 4, 3, 1, 2, 0), (1, 2, 2, 1, 1, 1, 1, 1, 1, 1))]),
+            # an unmatched FSI isolates to the paragraph end, across the soft wrap
+            ('wide cell holds the PDI', 'a⁧b😀⁩c', 10, b'', [((0, 3, 2, 1, 4), (0, 2, 1, 1, 0))]),
+            ('wide L cell in an RLI', 'a⁧12 中⁩x', 10, b'', [((0, 4, 5, 3, 1, 2, 6), (0, 2, 2, 1, 2, 2, 0))]),
+            ('FSI to the paragraph end', 'a⁨אבגדהו!', 5, b'', [((0, 4, 3, 2, 1), (0, 1, 1, 1, 1)), ((2, 1, 0, 3, 4), (1, 1, 1, 0, 0))]),
+        )
+        for name, text, cols, pre, rows in cases:
+            with self.subTest(name):
+                self.assert_rows(text, cols, rows, pre)
+
+    def test_combined_isolates_keep_cells(self):
+        # the control is stored in the previous cell and takes no column
+        for text, cells in (
+            ('a⁧bc⁩', ['a⁧', 'b', 'c⁩']),
+            ('a⁨אב', ['a⁨', 'א', 'ב']),
+            ('a⁦b⁩c', ['a⁦', 'b⁩', 'c']),
+            ('a' + RLE + 'bc' + PDF, ['a' + RLE, 'b', 'c' + PDF]),
+        ):
+            with self.subTest(text=text):
+                s = self.screen()
+                s.draw(text)
+                self.ae(([s.line(0)[i] for i in range(len(cells) + 1)], s.cursor.x), (cells + ['\x00'], len(cells)))
+
+    def test_embeddings_stay_inert(self):
+        # combined embeddings and overrides are never fed: maps are those of the text without them
+        for control in (LRE, RLE, LRO, RLO):
+            with self.subTest(control=control):
+                plain = self.maps('אab!12'.encode(), 10, 1)
+                self.assertIsNotNone(plain[0][0])
+                self.ae(self.maps(('אa' + control + 'b!12' + PDF).encode(), 10, 1), plain)
+        plain = self.maps('xabcdאב'.encode(), 10, 1)
+        self.ae(self.maps(('x' + RLO + 'abc' + PDF + 'd' + LRE + 'אב' + PDF).encode(), 10, 1), plain)
+
+    def test_isolate_flood(self):
+        # every cell of a soft-wrapped paragraph holds a letter and 23 isolate controls: far over any cap, so it lays out as without them
+        cell = (ISOLATES * 6)[:23]
+        n = 9000
+        s = self.screen(cols=200, lines=50)
+        parse_bytes(s, ('a' + cell).encode())
+        self.ae(len(s.line(0)[0]), 24)
+        plain = self.maps(('א' + 'a' * (n - 1)).encode(), 200, 50)
+        self.assertIsNotNone(plain[0][0])
+        self.ae(self.maps(('א' + cell + ('a' + cell) * (n - 1)).encode(), 200, 50), plain)
+
+    def capped(self):
+        # BIDI_MAX_ISOLATES controls, the last in the last cell: RLI 12 34 PDI, then empty isolates (and a lone PDI) in letter
+        # cells, which leave every level as it is
+        fill = BIDI_MAX_ISOLATES - 2
+        return 'א a⁧12 34⁩ ' + 'b⁦⁩' * (fill // 2) + 'b⁩' * (fill % 2), 9 + (fill + 1) // 2
+
+    # a 34 12 after the Hebrew letter, and the same text with no control fed
+    CAPPED = (0, 1, 2, 6, 7, 5, 3, 4, 8), (1, 0, 0, 2, 2, 1, 2, 2, 0)
+    UNCAPPED = (0, 1, 2, 3, 4, 5, 6, 7, 8), (1, 0, 0, 0, 0, 0, 0, 0, 0)
+
+    def test_isolate_cap(self):
+        text, _ = self.capped()
+        got = self.maps(text.encode(), 40, 1)[0]
+        self.ae((got[0][:9], got[1][:9]), self.CAPPED)
+        text += '⁩'
+        got = self.maps(text.encode(), 40, 1)[0]
+        self.ae((got[0][:9], got[1][:9]), self.UNCAPPED)
+        self.ae(got, self.maps(''.join(ch for ch in text if ch not in ISOLATES).encode(), 40, 1)[0])
+
+    def test_isolate_signature_over_cap(self):
+        # one control over the cap, alone on the second row: removing it leaves that row with none, yet the paragraph is resolved
+        # again (over the cap it was not signed) and its controls are now fed
+        text, cells = self.capped()
+        s = self.screen(cols=40, lines=3)
+        s.draw(text + 'b' * (40 - cells) + 'c⁩d')
+        self.warm(s)
+        self.ae((self.vmaps(s)[0][:9], self.lv(s, 0)[:9]), self.UNCAPPED)
+        self.put(s, 2, 1, 'c')
+        self.ae(self.frame(s)[0], 1)
+        self.ae((self.vmaps(s)[0][:9], self.lv(s, 0)[:9]), self.CAPPED)
+
+    def test_isolate_signature_shortcut(self):
+        # a row that gains or loses an isolate control in a warm paragraph is resolved again, whatever its char classes
+        s = self.screen(lines=3)
+        s.draw('aא!')
+        self.warm(s)
+        self.ae((self.vmaps(s)[0][:3], self.lv(s, 0)[:3]), ((0, 1, 2), (0, 1, 0)))
+        self.put(s, 1, 1, 'a⁨')
+        self.ae(self.frame(s)[0], 1)
+        self.ae((self.vmaps(s)[0][:3], self.lv(s, 0)[:3]), ((0, 2, 1), (0, 1, 1)))
+        self.put(s, 1, 1, 'a')
+        self.ae(self.frame(s)[0], 1)
+        self.ae((self.vmaps(s)[0][:3], self.lv(s, 0)[:3]), ((0, 1, 2), (0, 1, 0)))
+
+    def test_ascii_prompt_fsi_fallback(self):
+        # P2 and P3 skip the isolate: with no strong char before the FSI the paragraph takes the fallback direction, the isolate is RTL
+        s = self.dscreen(self.AUTO)
+        s.draw('> שלום')
+        self.warm(s)
+        self.assertTrue(self.prtl(s, 0))
+        s = self.dscreen(self.AUTO)
+        s.draw('> ⁨שלום')
+        self.warm(s)
+        self.assertFalse(self.prtl(s, 0))
+        self.ae((self.vmaps(s)[0][:6], self.lv(s, 0)[:6]), ((0, 1, 5, 4, 3, 2), (0, 0, 1, 1, 1, 1)))
 
     def bracket_maps(self, text, cols, lines):
         # the maps of text, and of text with its brackets as !, which N0 cannot pair
@@ -699,7 +819,7 @@ class TestBidiReorder(BaseTest):
             ('ls שלום', 7, 2),
             ('שלום' + 'd', 4, 4),
             ('ab' + 'שלום' + ' d', 6, 1),
-            (A + ' 12', 6, 6),
+            (A + ' 12', 6, 2),
             ('abcdef' + 'אבגד', 10, 5),
             ('אבגד' + 'abcdef', 10, 10),
             ('abc', 1, 1),
@@ -1579,6 +1699,9 @@ class TestBidiReorder(BaseTest):
             'wide char': lambda s: s.draw('אב中'),
             'LTR start': lambda s: s.draw('abc אב'),
             'RLO cell': rlo_cell,
+            'FSI unmatched': lambda s: s.draw('א⁨ab!  '),
+            'RLI unmatched': lambda s: s.draw('א⁧12 34  '),
+            'RLI then PDI': lambda s: s.draw('א⁧12 34⁩  '),
         }
         for seqs in ((), (self.SCP_RTL,), (self.AUTO,)):
             for name, build in cases.items():
@@ -1594,6 +1717,19 @@ class TestBidiReorder(BaseTest):
                     rtl = bool(seqs) and (self.SCP_RTL in seqs or name != 'LTR start')
                     self.ae([self.prtl(s, 0) for s in screens], [rtl, rtl])
                     self.ae(self.state(screens[0]), self.state(screens[1]))
+        # the isolates reach the engine whether or not the blanks are trimmed (both unmatched, and the PDI case, end in blanks at the base level)
+        for seqs, text, want in (
+            ((self.AUTO,), 'א⁨ab!  ', (9, 8, 7, 6, 5, 4, 1, 2, 3, 0)),
+            ((), 'a⁧12 34  ', (0, 4, 5, 3, 1, 2, 6, 7, 8, 9)),
+            ((), 'a⁧12 34⁩  ', (0, 4, 5, 3, 1, 2, 6, 7, 8, 9)),
+        ):
+            for trim in (True, False):
+                with self.subTest(text=text, trim=trim):
+                    s = self.dscreen(*seqs)
+                    s.test_bidi_trim(trim)
+                    s.draw(text)
+                    self.warm(s)
+                    self.ae(self.vmaps(s)[0], want)
         # positive control: the N0 budget threshold follows the trimmed length (70 against 71 cells), so the switch must reach the engine
         states = []
         for trim in (True, False):
@@ -3210,7 +3346,7 @@ class TestBidiReorder(BaseTest):
             ('wide before the blank', R, 'אב😀', (1, 1, 1, 1), None, (((2, 0, 2), 6),), [(4, 5, R, 5)]),
             ('blank after hebrew run', L, 'ls שלום', None, (0, 1, 2, 6, 5, 4, 3) + ID10[7:], (((6, 0), 3),), [(7, 2, R, 2)]),
             ('blank after latin', L, 'ls abc', None, None, (), [(6, 6, L, 6)]),
-            ('blank after digits in rtl run', L, A + ' 12', (1, 1, 1, 1, 2, 2), None, (((6, 0), 6),), [(6, 6, L, 6)]),
+            ('blank after digits in rtl run', L, A + ' 12', (1, 1, 1, 1, 2, 2), None, (((6, 0), 6),), [(6, 2, L, 2)]),
             ('run at the left edge', L, A, None, (2, 1, 0) + ID10[3:], (), [(3, 0, L, 0)]),
             ('block over latin after run', L, 'שלום' + 'd', None, (3, 2, 1, 0, 4) + ID10[5:], (), [(4, 0, L, 4)]),
             ('block over latin after run, prefix', L, 'ab' + 'שלום' + 'd', None, (0, 1, 5, 4, 3, 2, 6) + ID10[7:], (), [(6, 1, R, 6)]),
@@ -3305,6 +3441,122 @@ class TestBidiReorder(BaseTest):
                 for x in (0, 3, 4, 6, 7):
                     for shape in (CURSOR_BEAM, CURSOR_BLOCK):
                         self.ae(s.test_cursor_visual(x, 0, shape), (x, False))
+
+    def assert_cursor_at(self, s, x, beam, block, msg=''):
+        # the drawn cursor with it at logical x: beam is (column, mirrored), the other shapes share the block's column and are never mirrored
+        if s.cursor.x != x:
+            s.cursor_position(1, x + 1)
+        self.ae(s.cursor.x, x, msg)
+        test_screen_update_cell_data(s)
+        self.ae((s.test_cursor_visual(x, 0, CURSOR_BEAM), s.test_cursor_render(CURSOR_BEAM)), (beam, beam), msg)
+        for shape in (CURSOR_BLOCK, CURSOR_UNDERLINE, CURSOR_HOLLOW):
+            self.ae(s.test_cursor_visual(x, 0, shape), (block, False), msg)
+        for shape in (CURSOR_BLOCK, CURSOR_UNDERLINE):
+            self.ae(s.test_cursor_render(shape), (block, False), msg)
+        self.ae(s.test_cursor_render_x(), block, msg)
+
+    def test_cursor_follows_run(self):
+        # At the end of the text the cursor sits where the next char of the run it types into goes: left of an RTL run in an
+        # LTR paragraph, right of an LTR run in an RTL one. Typed spaces after a letter are skipped to find that run.
+        F, T = False, True
+        AUTO, FORCE_RTL = b'\x1b[?2501h', b'\x1b[2 k'
+        # (name, escape sequences, text, columns, cursor x, beam (column, mirrored), column of the other shapes)
+        cases = (
+            # LTR paragraph: the typed space after the run is at the paragraph level, the cursor still follows the run
+            ('hebrew and space', b'', 'ab אני ', 10, 7, (2, T), 2),
+            ('hebrew and two spaces', b'', 'ab אני  ', 10, 8, (2, T), 2),
+            ('hebrew at the left edge', b'', 'אני ', 10, 4, (0, F), 0),
+            # RTL paragraph, LTR run: the right edge of abc, where the next letter goes
+            ('latin after hebrew', AUTO, 'שלום abc', 10, 8, (5, F), 5),
+            ('latin and space after hebrew', AUTO, 'שלום abc ', 10, 9, (5, F), 5),
+            ('latin at the pending wrap', AUTO, 'שלום' + 'abcdef', 10, 10, (6, F), 6),
+            # drawn at the right edge of abc, the last column, the beam on that edge
+            ('clamped to the last column', FORCE_RTL, 'abc', 10, 3, (9, T), 9),
+            # unchanged
+            ('hebrew', b'', 'ab אני', 10, 6, (2, T), 2),
+            ('inside the run', b'', 'ab אני', 10, 4, (4, T), 4),
+            ('after latin text', b'', 'ab אני abc  ', 14, 12, (12, F), 12),
+            ('blank between words', b'', 'אני   abc', 10, 4, (4, F), 4),
+            ('after an empty cell', b'', 'ab אני', 10, 8, (8, F), 8),
+            ('latin only', b'', 'abc  ', 10, 5, (5, F), 5),
+            ('rtl paragraph, hebrew', AUTO, 'שלום', 10, 4, (5, T), 5),
+            ('rtl paragraph, hebrew and space', AUTO, 'שלום ', 10, 5, (4, T), 4),
+            # after a number or neutral the next char's place depends on its class, so the older rules apply
+            ('digits and space after hebrew', b'', 'שלום 123 ', 12, 9, (9, F), 9),
+            ('rtl paragraph, digits and space', AUTO, 'שלום 123 ', 12, 9, (2, T), 2),
+            ('wide latin after hebrew', AUTO, 'שלום 中', 10, 7, (5, F), 5),
+            # the PDI closes the isolate, so the next char is outside it
+            ('closed isolate', b'', 'a⁧12 34⁩', 10, 6, (6, F), 6),
+            ('latin digits in an rli and space', b'', 'x⁧abc 12 ', 16, 8, (8, F), 8),
+            ('percent after digits and space', b'', 'שלום 50% ', 12, 9, (9, F), 9),
+            ('latin digits after latin, rtl', AUTO, 'שלום abc 123 ', 16, 13, (2, T), 2),
+        )
+        for name, seqs, text, cols, x, beam, block in cases:
+            with self.subTest(name):
+                s = self.screen(cols=cols)
+                parse_bytes(s, seqs)
+                s.draw(text)
+                self.assert_cursor_at(s, x, beam, block)
+
+    PUA = b'\xf3\xb0\x88\xba'  # U+F023A, bidi class L
+    # the outer terminal's stream for a prompt: tmux ends the plain prompt's row with EL; with an FSI it writes the space
+    # too, then moves the cursor with CUP, and fish appends the typed text
+    PROMPT = {'A': PUA + b'\x1b[1;3H', 'B': PUA + b' \xe2\x81\xa8\x1b[1;3H'}
+
+    def replayed(self, prompt, text, cols=40):
+        s = self.screen(cols=cols, lines=2)
+        parse_bytes(s, self.AUTO + self.PROMPT[prompt] + text)
+        test_screen_update_cell_data(s)
+        return s
+
+    def test_prompt_isolate_replay(self):
+        # the bytes tmux sent to the outer terminal for a prompt starting with U+F023A, A without and B with an FSI after it
+        tail = tuple(range(31, 40))
+        cases = (
+            # (text, A: v2l and levels, B: v2l and levels): A is today's layout, with the ? and english at the right
+            (
+                'מה המצב יחתולים?',
+                ((0, 1) + tuple(range(16, 1, -1)) + (17,) + tuple(range(18, 40)), (0, 0) + (1,) * 15 + (0,)),
+                ((0, 1) + tuple(range(17, 1, -1)) + tuple(range(18, 40)), (0, 0) + (1,) * 16),
+            ),
+            (
+                'מילה ראשונה english מילה שניה',
+                (
+                    (0, 1) + tuple(range(12, 1, -1)) + tuple(range(13, 22)) + tuple(range(30, 21, -1)) + tail,
+                    (0, 0) + (1,) * 11 + (0,) * 9 + (1,) * 9,
+                ),
+                (
+                    (0, 1, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21) + tuple(range(14, 21)) + (13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2) + tail,
+                    (0, 0) + (1,) * 12 + (2,) * 7 + (1,) * 10,
+                ),
+            ),
+            # the cursor: the typed space is at the paragraph level
+            ('אני ', ((0, 1, 4, 3, 2, 5), (0, 0, 1, 1, 1, 0)), ((0, 1, 4, 3, 2, 5), (0, 0, 1, 1, 1, 0))),
+        )
+        for text, *layouts in cases:
+            for prompt, (v2l, levels) in zip('AB', layouts):
+                with self.subTest(text=text, prompt=prompt):
+                    s = self.replayed(prompt, text.encode())
+                    self.ae(self.v2l(s, 0)[: len(v2l)], v2l)
+                    self.ae(self.levels(s, 0)[: len(levels)], levels)
+
+    def test_prompt_isolate_replay_cursor(self):
+        # after the typed word and its space the cursor is left of the word, where the next letter goes
+        typed = 'אני '.encode()
+        # fish writes the first letter of each word twice and the space as space, backspace, space
+        idiom = b'\xd7\x90\x08\xd7\x90\xd7\xa0\xd7\x99 \x08 '
+        for prompt in 'AB':
+            for name, data in (('plain', typed), ('idiom', idiom)):
+                with self.subTest(prompt=prompt, typed=name):
+                    s = self.replayed(prompt, data)
+                    self.ae(self.v2l(s, 0)[:6], (0, 1, 4, 3, 2, 5))
+                    self.assert_cursor_at(s, 6, (1, True), 1)
+        s = self.replayed('B', 'שלום 12 '.encode(), cols=14)
+        self.assert_cursor_at(s, 10, (10, False), 10)
+        # no typed text: the cursor is on the cell after the prompt, which has no map
+        s = self.replayed('B', b'')
+        self.assertIsNone(self.v2l(s, 0))
+        self.assert_cursor_at(s, 2, (2, False), 2)
 
     def test_beam_mirror_drawn_shape(self):
         # An unfocused cursor drawn as a block is not mirrored even when the cursor shape is a beam
@@ -3436,6 +3688,11 @@ class TestBidiReorder(BaseTest):
         s.cursor_position(1, 10)
         test_screen_update_cell_data(s)
         self.ae(s.test_ime_anchor_x(), 8)  # right-aligned: min(9, 10 - 2)
+        # the pre-edit follows the cursor, drawn left of the hebrew word the typed text ends with
+        s = self.screen()
+        s.draw('ab אני ')
+        test_screen_update_cell_data(s)
+        self.ae(s.test_ime_anchor_x(), 3)  # beam column 2, mirrored, +1
         s = self.mixed()
         s.cursor_position(1, 4)
         test_screen_update_cell_data(s)
