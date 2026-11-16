@@ -2317,13 +2317,11 @@ class TestBidiReorder(BaseTest):
                 s.draw(row)
                 self.frame(s)
                 self.ae(self.prtl(s, 0), want)
-        # the neutral-only row is right-aligned: the tail cells on the left, the digits keep their level 2
+        # no strong character gives base RTL: the ENs get level 2, N1 makes the space between them R, and L1 gives the trailing blanks the paragraph level
         s = self.dscreen(self.AUTO, self.SCP_RTL)
         s.draw('12 34')
         self.frame(s)
-        v2l = self.vmaps(s)[0]
-        self.ae((v2l[:5], sorted(v2l[5:])), ((9, 8, 7, 6, 5), [0, 1, 2, 3, 4]))
-        self.assertTrue(all(lv % 2 or lv == 2 for lv in self.lv(s, 0)))
+        self.ae((self.lv(s, 0), self.vmaps(s)[0]), ((2, 2, 1, 2, 2, 1, 1, 1, 1, 1), (9, 8, 7, 6, 5, 3, 4, 2, 0, 1)))
         s = self.dscreen(self.AUTO)
         s.draw('12 34')
         self.frame(s)
@@ -2459,8 +2457,8 @@ class TestBidiReorder(BaseTest):
         return 'crlf', lambda s: (s.cursor_position(y + 1, x + 1), parse_bytes(s, b'\r\n'))
 
     def differential(self, seed, count, mix=None, follows=None, rtl_bases=None):
-        # follows (a list) gets a 1 for each frame that followed a scroll; rtl_bases gets a 1 for each frame in which a row has an RTL
-        # paragraph direction although it holds no Hebrew letter, a direction that only a control can have given it
+        # follows (a list) gets a 1 for each frame that followed a scroll; rtl_bases gets a 1 for each live frame in which a paragraph
+        # starting on screen has a row with an RTL direction although none of its rows holds a Hebrew letter, a direction that only a control can have given it
         rng = random.Random(seed)
 
         def new():
@@ -2497,7 +2495,18 @@ class TestBidiReorder(BaseTest):
             ps, pf = [self.prtl(s, y) for y in range(s.lines)], [self.prtl(f, y) for y in range(f.lines)]
             self.ae((vs[exempt:], ls[exempt:], ps[exempt:]), (vf[exempt:], lf[exempt:], pf[exempt:]), f'seed {seed}, op {i} ({name})')
             if rtl_bases is not None:
-                rtl_bases.append(int(any(p and not any('֐' <= c <= '׿' for c in str(s.linebuf.line(y))) for y, p in enumerate(ps))))
+                paras = []
+                for y in range(s.lines):
+                    if y and s.linebuf.is_continued(y):
+                        paras[-1].append(y)
+                    else:
+                        paras.append([y])
+                if s.historybuf.count and s.historybuf.endswith_wrap():
+                    paras = paras[1:]
+                live = not paused and not s.scrolled_by
+                rtl_bases.append(int(live and any(
+                    any(ps[y] for y in para) and not any('\u0590' <= c <= '\u05ff' for y in para for c in str(s.linebuf.line(y)))
+                    for para in paras)))
         return shortcuts
 
     def snapshot_top_rows(self, f):
