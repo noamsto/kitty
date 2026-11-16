@@ -5135,7 +5135,8 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued, in
         if (same) return last;
     }
     if (resolved) {
-        bidi_resolve_paragraph(b, around + (first - y0), last - first + 1, tc, bidi_record_base(lead), first + src->to_render_row, min_render_row, skip_render_row);
+        bidi_resolve_paragraph(
+            b, around + (first - y0), last - first + 1, tc, bidi_record_base(lead), first + src->to_render_row, min_render_row, skip_render_row);
     } else {
         for (int r = min_render_row; r < end_render_row; r++) {
             bidi_set_row_inactive(b, r);
