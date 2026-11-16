@@ -15,8 +15,6 @@
 #define BIDI_KEY_DIR_SHIFT 16
 // Steps per character a paragraph's bracket pairing (N0) may walk back to a letter or digit before it is skipped
 #define BIDI_N0_SCAN_PER_CHAR 16
-// The skip_render_row of bidi_resolve_paragraph() that skips no row
-#define BIDI_NO_RENDER_ROW ((index_type)UINT_MAX)
 // Line ids of the paragraph cache: a screen row's id has this bit, a history row's is its absolute line number plus one; 0 is no id
 #define BIDI_ID_SCREEN (1ull << 63)
 
@@ -102,18 +100,11 @@ bidi_record_base(LineAttrs a) {
 }
 // Resolves the paragraph whose rows have the cells rows[0..num_rows) with the
 // base direction base. Every row whose render row, first_render_row + row index, is in
-// [min_render_row, b->rows) and is not skip_render_row gets its map written, or
+// [min_render_row, b->rows) gets its map written, or
 // dropped when the resolve fails or leaves its cells in logical order. Returns
 // true if any row got a map.
 bool bidi_resolve_paragraph(
-    BidiMaps *b,
-    const CPUCell *const *rows,
-    unsigned num_rows,
-    const TextCache *tc,
-    FriBidiParType base,
-    int first_render_row,
-    index_type min_render_row,
-    index_type skip_render_row);
+    BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const TextCache *tc, FriBidiParType base, int first_render_row, index_type min_render_row);
 void bidi_set_row_inactive(BidiMaps *b, index_type render_row);
 // Whether the row's cells would give the signature stored for render_row; overwrites the scratch
 bool bidi_row_signature_matches(BidiMaps *b, const CPUCell *cells, const TextCache *tc, index_type render_row);
