@@ -3439,12 +3439,15 @@ class TestBidiReorder(BaseTest):
             ('latin only', b'', 'abc  ', 10, 5, (5, F), 5),
             ('rtl paragraph, hebrew', AUTO, 'שלום', 10, 4, (5, T), 5),
             ('rtl paragraph, hebrew and space', AUTO, 'שלום ', 10, 5, (4, T), 4),
-            # a typed space after digits ends the number's run: the next char starts a new one at the enclosing level
-            ('digits and space after hebrew', b'', 'שלום 123 ', 12, 9, (0, F), 0),
+            # after a number or neutral the next char's place depends on its class, so the older rules apply
+            ('digits and space after hebrew', b'', 'שלום 123 ', 12, 9, (9, F), 9),
             ('rtl paragraph, digits and space', AUTO, 'שלום 123 ', 12, 9, (2, T), 2),
             ('wide latin after hebrew', AUTO, 'שלום 中', 10, 7, (5, F), 5),
             # the PDI closes the isolate, so the next char is outside it
             ('closed isolate', b'', 'a⁧12 34⁩', 10, 6, (6, F), 6),
+            ('latin digits in an rli and space', b'', 'x⁧abc 12 ', 16, 8, (8, F), 8),
+            ('percent after digits and space', b'', 'שלום 50% ', 12, 9, (9, F), 9),
+            ('latin digits after latin, rtl', AUTO, 'שלום abc 123 ', 16, 13, (2, T), 2),
         )
         for name, seqs, text, cols, x, beam, block in cases:
             with self.subTest(name):
@@ -3507,7 +3510,7 @@ class TestBidiReorder(BaseTest):
                     self.ae(self.v2l(s, 0)[:6], (0, 1, 4, 3, 2, 5))
                     self.assert_cursor_at(s, 6, (1, True), 1)
         s = self.replayed('B', 'שלום 12 '.encode(), cols=14)
-        self.assert_cursor_at(s, 10, (1, True), 1)
+        self.assert_cursor_at(s, 10, (10, False), 10)
         # no typed text: the cursor is on the cell after the prompt, which has no map
         s = self.replayed('B', b'')
         self.assertIsNone(self.v2l(s, 0))

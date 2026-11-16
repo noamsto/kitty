@@ -5394,14 +5394,14 @@ static bool cell_is_blank(const CPUCell *c);
 
 // The column the cursor at x on linebuf row y is drawn at: the visual column
 // of its cell. Past the end of the text (only blanks from x on) the cursor
-// follows the last typed character, skipping typed spaces, when its level
-// differs from the paragraph's: that is where the next character goes. At an
-// odd level that is the column visually left of it, at an even one the column
-// right of it, clamped to the last column (a beam then sits at the clamped
-// cell's right edge). Skipped spaces end a number's run at an even level, as a
-// number counts as right-to-left to the space after it: the next character
-// then goes left of the run of levels from one below it up. A cell holding an
-// isolate control leaves that to the rule below. Otherwise, after a
+// follows the last typed character when its level differs from the paragraph's:
+// that is where the next character goes. At an odd level that is the column
+// visually left of it, at an even one the column right of it, clamped to the
+// last column (a beam then sits at the clamped cell's right edge). Typed spaces
+// are skipped only after a strong letter, whose direction carries across them to
+// the next letter of the run; after a number or neutral the next character's
+// place depends on its class, so the rules below apply. A cell holding an
+// isolate control leaves that to the rules below as well. Otherwise, after a
 // right-to-left character a beam goes to the column visually left of it, as the
 // next right-to-left character goes there, and a block, underline or hollow
 // cursor does too when on a blank cell or the pending wrap column. A beam on a
@@ -5425,22 +5425,15 @@ cursor_visual_in_row(Screen *self, index_type x, index_type y, CursorShape shape
             index_type p = t - 1;
             while (p && cells[p].is_multicell && cells[p].x) p--;
             const uint8_t lp = bidi_cell_level(b, render_row, p);
-            // A typed space after a number at an even level ends its run: the next char is at the level below
-            const bool after_number = t < x && !(lp & 1) && lp &&
-                FRIBIDI_IS_NUMBER(fribidi_get_bidi_type(cell_first_char(cells + p, self->text_cache)));
-            if (lp != b->rtl[render_row] && !(after_number && lp - 1 == b->rtl[render_row]) &&
+            const bool skipped_after_non_letter = t < x &&
+                !FRIBIDI_IS_LETTER(fribidi_get_bidi_type(cell_first_char(cells + p, self->text_cache)));
+            if (lp != b->rtl[render_row] && !skipped_after_non_letter &&
                 !bidi_cell_has_isolates(cells + p, self->text_cache)) {
                 const index_type span = cell_span(cells + p);
                 const index_type left = bidi_visual_x(b, render_row, p, span);
                 if (lp & 1) {
                     *mirrored = shape == CURSOR_BEAM && left > 0;
                     return left ? left - 1 : 0;
-                }
-                if (after_number) {
-                    index_type edge = left;
-                    while (edge && bidi_cell_level(b, render_row, bidi_logical_x(b, render_row, edge - 1)) >= lp - 1) edge--;
-                    *mirrored = shape == CURSOR_BEAM && edge > 0;
-                    return edge ? edge - 1 : 0;
                 }
                 if (left + span <= self->columns - 1) return left + span;
                 *mirrored = shape == CURSOR_BEAM;
