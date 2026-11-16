@@ -3137,6 +3137,48 @@ class TestBidiReorder(BaseTest):
                 self.ae(self.state(s), self.state(f))
                 self.ae(got, resolves)
 
+    def test_follow_after_reset(self):
+        # RIS unstamps both buffers, so the alternate buffer's scrolls are not counted until it is stamped again; then
+        # full-height scrolls follow and a region scroll drops the entries, which on the alternate screen (nothing is
+        # pushed) only the counters decide
+        def build():
+            s = self.follow_screen(pixel_scroll=False)
+            self.warm(s)
+            parse_bytes(s, b'\x1bc\x1b[?1049h')
+            self.stream(s, 'xyz', 'abc', 'qrs')
+            self.frame(s)
+            parse_bytes(s, b'\x1b[8h')
+            self.fill(s, self.FOLLOW_ROWS)
+            return s
+
+        s = build()
+        self.assertTrue(s.is_using_alternate_linebuf())
+        self.warm(s)
+        done, shifted = [], self.shifts(s)
+        for text in self.FOLLOW_TEXTS[:4]:
+            self.stream(s, text)
+            done.append((text,))
+            shifted += 1
+            self.ae(self.frame(s)[0], int(any('א' <= c <= 'ת' for c in text)), text)
+            self.ae(self.shifts(s), shifted, text)
+            self.ae(self.state(s), self.streamed_state(build, done), text)
+
+        def region_index(s):
+            parse_bytes(s, b'\x1b[2;4r')
+            s.cursor_position(4, 1)
+            parse_bytes(s, b'\x1bD\x1b[r')
+
+        region_index(s)
+        got = self.frame(s)[0]
+        self.ae(self.shifts(s), shifted)
+        f = build()
+        for texts in done:
+            self.stream(f, *texts)
+        region_index(f)
+        self.ae(got, self.frame(f)[0])
+        self.ae(self.state(s), self.state(f))
+        self.ae(s.historybuf.count, 0)
+
     def test_follow_counter_wrap(self):
         # the scroll counter wraps from UINT64_MAX to 0 between two followed frames
         def build():

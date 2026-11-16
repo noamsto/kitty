@@ -388,12 +388,9 @@ clear_line(LineBuf *self, PyObject *val) {
 void
 linebuf_index(LineBuf *self, index_type top, index_type bottom) {
     if (top >= self->ynum - 1 || bottom >= self->ynum || bottom <= top) return;
-    const index_type num = bottom - top;
-    // The guard makes num == ynum - 1 equivalent to top == 0 && bottom == ynum - 1.
-    if (LIKELY(num == self->ynum - 1)) self->bidi_scrolls++;
-    else self->bidi_generation++;
     index_type old_top = self->line_map[top];
     LineAttrs old_attrs = self->line_attrs[top];
+    const index_type num = bottom - top;
     memmove(self->line_map + top, self->line_map + top + 1, sizeof(self->line_map[0]) * num);
     memmove(self->line_attrs + top, self->line_attrs + top + 1, sizeof(self->line_attrs[0]) * num);
     self->line_map[bottom] = old_top;
@@ -405,6 +402,7 @@ pyw_index(LineBuf *self, PyObject *args) {
 #define index_doc "index(top, bottom) -> Scroll all lines in the range [top, bottom] by one upwards. After scrolling, bottom will be top."
     unsigned int top, bottom;
     if (!PyArg_ParseTuple(args, "II", &top, &bottom)) return NULL;
+    linebuf_count_index(self, top, bottom);
     linebuf_index(self, top, bottom);
     Py_RETURN_NONE;
 }
