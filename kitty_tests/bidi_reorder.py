@@ -8,7 +8,7 @@ import struct
 import subprocess
 from collections import namedtuple
 
-from kitty.fast_data_types import get_options, test_screen_update_cell_data
+from kitty.fast_data_types import CURSOR_BEAM, CURSOR_BLOCK, CURSOR_HOLLOW, CURSOR_UNDERLINE, get_options, test_screen_update_cell_data
 from kitty.fonts.render import setup_for_testing
 
 from .base import BaseTest, draw_multicell, parse_bytes
@@ -2952,3 +2952,118 @@ class TestBidiReorder(BaseTest):
             shifted += 1
             self.ae((self.frame(s)[0], self.shifts(s)), (1, shifted), text)
             self.ae(self.state(s), self.streamed_state(build, done), text)
+
+    # G7: cursor and IME
+
+    def test_cursor_visual_in_bidi_rows(self):
+        # The beam goes to the left edge of an RTL run it follows; block, underline and hollow stay on the cell's own column unless blank
+        L, R = False, True
+        # (name, auto, text, levels prefix, v2l, ((visual_x args), want)..., [(x, beam column, mirrored, block/underline/hollow column)])
+        cases = (
+            ('rtl letters, blank after', R, A, None, ID10[::-1], (((0, 0), 9), ((3, 0), 6)), [(0, 9, R, 9), (3, 6, R, 6)]),
+            ('latin after hebrew in rtl', R, 'אaב', (1, 2, 1), ID10[::-1], (), [(1, 8, R), (2, 7, R)]),
+            ('latin after latin in rtl', R, 'אab', (1, 2, 2), None, (((2, 0), 8),), [(2, 8, L)]),
+            ('ltr paragraph', L, 'abcאב', None, (0, 1, 2, 4, 3) + ID10[5:], (), [(0, 0, L), (1, 1, L), (2, 2, L), (3, 4, R, 4), (4, 3, R)]),
+            ('wide first, n1 level 1', R, '😀' + A, (1, 1), None, (((0, 0, 2), 8),), [(0, 9, R, 8)]),
+            ('wide before the blank', R, 'אב😀', (1, 1, 1, 1), None, (((2, 0, 2), 6),), [(4, 5, R, 5)]),
+            ('blank after hebrew run', L, 'ls שלום', None, (0, 1, 2, 6, 5, 4, 3) + ID10[7:], (((6, 0), 3),), [(7, 2, R, 2)]),
+            ('blank after latin', L, 'ls abc', None, None, (), [(6, 6, L, 6)]),
+            ('blank after digits in rtl run', L, A + ' 12', (1, 1, 1, 1, 2, 2), None, (((6, 0), 6),), [(6, 6, L, 6)]),
+            ('run at the left edge', L, A, None, (2, 1, 0) + ID10[3:], (), [(3, 0, L, 0)]),
+            ('block over latin after run', L, 'שלום' + 'd', None, (3, 2, 1, 0, 4) + ID10[5:], (), [(4, 0, L, 4)]),
+            ('block over latin after run, prefix', L, 'ab' + 'שלום' + 'd', None, (0, 1, 5, 4, 3, 2, 6) + ID10[7:], (), [(6, 1, R, 6)]),
+            ('block over blank after run', L, 'ab' + 'שלום' + ' d', None, None, (), [(6, 1, R, 1)]),
+            ('pending wrap, hebrew last', L, 'abcdef' + 'אבגד', None, (0, 1, 2, 3, 4, 5, 9, 8, 7, 6), (), [(10, 5, R, 5)]),
+            ('pending wrap, latin last', L, 'אבגד' + 'abcdef', None, None, (), [(10, 10, L, 10)]),
+            ('pending wrap, no rtl', L, 'abcdefghij', None, None, (), [(10, 10, L, 10)]),
+        )
+        for name, auto, text, levels, v2l, vx, cursors in cases:
+            with self.subTest(name):
+                s = self.screen()
+                if auto:
+                    parse_bytes(s, b'\x1b[?2501h')
+                s.draw(text)
+                got = self.refresh(s, 0)
+                if v2l:  # None: not asserted
+                    self.ae(got, v2l)
+                if levels:
+                    self.ae(self.levels(s, 0)[: len(levels)], levels)
+                self.ae([s.test_bidi_visual_x(*args) for args, _ in vx], [want for _, want in vx])
+                for x, beam, mirrored, *other in cursors:
+                    beam_got, *others = [s.test_cursor_visual(x, 0, k) for k in (CURSOR_BEAM, CURSOR_BLOCK, CURSOR_UNDERLINE, CURSOR_HOLLOW)]
+                    self.ae(beam_got, (beam, mirrored))
+                    if other:
+                        self.ae(others, [(other[0], False)] * 3)
+
+    def test_cursor_after_rtl_char_paused_pixel_scroll(self):
+        # The paused snapshot has a leading row with pixel scroll: a block read from row y instead of y + 1 sees the row above
+        s = self.screen(pixel_scroll=True)
+        parse_bytes(s, f'abcdefgh\r\nls {A}'.encode())
+        self.frame(s)
+        self.ae(s.test_cursor_render(CURSOR_BLOCK), (2, False))
+        parse_bytes(s, b'\x1b[?2026h')
+        self.frame(s)
+        self.ae((s.test_cursor_render(CURSOR_BLOCK), s.test_cursor_visual(6, 1, CURSOR_BLOCK)), ((2, False), (2, False)))
+
+    def test_beam_mirror_flag(self):
+        # The beam is mirrored exactly when it sits at the left edge of a cell it follows; the other shapes never are
+        F, T = False, True
+        ltr_v2l = MIXED_V2L
+        rtl_v2l = (9, 8, 7, 6, 5, 4, 3, 0, 1, 2)
+        # (name, rtl base, row, erased row, v2l, ((x, (beam column, mirrored), (block column, mirrored))..))
+        cases = (
+            ('ltr base', F, 0, F, ltr_v2l, ((0, (0, F), (0, F)), (3, (5, T), (5, F)), (4, (4, T), (4, F)), (6, (2, T), (2, F)), (7, (7, F), (7, F)))),
+            ('rtl base', T, 0, F, rtl_v2l, ((0, (7, F), (7, F)), (3, (6, T), (6, F)), (4, (5, T), (5, F)), (6, (3, T), (3, F)), (7, (2, T), (2, F)))),
+            ('rtl base, erased row', T, 1, T, ID10[::-1], ((0, (9, T), (9, F)),)),
+        )
+
+        def build(rtl, row, erased, **opts):
+            s = self.screen(**opts)
+            if rtl:
+                parse_bytes(s, b'\x1b[2 k')
+            s.draw(MIXED)
+            if erased:
+                s.cursor_position(row + 1, 1)
+                parse_bytes(s, b'ab\x1b[2K')
+            return s
+
+        for name, rtl, row, erased, v2l, xs in cases:
+            s = build(rtl, row, erased)
+            self.ae(self.refresh(s, row), v2l, name)
+            for variant, opts in (('live', {}), ('pixel scroll', {'pixel_scroll': True}), ('no pixel scroll', {'pixel_scroll': False}), ('paused', {})):
+                with self.subTest(name, variant=variant):
+                    s = build(rtl, row, erased, **opts)
+                    for x, beam, block in xs:
+                        s.cursor_position(row + 1, x + 1)
+                        test_screen_update_cell_data(s)
+                        if variant == 'paused':
+                            s.pause_rendering(True, 1000)
+                            test_screen_update_cell_data(s)
+                        self.ae(s.test_cursor_visual(x, row, CURSOR_BEAM), beam)
+                        self.ae(s.test_cursor_render(CURSOR_BEAM), beam)
+                        self.ae(s.test_cursor_visual(x, row, CURSOR_BLOCK), block)
+                        self.ae(s.test_cursor_render(CURSOR_BLOCK), block)
+                        for shape in (CURSOR_UNDERLINE, CURSOR_HOLLOW):
+                            self.ae(s.test_cursor_visual(x, row, shape), block)
+                        if variant == 'paused':
+                            s.pause_rendering(False)
+        # no map means no mirroring: force_ltr, and a screen that never sent CSI 8 h
+        for name, s in (
+            ('force_ltr', self.screen(force_ltr=True)),
+            ('no CSI 8 h', self.create_screen(cols=10, lines=5, scrollback=5, options={})),
+        ):
+            with self.subTest(name):
+                s.draw(MIXED)
+                test_screen_update_cell_data(s)
+                for x in (0, 3, 4, 6, 7):
+                    for shape in (CURSOR_BEAM, CURSOR_BLOCK):
+                        self.ae(s.test_cursor_visual(x, 0, shape), (x, False))
+
+    def test_beam_mirror_drawn_shape(self):
+        # An unfocused cursor drawn as a block is not mirrored even when the cursor shape is a beam
+        s = self.screen(cursor_shape_unfocused=CURSOR_BLOCK)
+        s.draw(MIXED)
+        s.cursor_position(1, 4)
+        test_screen_update_cell_data(s)
+        self.ae(s.test_cursor_render(CURSOR_BEAM, True), (5, True))
+        self.ae(s.test_cursor_render(CURSOR_BEAM, False), (5, False))
