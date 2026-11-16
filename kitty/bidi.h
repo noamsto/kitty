@@ -11,6 +11,8 @@
 #include <fribidi.h>
 
 #define BIDI_MAX_PARAGRAPH_ROWS 256
+// para_rows holds the row count (at most BIDI_MAX_PARAGRAPH_ROWS) and, from this bit, the first row's bidi_rtl and bidi_auto
+#define BIDI_KEY_DIR_SHIFT 16
 // Steps per character a paragraph's bracket pairing (N0) may walk back to a letter or digit before it is skipped
 #define BIDI_N0_SCAN_PER_CHAR 16
 // The skip_render_row of bidi_resolve_paragraph() that skips no row
@@ -41,8 +43,10 @@ typedef struct BidiMaps {
     uint16_t *v2l;   // rows*cols, row-major by render row: the logical cell shown at each visual column
     uint8_t *levels; // rows*cols, the embedding level of each logical cell
     bool *active;    // rows: the row has a map
+    bool *rtl;       // rows: the paragraph that last wrote or kept the row's entry resolved right-to-left
     // The paragraph cache, per render row: the id of the line shown there when its map was last written or kept, and the ids of
-    // the first and last rows and the row count of the paragraph that wrote it. Screen ids are valid under the context only.
+    // the first and last rows, and the row count with the first row's base direction (BIDI_KEY_DIR_SHIFT), of the paragraph that
+    // wrote it. Screen ids are valid under the context only.
     uint64_t *row_id, *para_first, *para_last;
     uint32_t *para_rows;
     // rows*cols like levels: per cell a char starts in, the FriBidi type or bracket the last resolve fed for it and whether it
@@ -91,8 +95,13 @@ void bidi_maps_free(BidiMaps *b);
 bool bidi_maps_ensure(BidiMaps *b, index_type rows, index_type cols);
 // Whether the base codepoint of some cell passes bidi_codepoint_may_reorder()
 bool bidi_cells_may_reorder(const CPUCell *cells, index_type num, const TextCache *tc);
-// Resolves the paragraph whose rows have the cells rows[0..num_rows) with an
-// LTR base. Every row whose render row, first_render_row + row index, is in
+// The FriBidi base of a paragraph whose first row has this record: with auto set the first strong character wins and rtl is the fallback
+static inline FriBidiParType
+bidi_record_base(LineAttrs a) {
+    return a.bidi_auto ? (a.bidi_rtl ? FRIBIDI_PAR_WRTL : FRIBIDI_PAR_WLTR) : (a.bidi_rtl ? FRIBIDI_PAR_RTL : FRIBIDI_PAR_LTR);
+}
+// Resolves the paragraph whose rows have the cells rows[0..num_rows) with the
+// base direction base. Every row whose render row, first_render_row + row index, is in
 // [min_render_row, b->rows) and is not skip_render_row gets its map written, or
 // dropped when the resolve fails or leaves its cells in logical order. Returns
 // true if any row got a map.
@@ -101,6 +110,7 @@ bool bidi_resolve_paragraph(
     const CPUCell *const *rows,
     unsigned num_rows,
     const TextCache *tc,
+    FriBidiParType base,
     int first_render_row,
     index_type min_render_row,
     index_type skip_render_row);
