@@ -11,6 +11,8 @@
 #include <fribidi.h>
 
 #define BIDI_MAX_PARAGRAPH_ROWS 256
+// para_rows holds the row count (at most BIDI_MAX_PARAGRAPH_ROWS) and, from this bit, the first row's bidi_rtl and bidi_auto
+#define BIDI_KEY_DIR_SHIFT 16
 // Steps per character a paragraph's bracket pairing (N0) may walk back to a letter or digit before it is skipped
 #define BIDI_N0_SCAN_PER_CHAR 16
 // The skip_render_row of bidi_resolve_paragraph() that skips no row
@@ -43,7 +45,8 @@ typedef struct BidiMaps {
     bool *active;    // rows: the row has a map
     bool *rtl;       // rows: the paragraph that last wrote or kept the row's entry resolved right-to-left
     // The paragraph cache, per render row: the id of the line shown there when its map was last written or kept, and the ids of
-    // the first and last rows and the row count of the paragraph that wrote it. Screen ids are valid under the context only.
+    // the first and last rows, and the row count with the first row's base direction (BIDI_KEY_DIR_SHIFT), of the paragraph that
+    // wrote it. Screen ids are valid under the context only.
     uint64_t *row_id, *para_first, *para_last;
     uint32_t *para_rows;
     // rows*cols like levels: per cell a char starts in, the FriBidi type or bracket the last resolve fed for it and whether it

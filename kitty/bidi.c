@@ -216,6 +216,8 @@ resolve_levels(BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const
         b->resolve_cacheable = false;
         return false;
     }
+    // FriBidi leaves a weak base in place when no strong character decides
+    *base = FRIBIDI_IS_RTL(*base) ? FRIBIDI_PAR_RTL : FRIBIDI_PAR_LTR;
     b->resolve_signed = !budget_fired;
     // Only an LTR result can leave every level at 0, an RTL one has them all at 1 or more
     if (max_level <= 1) return false;

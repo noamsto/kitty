@@ -2070,6 +2070,300 @@ class TestBidiReorder(BaseTest):
                 self.assertIsNotNone(v2l)
                 self.ae((v2l[:k], self.prtl(screens[0], 0)), (tuple(range(9, 9 - k, -1)), True))
 
+    def blank_led(self, *seqs, text='abc אב', cols=10, lines=5, y=0, **kw):
+        # a screen whose row y is a blank stamped row soft-wrapped into row y + 1 (ECH and EL clear the wrap bit, so the
+        # wide char that does not fit in the last column sets it)
+        s = self.dscreen(*seqs, cols=cols, lines=lines, **kw)
+        s.cursor_position(y + 1, 1)
+        s.draw('x')
+        parse_bytes(s, b'\r\x1b[2K')
+        s.cursor_position(y + 1, cols)
+        s.draw('中' + text)
+        self.assertTrue(s.linebuf.is_continued(y + 1))
+        self.ae(str(s.linebuf.line(y)).strip(), '')
+        self.assertTrue(s.test_bidi_line_record(y)[0])
+        return s
+
+    def fresh_after(self, build, op):
+        # maps, levels and paragraph direction of a fresh screen replaying op, rendered once
+        f = build()
+        op(f)
+        self.frame(f)
+        return self.state(f), [self.prtl(f, y) for y in range(f.lines)]
+
+    def assert_matches_replay(self, s, build, op):
+        self.ae((self.state(s), [self.prtl(s, y) for y in range(s.lines)]), self.fresh_after(build, op))
+
+    def test_direction_only_change_misses_hit(self):
+        # CSI 2 SP k re-derives the record of the blank row leading the paragraph without dirtying anything: the paragraph must not hit
+        def op(s):
+            parse_bytes(s, self.SCP_RTL)
+
+        with self.subTest('blank lead'):
+            s = self.blank_led()
+            self.warm(s)
+            self.ae(self.frame(s)[0], 0)
+            before = self.state(s)
+            op(s)
+            self.ae(self.dirty(s), [])
+            self.ae(self.frame(s)[0], 1)
+            self.assertNotEqual(self.state(s), before)
+            self.assert_matches_replay(s, self.blank_led, op)
+        with self.subTest('single blank row'):
+            s = self.dscreen()
+            s.draw('x')
+            parse_bytes(s, b'\r\x1b[2K')
+            self.warm(s)
+            self.ae(self.prtl(s, 0), False)
+            op(s)
+            self.ae(self.frame(s)[0], 1)
+            self.ae((self.prtl(s, 0), self.vmaps(s)[0]), (True, ID10[::-1]))
+
+    def test_direction_only_change_misses_shortcut(self):
+        # a same-class edit of a row below the blank lead takes the shortcut only when the lead's record is unchanged
+        def build():
+            return self.blank_led(text='אבג abc')
+
+        def edit(s):
+            self.put(s, 2, 8, 'd')  # b over d, after the wide char
+
+        def edit_rtl(s):
+            edit(s)
+            parse_bytes(s, self.SCP_RTL)
+
+        def latin():
+            return self.blank_led(self.SCP_RTL, text='abc def')
+
+        def latin_edit(s):
+            self.put(s, 2, 7, 'x')
+
+        # build, op, resolves of the frame after the op
+        for name, make, op, resolves in (
+            ('direction changes', build, edit_rtl, 1),
+            ('no change', build, edit, 0),
+            ('latin lead-only candidate', latin, latin_edit, 0),
+        ):
+            with self.subTest(name):
+                s = make()
+                self.warm(s)
+                op(s)
+                self.ae(self.dirty(s), [1])
+                self.ae(self.frame(s)[0], resolves)
+                self.assert_matches_replay(s, make, op)
+
+    def test_direction_only_change_misses_after_follow(self):
+        # the cache follows a full-screen index by renaming rows; the lead's record changing in the same frame must still miss
+        def build():
+            return self.blank_led(y=2, scrollback=20)
+
+        def index(s):
+            s.cursor_position(5, 1)
+            parse_bytes(s, b'\x1bD')
+
+        def index_rtl(s):
+            s.cursor_position(5, 1)
+            parse_bytes(s, b'\x1bD' + self.SCP_RTL)
+
+        for name, make, op, resolves in (
+            ('direction changes', build, index_rtl, 1),
+            ('no change', build, index, 0),
+            ('rtl base', lambda: self.blank_led(self.SCP_RTL, y=2, scrollback=20), index, 0),
+        ):
+            with self.subTest(name):
+                s = make()
+                self.warm(s)
+                shifts = self.shifts(s)
+                op(s)
+                got = self.frame(s)[0]
+                self.ae((got, self.shifts(s) - shifts), (resolves, 1))
+                self.assert_matches_replay(s, make, op)
+
+    def test_paused_frame_keeps_snapshot_direction(self):
+        # a direction change sent during a pause shows once the pause ends, and so does a line written under it
+        def op(s):
+            parse_bytes(s, self.SCP_RTL)
+
+        def op_write(s):
+            op(s)
+            self.put(s, 5, 1, 'שלום')
+
+        for name, do in (('change', op), ('write', op_write)):
+            with self.subTest(name):
+                s = self.blank_led()
+                self.warm(s)
+                before = self.state(s)
+                s.pause_rendering(True, 1000)
+                do(s)
+                self.frame(s)
+                self.ae(self.state(s), before)
+                s.pause_rendering(False)
+                self.frame(s)
+                self.assert_matches_replay(s, self.blank_led, do)
+                self.assertNotEqual(self.state(s), before)
+
+    def test_direction_toggle_keeps_records(self):
+        # records are stamped, not live: toggling the controls re-resolves no paragraph whose first row has text
+        text = A + ' abc'
+        toggles = (self.AUTO, b'\x1b[?2501l', self.SCP_RTL, self.SCP_LTR, b'\x1b[0 k', self.AUTO, self.SCP_RTL)
+        for first in ((), (self.AUTO,), (self.SCP_RTL,)):
+            with self.subTest(first=first):
+                s = self.dscreen(*first)
+                s.draw(text)
+                self.warm(s)
+                want = self.state(s), [self.prtl(s, y) for y in range(s.lines)]
+                for seq in toggles:
+                    parse_bytes(s, seq)
+                    self.ae(self.frame(s), (0, 0), seq)
+                    self.ae((self.state(s), [self.prtl(s, y) for y in range(s.lines)]), want, seq)
+        # an overwrite keeps the old base
+        s = self.dscreen()
+        s.draw('abc ' + A)
+        self.warm(s)
+        parse_bytes(s, self.AUTO + self.SCP_RTL)
+        self.put(s, 1, 1, 'ב')
+        self.frame(s)
+        self.ae((self.prtl(s, 0), self.vmaps(s)[0]), (False, (0, 1, 2, 3, 6, 5, 4) + ID10[7:]))
+        # a cleared line takes the new base, as does a line inserted and rewritten
+        for name, clear in (('ED', b'\x1b[2J\x1b[H'), ('IL', b'\x1b[H\x1b[L')):
+            with self.subTest(name):
+                def op(s):
+                    parse_bytes(s, self.AUTO + self.SCP_RTL + clear)
+                    s.draw(text)
+
+                def build():
+                    s = self.dscreen()
+                    s.draw(text)
+                    return s
+
+                s = build()
+                self.warm(s)
+                op(s)
+                self.frame(s)
+                self.ae(self.prtl(s, 0), True)
+                self.assert_matches_replay(s, build, op)
+        # EL with text left on the row keeps its record
+        s = self.dscreen()
+        s.draw(text)
+        self.warm(s)
+        want = self.vmaps(s)[0]
+        parse_bytes(s, self.AUTO + self.SCP_RTL + b'\x1b[1;6H\x1b[K')
+        self.frame(s)
+        self.ae((self.prtl(s, 0), self.vmaps(s)[0]), (False, want))
+
+    def test_rtl_paragraph_cache_triggers(self):
+        # cache triggers on RTL paragraphs (auto on): each equals a fresh screen. Maps are right-aligned
+        rev, rev5, mix = ID10[::-1], (4, 3, 2, 1, 0), (9, 8, 7, 4, 5, 6, 3, 2, 1, 0)
+        long = 'אבגדהוזחטיכלמ'
+        para = long + 'נ'
+        base = (rev, mix, rev, rev, None)
+
+        def scr(text, **kw):
+            s = self.dscreen(self.AUTO, **kw)
+            parse_bytes(s, text.encode())
+            return s
+
+        def basic():  # a Hebrew-first paragraph soft-wrapped onto rows 2-3, whose first row ends in a blank (map start)
+            return scr('אבג\r\nאבג abc\r\nאבגדהוזחט אבג\x1b[1;1H')
+
+        def alt():
+            return scr('\x1b[?1049h\x1b[8h\x1b[?2501hאבג\r\nאבג abc\x1b[4;1H' + long + '\x1b[1;1H')
+
+        def edge(text, **kw):
+            s = scr(text, cols=5, scrollback=10, **kw)
+            self.prerender(s)
+            return s
+
+        def edge_top():
+            s = edge(para + '\r\nx1\r\nx2\r\nx3\r\nx4\r\n', pixel_scroll=False)
+            s.scroll(3, True)
+            return s
+
+        def pause(s):
+            s.pause_rendering(True, 1000)
+            self.frame(s)
+            s.pause_rendering(False)
+
+        cases = (
+            ('dirty row', basic, lambda s: parse_bytes(s, b'\x1b[4;4H\xd7\x93'), base, None),
+            # since #30 a full-height index follows the cached paragraphs: no resolve
+            ('index', basic, lambda s: parse_bytes(s, b'\x1b[5;1H\x1bD'), (mix, rev, rev, None, None), 0),
+            ('reverse index', basic, lambda s: parse_bytes(s, b'\x1b[1;1H\x1bM'), (None, rev, mix, rev, rev), None),
+            ('insert then delete line', alt, lambda s: parse_bytes(s, b'\x1b[L\x1b[M'), (rev, mix, None, rev, rev), None),
+            ('view scroll, bottom edge', lambda: edge('x0\r\nx1\r\nx2\r\n' + para), lambda s: s.scroll(1, True), (None, None, None, rev5, rev5), None),
+            ('view scroll, top edge', edge_top, lambda s: s.scroll(1, False), (rev5, rev5, None, None, None), None),
+            ('resize with rewrap', lambda: scr(long), lambda s: s.resize(5, 13), (tuple(range(12, -1, -1)), None, None, None, None), None),
+            # the paused frame and the live one after it both hit the warm cache
+            ('pause', basic, pause, base, 0),
+        )
+        for name, build, trigger, expect, resolves in cases:
+            with self.subTest(name):
+                screens = []
+                self.trigger_case(lambda: screens.append(build()) or screens[-1], trigger, expect, fresh=not name.startswith('view'), resolves=resolves)
+                self.assertTrue(all(any(self.prtl(s, y) for y in range(s.lines)) for s in screens), 'no RTL row')
+        s = basic()
+        self.warm(s)
+        self.ae((self.vmaps(s), [self.prtl(s, y) for y in range(4)]), (base, [True] * 4))
+
+    def test_auto_first_strong_beats_scp(self):
+        # with 2501 on, SCP 2 only sets the fallback: the first strong character decides, and a line with none takes it
+        for seqs, row, want in (
+            ((self.AUTO, self.SCP_RTL), 'abc ' + A, False),
+            ((self.AUTO, self.SCP_RTL), A + ' abc', True),
+            ((self.AUTO, self.SCP_RTL), '12 34', True),
+            ((self.AUTO,), '12 34', False),
+        ):
+            with self.subTest(seqs=seqs, row=row):
+                s = self.dscreen(*seqs)
+                s.draw(row)
+                self.frame(s)
+                self.ae(self.prtl(s, 0), want)
+        # the neutral-only row is right-aligned: the tail cells on the left, the digits keep their level 2
+        s = self.dscreen(self.AUTO, self.SCP_RTL)
+        s.draw('12 34')
+        self.frame(s)
+        v2l = self.vmaps(s)[0]
+        self.ae((v2l[:5], sorted(v2l[5:])), ((9, 8, 7, 6, 5), [0, 1, 2, 3, 4]))
+        self.assertTrue(all(lv % 2 or lv == 2 for lv in self.lv(s, 0)))
+        s = self.dscreen(self.AUTO)
+        s.draw('12 34')
+        self.frame(s)
+        self.ae(self.vmaps(s)[0], None)
+
+    def test_control_change_reresolves(self):
+        # records are stamped: a control change (CSI 8 l included) re-resolves no text-led paragraph and moves no map; a cleared and rewritten screen takes it
+        rows = ['abc ' + A, A + ' abc']
+
+        def build():
+            s = self.dscreen(self.AUTO)
+            self.fill(s, rows)
+            return s
+
+        s = build()
+        self.warm(s)
+        maps = self.state(s)
+        for seq in (b'\x1b[8l', b'\x1b[8h', self.SCP_RTL, b'\x1b[0 k', self.AUTO):
+            with self.subTest(seq=seq):
+                parse_bytes(s, seq)
+                self.ae(self.frame(s)[0], 0)
+                self.ae(self.state(s), maps)
+        # the cleared screen is written again under the new base
+        def trigger(s):
+            parse_bytes(s, b'\x1b[2J\x1b[H' + self.SCP_RTL)
+            self.fill(s, rows)
+
+        self.trigger_case(build, trigger)
+        # the alternate screen (47 keeps its content) starts with its own controls
+        s = build()
+        parse_bytes(s, b'\x1b[?47h\x1b[8h')
+        self.fill(s, rows[::-1])
+        self.frame(s)
+        self.warm(s)
+        for seq in (b'\x1b[?47l', b'\x1b[?47h'):
+            with self.subTest(seq=seq):
+                parse_bytes(s, seq)
+                self.assertGreater(self.frame(s)[0], 0)
+                self.warm(s)
+
     DIFF_GROUPS = ('0123456789', 'אבגדהוזחט', 'abcdefghij', '()[]')
     DIFF_POOL = 'אבגדהוזחט' * 3 + 'abcdefghij' * 3 + '0123456789' * 2 + '  ' * 2 + '()!.'
 
