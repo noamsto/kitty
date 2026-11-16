@@ -363,10 +363,11 @@ linebuf_clear_line_text(LineBuf *self, index_type y) {
     // Must only be used for lines whose render data is used only after they
     // are rendered, which is the case for the lines of the screen when there
     // is no marker, as marks are render data that is used without rendering.
+    // Bumps no bidi counter, so it must only clear the line an index just
+    // scrolled in, as that index already bumped one.
 #if BLANK_CHAR != 0
 #error This implementation is incorrect for BLANK_CHAR != 0
 #endif
-    self->bidi_generation++;
     zero_at_ptr_count(cpu_lineptr(self, self->line_map[y]), self->xnum);
     self->line_attrs[y].val = 0;
     self->line_attrs[y].has_dirty_text = true;
@@ -387,7 +388,6 @@ clear_line(LineBuf *self, PyObject *val) {
 void
 linebuf_index(LineBuf *self, index_type top, index_type bottom) {
     if (top >= self->ynum - 1 || bottom >= self->ynum || bottom <= top) return;
-    self->bidi_generation++;
     index_type old_top = self->line_map[top];
     LineAttrs old_attrs = self->line_attrs[top];
     const index_type num = bottom - top;
@@ -402,6 +402,7 @@ pyw_index(LineBuf *self, PyObject *args) {
 #define index_doc "index(top, bottom) -> Scroll all lines in the range [top, bottom] by one upwards. After scrolling, bottom will be top."
     unsigned int top, bottom;
     if (!PyArg_ParseTuple(args, "II", &top, &bottom)) return NULL;
+    linebuf_count_index(self, top, bottom);
     linebuf_index(self, top, bottom);
     Py_RETURN_NONE;
 }

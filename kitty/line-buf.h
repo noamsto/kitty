@@ -20,9 +20,13 @@ typedef struct {
     Line *line;
     TextCache *text_cache;
     bool bidi_stamped; // set by the first bidi record written into this buffer, cleared only by RIS
-    // Bumped by every primitive that moves rows or clears text without marking
-    // the row dirty; the bidi paragraph cache drops its screen-row entries when it changes
-    uint64_t bidi_generation;
+    // The bidi paragraph cache drops its screen-row entries when bidi_generation changes and follows them when only
+    // bidi_scrolls does. Every row-moving primitive and every clear that can leave a row clean bumps bidi_generation. Only
+    // a full-height index bumps bidi_scrolls instead, and only the clear of the row such an index just scrolled
+    // in bumps nothing. A caller of a full-height index that also edits rows without dirtying them must bump
+    // bidi_generation. Index bumps live in linebuf_count_index(), outside linebuf_index() so gcc keeps inlining its guard.
+    // Unstamped buffers skip them (RIS bumps bidi_generation and drops the cache), rewrap too (resize invalidates first).
+    uint64_t bidi_generation, bidi_scrolls;
 } LineBuf;
 
 
