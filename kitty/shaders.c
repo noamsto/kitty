@@ -1119,7 +1119,8 @@ cell_update_uniform_block(
         bool reversed = false;
         if (cursor->x < screen->columns && cursor->y < screen->lines) {
             if (screen->paused_rendering.expires_at) {
-                linebuf_init_line(screen->paused_rendering.linebuf, cursor->y);
+                // with pixel scroll the snapshot has an extra leading row
+                linebuf_init_line(screen->paused_rendering.linebuf, cursor->y + screen->paused_rendering.pixel_scroll);
                 line_for_cursor = screen->paused_rendering.linebuf->line;
             } else {
                 linebuf_init_line(screen->linebuf, cursor->y);
