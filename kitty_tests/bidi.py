@@ -510,6 +510,36 @@ class TestBidi(BaseTest):
                 self.draw_marked(s, RLM, 'x', split)
                 self.ae(self.records(s, 0), [AUTO])
 
+    def cell_texts(self, s, n):
+        return [s.line(0)[x] for x in range(n)]
+
+    def test_leading_mark_cell_splitting(self):
+        for split in (False, True):
+            with self.subTest(split=split):
+                for mark, want in ((LRM, LTR), (RLM, RTL), (ALM, RTL)):
+                    s = self.screen()
+                    pb(s, IA)
+                    self.draw_marked(s, mark, 'abc', split)
+                    self.ae(self.cell_texts(s, 4), ['a', 'b', 'c', '\0'], mark)
+                    self.ae(self.records(s, 0), [want], mark)
+                    s = self.screen()
+                    pb(s, IA + 'ab')
+                    self.draw_marked(s, mark, 'c', split)
+                    self.ae(self.cell_texts(s, 4), ['a', 'b' + mark, 'c', '\0'], mark)
+                    self.ae(self.records(s, 0), [AUTO], mark)
+                for mark in ('\u200c', '\u200d', '\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
+                             '\u2066', '\u2067', '\u2068', '\u2069'):
+                    s = self.screen()
+                    pb(s, IA)
+                    self.draw_marked(s, mark, 'abc', split)
+                    self.ae(self.cell_texts(s, 4), ['a', 'b', 'c', '\0'], mark)
+                    self.ae(self.records(s, 0), [AUTO], mark)
+                    s = self.screen()
+                    pb(s, IA + 'ab')
+                    self.draw_marked(s, mark, 'c', split)
+                    self.ae(self.cell_texts(s, 4), ['a', 'b' + mark, 'c', '\0'], mark)
+                    self.ae(self.records(s, 0), [AUTO], mark)
+
     def test_leading_mark_needs_auto(self):
         for split in (False, True):
             with self.subTest(split=split):
