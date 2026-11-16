@@ -116,6 +116,9 @@ void bidi_cache_drop_screen_entries(BidiMaps *b);
 // Moves every render row's map and cache entry up by 0 < d < rows rows, leaving the bottom d rows with neither
 void bidi_cache_move_rows(BidiMaps *b, index_type d);
 
+// Whether the cell holds an isolate control (LRI RLI FSI PDI) after its first char
+bool bidi_cell_has_isolates(const CPUCell *c, const TextCache *tc);
+
 // The queries below are the identity, or false, for a row without a map.
 // The visual column of the left edge of the logical cell x spanning span cells
 index_type bidi_visual_x(const BidiMaps *b, index_type render_row, index_type x, index_type span);

@@ -451,6 +451,8 @@ class TestBidiReorder(BaseTest):
             # LRI in an RTL paragraph makes the ! L
             ('LRI in rtl paragraph', 'א⁦!a⁩ג', 10, AUTO, [((9, 8, 7, 6, 5, 4, 3, 1, 2, 0), (1, 2, 2, 1, 1, 1, 1, 1, 1, 1))]),
             # an unmatched FSI isolates to the paragraph end, across the soft wrap
+            ('wide cell holds the PDI', 'a⁧b😀⁩c', 10, b'', [((0, 3, 2, 1, 4), (0, 2, 1, 1, 0))]),
+            ('wide L cell in an RLI', 'a⁧12 中⁩x', 10, b'', [((0, 4, 5, 3, 1, 2, 6), (0, 2, 2, 1, 2, 2, 0))]),
             ('FSI to the paragraph end', 'a⁨אבגדהו!', 5, b'', [((0, 4, 3, 2, 1), (0, 1, 1, 1, 1)), ((2, 1, 0, 3, 4), (1, 1, 1, 0, 0))]),
         )
         for name, text, cols, pre, rows in cases:
@@ -3437,6 +3439,12 @@ class TestBidiReorder(BaseTest):
             ('latin only', b'', 'abc  ', 10, 5, (5, F), 5),
             ('rtl paragraph, hebrew', AUTO, 'שלום', 10, 4, (5, T), 5),
             ('rtl paragraph, hebrew and space', AUTO, 'שלום ', 10, 5, (4, T), 4),
+            # a typed space after digits ends the number's run: the next char starts a new one at the enclosing level
+            ('digits and space after hebrew', b'', 'שלום 123 ', 12, 9, (0, F), 0),
+            ('rtl paragraph, digits and space', AUTO, 'שלום 123 ', 12, 9, (2, T), 2),
+            ('wide latin after hebrew', AUTO, 'שלום 中', 10, 7, (5, F), 5),
+            # the PDI closes the isolate, so the next char is outside it
+            ('closed isolate', b'', 'a⁧12 34⁩', 10, 6, (6, F), 6),
         )
         for name, seqs, text, cols, x, beam, block in cases:
             with self.subTest(name):
@@ -3498,6 +3506,8 @@ class TestBidiReorder(BaseTest):
                     s = self.replayed(prompt, data)
                     self.ae(self.v2l(s, 0)[:6], (0, 1, 4, 3, 2, 5))
                     self.assert_cursor_at(s, 6, (1, True), 1)
+        s = self.replayed('B', 'שלום 12 '.encode(), cols=14)
+        self.assert_cursor_at(s, 10, (1, True), 1)
         # no typed text: the cursor is on the cell after the prompt, which has no map
         s = self.replayed('B', b'')
         self.assertIsNone(self.v2l(s, 0))

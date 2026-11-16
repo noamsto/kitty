@@ -24,6 +24,12 @@ cell_isolates(const CPUCell *c, const TextCache *tc, char_type buf[MAX_NUM_CODEP
     return n;
 }
 
+bool
+bidi_cell_has_isolates(const CPUCell *c, const TextCache *tc) {
+    char_type buf[MAX_NUM_CODEPOINTS_PER_CELL];
+    return cell_isolates(c, tc, buf) != 0;
+}
+
 static bool
 row_has_isolates(const CPUCell *cells, index_type num, const TextCache *tc) {
     char_type buf[MAX_NUM_CODEPOINTS_PER_CELL];
