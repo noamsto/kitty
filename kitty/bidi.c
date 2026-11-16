@@ -13,9 +13,18 @@ free_row_maps(BidiMaps *b) {
     free(b->v2l);
     free(b->levels);
     free(b->active);
+    free(b->row_id);
+    free(b->para_first);
+    free(b->para_last);
+    free(b->para_rows);
     b->v2l = NULL;
     b->levels = NULL;
     b->active = NULL;
+    b->row_id = NULL;
+    b->para_first = NULL;
+    b->para_last = NULL;
+    b->para_rows = NULL;
+    b->ctx_linebuf = NULL;
     b->rows = 0;
     b->cols = 0;
 }
@@ -23,6 +32,7 @@ free_row_maps(BidiMaps *b) {
 void
 bidi_maps_free(BidiMaps *b) {
     free_row_maps(b);
+    free(b->paused_ids);
     free(b->text);
     free(b->types);
     free(b->brackets);
@@ -42,7 +52,11 @@ bidi_maps_ensure(BidiMaps *b, index_type rows, index_type cols) {
     b->v2l = malloc(cells * sizeof(b->v2l[0]));
     b->levels = malloc(cells * sizeof(b->levels[0]));
     b->active = calloc(rows, sizeof(b->active[0]));
-    if (!b->v2l || !b->levels || !b->active) {
+    b->row_id = calloc(rows, sizeof(b->row_id[0]));
+    b->para_first = calloc(rows, sizeof(b->para_first[0]));
+    b->para_last = calloc(rows, sizeof(b->para_last[0]));
+    b->para_rows = calloc(rows, sizeof(b->para_rows[0]));
+    if (!b->v2l || !b->levels || !b->active || !b->row_id || !b->para_first || !b->para_last || !b->para_rows) {
         free_row_maps(b);
         return false;
     }
@@ -109,12 +123,20 @@ feed_row(BidiMaps *b, const CPUCell *cells, const TextCache *tc, uint32_t r, uin
 // 0, or 0 when the resolve failed or left every level at 0.
 static uint32_t
 resolve_levels(BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const TextCache *tc) {
-    if (!num_rows || num_rows > BIDI_MAX_PARAGRAPH_ROWS || !ensure_scratch(b, (size_t)num_rows * b->cols)) return 0;
+    b->resolve_cacheable = true;
+    if (!num_rows || num_rows > BIDI_MAX_PARAGRAPH_ROWS) return 0;
+    if (!ensure_scratch(b, (size_t)num_rows * b->cols)) {
+        b->resolve_cacheable = false;
+        return 0;
+    }
     uint32_t n = 0;
     for (unsigned r = 0; r < num_rows; r++) {
         b->row_start[r] = n;
         n = feed_row(b, rows[r], tc, r, n);
-        if (n == UINT32_MAX) return 0;
+        if (n == UINT32_MAX) {
+            b->resolve_cacheable = false;
+            return 0;
+        }
     }
     b->row_start[num_rows] = n;
     fribidi_get_bidi_types(b->text, (FriBidiStrIndex)n, b->types);
@@ -143,8 +165,10 @@ resolve_levels(BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const
     }
     FriBidiParType base_dir = FRIBIDI_PAR_LTR;
     b->resolve_count++;
-    // Returns the highest level plus one, or 0 on failure
-    if (fribidi_get_par_embedding_levels_ex(b->types, b->brackets, (FriBidiStrIndex)n_trim, &base_dir, b->para_levels) <= 1) return 0;
+    // Returns the highest level plus one: 0 is a failure, which must not be cached, and 1 is a paragraph with every level 0
+    const FriBidiLevel max_level = fribidi_get_par_embedding_levels_ex(b->types, b->brackets, (FriBidiStrIndex)n_trim, &base_dir, b->para_levels);
+    if (!max_level) b->resolve_cacheable = false;
+    if (max_level <= 1) return 0;
     for (uint32_t i = n_trim; i < n; i++) b->para_levels[i] = 0;
     return n_trim;
 }
@@ -154,6 +178,20 @@ bidi_set_row_inactive(BidiMaps *b, index_type render_row) {
     if (!b->active[render_row]) return;
     b->active[render_row] = false;
     b->changed = true;
+}
+
+void
+bidi_cache_invalidate(BidiMaps *b) {
+    if (b->row_id) memset(b->row_id, 0, b->rows * sizeof(b->row_id[0]));
+    b->ctx_linebuf = NULL;
+}
+
+void
+bidi_cache_drop_screen_entries(BidiMaps *b) {
+    // A paragraph starting on a screen row ends on one, so the last row's id tells whether a key mentions the screen
+    for (index_type r = 0; r < b->rows; r++) {
+        if ((b->row_id[r] | b->para_last[r]) & BIDI_ID_SCREEN) b->row_id[r] = 0;
+    }
 }
 
 // Writes the row's maps from the visual order of its characters in b->map,
