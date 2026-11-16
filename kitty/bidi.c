@@ -243,7 +243,7 @@ write_row(BidiMaps *b, index_type render_row, uint32_t row_first_char, uint32_t 
         const index_type next = logical + 1 < row_end_char ? (b->cell_of_char[logical + 1] & 0xffff) : cols;
         const uint8_t level = (uint8_t)b->para_levels[logical];
         if (next == col + 1) {
-            // The common char of one cell skips the loop's setup and alignment padding
+            // The common char of one cell, without the loop's setup
             differs |= (levels[col] != level) | (v2l[v] != col);
             levels[col] = level;
             v2l[v++] = (uint16_t)col;

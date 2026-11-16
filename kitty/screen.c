@@ -5044,8 +5044,9 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued, in
     }
     // FriBidi reads only the fed types after the retype, the brackets, n_trim (the blank tail), the base direction and the row
     // layout; the signature captures all of them per row, and the N0 budget decision follows from them. A row above the view is
-    // excluded because a recycled history row there need not change any checked row. G6 (paragraph direction) and G8 (leading
-    // mark) inputs must join this condition. Rows below the view are clean here, so the dirty rows are all on view.
+    // excluded because a recycled history row there need not change any checked row. Any other input fed to FriBidi, such as a
+    // paragraph direction or a leading mark, must join this condition. Rows below the view are clean here, so the dirty rows are
+    // all on view.
     if (cacheable && shortcut && rtl && !placeholders) {
         bool same = true;
         for (int y = first; y <= last && same; y++) {
