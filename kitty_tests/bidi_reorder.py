@@ -6,7 +6,7 @@ import struct
 import subprocess
 from collections import namedtuple
 
-from kitty.fast_data_types import test_screen_update_cell_data
+from kitty.fast_data_types import get_options, test_screen_update_cell_data
 from kitty.fonts.render import setup_for_testing
 
 from .base import BaseTest, draw_multicell, parse_bytes
@@ -137,6 +137,91 @@ class TestBidiReorder(BaseTest):
         s.draw(NSI)
         self.ae(self.refresh(s, 0), NSI_V2L)
         return s
+
+    # The cache tests below address the hooks by screen row; the render row offset follows the live options and screen
+    def rr(self, s, y):
+        return y + int(bool(get_options().pixel_scroll) and not s.is_using_alternate_linebuf())
+
+    def vmaps(self, s):
+        return tuple(s.test_bidi_v2l(self.rr(s, y)) for y in range(s.lines))
+
+    def lv(self, s, y):
+        levels = s.test_bidi_levels(self.rr(s, y))
+        return None if levels is None else tuple(levels)
+
+    def state(self, s):
+        return self.vmaps(s), tuple(self.lv(s, y) for y in range(s.lines))
+
+    def fill(self, s, rows):
+        for y, text in enumerate(rows):
+            s.cursor_position(y + 1, 1)
+            s.draw(text)
+        s.cursor_position(1, 1)
+
+    def filled(self, rows, **opts):
+        s = self.screen(**opts)
+        self.fill(s, rows)
+        return s
+
+    def put(self, s, y, x, text):
+        s.cursor_position(y, x)
+        s.draw(text)
+
+    def warm(self, s):
+        # history lines stay dirty until first shown, and a first frame writes the cache
+        for _ in range(2):
+            self.frame(s)
+
+    def prerender(self, s):
+        for up in (True, False):
+            s.scroll(s.historybuf.count, up)
+            self.frame(s)
+
+    def history(self, rows, up=0):
+        # 5x3 screen, one row per line, every history line rendered once
+        s = self.screen(cols=5, lines=3, scrollback=10)
+        for r in rows:
+            parse_bytes(s, r.encode() + b'\r\n')
+        self.prerender(s)
+        if up:
+            s.scroll(up, True)
+        return s
+
+    def plain_maps(self, rows, cols=10, lines=0):
+        # the maps of a screen filled with rows, with nothing pushed into the history
+        f = self.screen(cols=cols, lines=lines or len(rows))
+        self.fill(f, rows)
+        self.ae(f.historybuf.count, 0)
+        self.frame(f)
+        return self.vmaps(f)
+
+    def trigger_case(self, build, trigger, expect=None, fresh=True, resolves=None):
+        # maps after the trigger frame, equal to a fresh screen's (fresh=False: a first frame changes the view) and to expect when given
+        s = build()
+        self.warm(s)
+        trigger(s)
+        resolved = self.frame(s)[0]
+        if resolves is None:
+            self.assertGreater(resolved, 0, 'the trigger must make the paragraph resolve again')
+        else:
+            self.ae(resolved, resolves)
+        got = self.vmaps(s)
+        if fresh:
+            f = build()
+            trigger(f)
+            self.frame(f)
+            self.ae(got, self.vmaps(f))
+        if expect is not None:
+            self.ae(got, expect)
+        return got
+
+    def beta_over_a(self, s, y, scrolled_by=0, renders=2):
+        # ב over row 2 turns the ! ending row 1 from N2 level 0 into N1 level 1: one re-resolve redraws row 1 (levels) and row 2 (written)
+        s.cursor_position(3, 1)
+        s.draw('ב')
+        self.ae((s.scrolled_by, s.linebuf.dirty_lines()), (scrolled_by, [2]))
+        self.ae(self.frame(s), (1, renders))
+        self.ae(self.lv(s, y), (2, 2, 1, 2, 1))
 
     def selection_rows(self, s, raw):
         # the bytes of each screen row of a selection buffer with one byte per cell
@@ -426,7 +511,7 @@ class TestBidiReorder(BaseTest):
                     s.scroll(up, True)
                 test_screen_update_cell_data(s)
                 self.ae(tuple(s.test_bidi_levels(up)), (2, 2, 1, 2, 2))  # history line 0
-                self.ae(self.frame(s), (1, 0))
+                self.ae(self.frame(s), (0, 0))
 
     def test_unstamped_row_reordered_only_with_its_paragraph(self):
         s = self.create_screen(cols=5, lines=5, options={})
@@ -814,3 +899,546 @@ class TestBidiReorder(BaseTest):
             s.draw('ab ' + word)
             self.ae(self.refresh(s, 0), (0, 1, 2, 5, 4, 3) + ID10[6:])
             self.ae(self.sprites(self.uploaded(s, 0))[3:6], guessed)
+
+    ABC_A = (0, 1, 2, 5, 4, 3) + ID10[6:]
+    EDGE_PARAGRAPH = 'אבג abאב 12ab'
+    CACHE_ROWS = ['אבג abc', 'abc אבג', 'אב', 'xyz', 'אבגדה']
+
+    def test_dirty_row_redraws_only_rows_whose_levels_change(self):
+        s = self.paragraph('אבגדה', '12 3!', 'abcde', 'fghij', 'klmno', lines=6)
+        self.frame(s)
+        self.ae((self.lv(s, 1), s.linebuf.dirty_lines()), ((2, 2, 1, 2, 0), []))
+        self.beta_over_a(s, 1)
+        f = self.paragraph('אבגדה', '12 3!', 'בbcde', 'fghij', 'klmno', lines=6)
+        self.ae(self.frame(f)[0], 1)
+        self.ae(self.lv(f, 1), (2, 2, 1, 2, 1))
+        want = [self.sprites(self.uploaded(f, y)) for y in range(5)]
+        self.assertTrue(all(map(any, want)))
+        self.ae([self.sprites(self.uploaded(s, y)) for y in range(5)], want)
+        s.cursor_position(4, 2)
+        s.draw('z')  # Latin over Latin changes no levels: only the written row redraws
+        self.ae(self.frame(s)[1], 1)
+
+    def test_paused_frame_redraws_only_rows_whose_levels_change(self):
+        # only rows 0 (written) and 1 redraw, with and without the leading render row of pixel scroll
+        for pixel_scroll in (False, True):
+            with self.subTest(pixel_scroll=pixel_scroll):
+                opts = {'pixel_scroll': pixel_scroll}
+                s = self.paragraph('אבגדה', '(12ב', **opts)
+                parse_bytes(s, 'אב\r\nגד'.encode().join((b'\r\n', b'')))
+                self.frame(s)
+                self.assertTrue(all(self.lv(s, y) is not None for y in (1, 2, 3)))
+                self.split(s)
+                s.pause_rendering(True, 1000)
+                self.ae(self.frame(s)[1], 2)
+                self.ae(self.sprites(self.uploaded(s, 0)), self.fresh_sprites('אבגדו', **opts))
+                self.ae(self.sprites(self.uploaded(s, 1)), self.fresh_sprites('(12ב', **opts))
+                self.ae(self.frame(s)[1], 0)
+
+    def test_line_scrolled_into_view_reshaped_after_split(self):
+        # (12ב split while out of view: it reshapes when scrolled back in, live or paused
+        for paused in (False, True):
+            with self.subTest(paused=paused):
+                s = self.screen(cols=5, lines=3, scrollback=10)
+                parse_bytes(s, b'x\r\ny\r\n')
+                s.draw('אבגדה(12ב')
+                self.frame(s)
+                self.ae(self.lv(s, 2), (1, 2, 2, 1, 0))
+                s.scroll(1, True)
+                self.frame(s)
+                self.ae(s.scrolled_by, 1)
+                self.split(s, row=2)
+                s.scroll(1, False)
+                self.ae(s.scrolled_by, 0)
+                if paused:
+                    s.pause_rendering(True, 1000)
+                self.ae((self.sprites(self.uploaded(s, 2)), self.lv(s, 2)), (self.fresh_sprites('(12ב'), (0, 0, 0, 1, 0)))
+
+    def test_paused_frame_row_continuing_from_history(self):
+        # row 0 (12ב continues from history; the paused snapshot resolves row 0 alone at 0,0,0,1,0, the next live frame at 1,2,2,1,0
+        opts = {'pixel_scroll': False}
+        s = self.paragraph('אבגדה', '(12ב', lines=3, scrollback=10, **opts)
+        parse_bytes(s, b'\r\nx\r\ny')
+        self.frame(s)
+        self.ae(self.lv(s, 0), (1, 2, 2, 1, 0))
+        s.pause_rendering(True, 1000)
+        self.frame(s)
+        self.ae(self.lv(s, 0), (0, 0, 0, 1, 0))
+        self.assert_shaped(s, 0, self.fresh_sprites('(12ב', **opts))
+        s.pause_rendering(False)
+        self.frame(s)
+        self.ae(self.lv(s, 0), (1, 2, 2, 1, 0))
+        self.assert_shaped(s, 0, self.sprites(self.uploaded(self.paragraph('אבגדה', '(12ב', lines=3, **opts), 1)))
+
+    def recycle_history_number(self, paused):
+        # X is pushed at the absolute history number of O after O was popped: O's glyphs and cache entry must not be reused
+        opts = {'pixel_scroll': False}
+        s = self.screen(cols=5, lines=3, scrollback=10, **opts)
+        s.draw('א2 3ב')  # O
+        parse_bytes(s, b'\r\nh\r\ni\r\nj')
+        self.ae((s.historybuf.count, str(s.historybuf.line(0))), (1, 'א2 3ב'))
+        s.scroll(1, True)
+        self.warm(s)
+        o = self.fresh_sprites('א2 3ב', **opts)
+        self.ae((self.lv(s, 0), self.sprites(self.uploaded(s, 0))), ((1, 2, 1, 2, 1), o))
+        if paused:
+            s.pause_rendering(True, 1000)
+        s.reverse_scroll(1, True)  # O back onto the screen
+        self.ae(s.historybuf.count, 0)
+        self.put(s, 1, 1, 'א2 3(')  # X
+        s.cursor_position(3, 1)
+        parse_bytes(s, b'\n')  # X into the history
+        self.ae((s.historybuf.count, str(s.historybuf.line(0))), (1, 'א2 3('))
+        if paused:
+            self.assert_shaped(s, 0, o, 'the snapshot still shows O')
+            s.pause_rendering(False)
+        s.scroll(1, True)
+        x = self.fresh_sprites('א2 3(', **opts)
+        self.assertNotEqual(x, o)
+        self.assert_shaped(s, 0, x)
+        f = self.screen(cols=5, lines=2, **opts)
+        f.draw('א2 3(')
+        self.frame(f)
+        self.ae(self.vmaps(s)[0], self.vmaps(f)[0])
+
+    def test_history_slot_reuse_reshapes_line(self):
+        self.recycle_history_number(False)
+
+    def test_history_slot_reuse_reshapes_line_in_paused_frame(self):
+        self.recycle_history_number(True)
+
+    def test_full_ring_push_reshapes_only_reused_slots(self):
+        # a full ring reuses the slot of the oldest line: only the new line reshapes, wherever the view is
+        texts = ['אב 12', 'א2 3(', 'ab אב', 'אבגד.', 'א 12b', '(12ב', 'אב cd', 'a אבג']
+
+        def ring():
+            s = self.screen(cols=5, lines=4, scrollback=0, pixel_scroll=False)
+            parse_bytes(s, '\r\n'.join(texts).encode())
+            self.frame(s)
+            self.prerender(s)
+            return s
+
+        def push(s, scroll):
+            s.scroll(scroll, True)
+            self.warm(s)
+            self.ae(s.scrolled_by, min(scroll, 4))
+            s.cursor_position(4, 1)
+            parse_bytes(s, b'\n')
+            return self.frame(s)
+
+        def alone(text):
+            # the maps and levels of a line drawn alone, and its glyphs
+            f = self.screen(cols=5, lines=1, scrollback=0, pixel_scroll=False)
+            f.draw(text)
+            self.frame(f)
+            return self.vmaps(f)[0], self.lv(f, 0), self.fresh_sprites(text, pixel_scroll=False)
+
+        # at scroll 2 the view keeps its lines: the one pushed into the history gets a new id, and the screen line below it
+        # resolves because the index dropped the screen entries;
+        # at scroll 10 the view slides over the ring and every row shows another line
+        for scroll, resolves in ((2, 2), (10, 4)):
+            with self.subTest(scroll=scroll):
+                s = ring()
+                self.ae(s.historybuf.count, 4)
+                self.ae(push(s, scroll), (resolves, 1))
+                lines = texts[1:] + ['']
+                start = len(lines) - 4 - s.scrolled_by
+                for y, text in enumerate(lines[start : start + 4]):
+                    vmap, levels, sprites = alone(text)
+                    self.ae((self.vmaps(s)[y], self.lv(s, y)), (vmap, levels), f'row {y}')
+                    self.assert_shaped(s, y, sprites, f'row {y}')
+
+    def test_dirty_row_below_view_redraws_paragraph(self):
+        # scrolled up one row: a dirty row below the view re-resolves the paragraph; row 2 redraws, others keep their levels
+        s = self.paragraph('אבגדה', 'אבגדה', '12 3!', 'abcde', lines=3, scrollback=10)
+        self.warm(s)
+        s.scroll(1, True)
+        self.warm(s)
+        self.ae((s.scrolled_by, s.linebuf.dirty_lines(), self.lv(s, 2)), (1, [], (2, 2, 1, 2, 0)))
+        self.beta_over_a(s, 2, scrolled_by=1, renders=1)
+
+    def test_cache_reuses_unchanged_paragraphs(self):
+        # one dirty row makes only its own paragraph resolve again
+        rows = ['אבג abc'] * 3
+        s = self.filled(rows)
+        self.ae([self.frame(s)[0], self.frame(s)[0]], [3, 0])
+        before = self.vmaps(s)
+        self.ae([m is None for m in before], [False] * 3 + [True] * 2)
+        s.current_selections()
+        self.assertFalse(s.is_selection_dirty())
+        self.put(s, 2, 10, 'z')
+        self.ae(self.frame(s)[0], 1)
+        after = self.vmaps(s)
+        self.ae((after[0], after[2]), (before[0], before[2]))
+        f = self.filled(rows)
+        self.put(f, 2, 10, 'z')
+        self.frame(f)
+        self.ae(after, self.vmaps(f))
+        self.ae(self.frame(s), (0, 0))
+
+    def test_cache_view_change_resolves_again(self):
+        # every trigger changes which line a render row shows (or the layout) without a dirty row: no entry may be trusted
+        rows = self.CACHE_ROWS[:2] + ['אב', 'xyz', 'אבגדה']
+        hist = ['אבג', 'abאב', 'אב12', 'xyz', 'אבגדה', 'a', 'אבג abc']
+        long_row = 'אבגדהוזחטיכלמ'
+
+        def net_zero_build():
+            s = self.screen()
+            parse_bytes(s, b'\x1b[?1049h\x1b[8h')
+            self.put(s, 4, 1, long_row)
+            s.cursor_position(1, 1)
+            return s
+
+        def net_zero(s):
+            # the long row comes back to row 3 with blank row 4 still its continuation: only the linebuf movement generation differs
+            parse_bytes(s, b'\x1b[L\x1b[M')
+            self.assertTrue(s.linebuf.is_continued(4))
+
+        def bottom_build():
+            s = self.screen(cols=5, lines=5, scrollback=10)
+            parse_bytes(s, b'x0\r\nx1\r\nx2\r\n')
+            s.draw(self.EDGE_PARAGRAPH)
+            self.prerender(s)
+            return s
+
+        def top_build():
+            s = self.screen(cols=5, lines=5, scrollback=10, pixel_scroll=False)
+            s.draw(self.EDGE_PARAGRAPH)
+            parse_bytes(s, b'\r\nx1\r\nx2\r\nx3\r\nx4\r\n')
+            self.prerender(s)
+            s.scroll(3, True)
+            return s
+
+        m = self.plain_maps([self.EDGE_PARAGRAPH], 5, lines=5)
+        self.ae([x is not None for x in m], [True] * 3 + [False] * 2)
+        up, down = (lambda s: s.scroll(1, True)), (lambda s: s.scroll(1, False))
+        rev = tuple(range(12, -1, -1))
+        # (name, build, trigger, expected maps, compare with a fresh screen, expected resolves or None for some)
+        cases = (
+            ('index', lambda: self.filled(rows), lambda s: parse_bytes(s, b'\x1b[5;1H\x1bD'), self.plain_maps(rows[1:], lines=5), True, None),
+            ('reverse index', lambda: self.filled(rows), lambda s: parse_bytes(s, b'\x1b[1;1H\x1bM'), self.plain_maps([''] + rows[:-1]), True, None),
+            ('insert then delete line', net_zero_build, net_zero, (None, None, None, rev[3:], None), True, None),
+            ('scrollback view', lambda: self.history(hist), up, self.plain_maps(hist[5:], 5, lines=3), False, None),
+            ('view crossing bottom edge', bottom_build, up, (None, None, None, m[0], m[1]), False, None),
+            ('view crossing top edge', top_build, down, (m[1], m[2], None, None, None), False, None),
+            # the view stays on the same lines: only the line pushed from the screen into the history changes its identity
+            (
+                'history add while scrolled',
+                lambda: self.history(hist[:6], 2),
+                lambda s: parse_bytes(s, '\x1b[3;1H\nאב'.encode()),
+                self.plain_maps(hist[2:5], 5),
+                True,
+                1,
+            ),
+            ('resize rewrap', lambda: self.drawn(long_row), lambda s: s.resize(5, 13), (rev, None, None, None, None), True, None),
+        )
+        for name, build, trigger, expect, fresh, resolves in cases:
+            with self.subTest(name):
+                self.trigger_case(build, trigger, expect, fresh, resolves)
+
+    def drawn(self, text, **opts):
+        s = self.screen(**opts)
+        s.draw(text)
+        return s
+
+    def test_cache_option_toggle(self):
+        # force_ltr on drops the maps, turning it off resolves again, then the cache holds
+        s = self.drawn('abc' + A)
+        self.warm(s)
+        self.ae(self.vmaps(s)[0], self.ABC_A)
+        for force_ltr in (True, False):
+            self.set_options({'force_ltr': force_ltr})
+            s.test_bidi_check_mode()
+            resolves = self.frame(s)[0]
+            if force_ltr:
+                self.ae((self.vmaps(s)[0], resolves), (None, 0))
+        self.assertGreater(resolves, 0)
+        self.ae((self.vmaps(s)[0], self.frame(s)[0]), (self.ABC_A, 0))
+
+    def test_cache_losing_and_gaining_rtl(self):
+        # Overwriting the only RTL run leaves a Latin row (nothing to resolve); Hebrew written into it resolves
+        s = self.drawn('abc' + A)
+        self.warm(s)
+        self.put(s, 1, 4, 'xyz')
+        self.frame(s)
+        self.assertIsNone(self.vmaps(s)[0])
+        self.warm(s)
+        self.put(s, 1, 4, A)
+        self.ae((self.frame(s)[0], self.vmaps(s)[0], self.frame(s)[0]), (1, self.ABC_A, 0))
+
+    def test_cache_tall_paragraph_always_resolves(self):
+        # a paragraph cut by the 256 row window is never cached: unchanged frames still resolve it
+        s = self.screen(cols=2, lines=300, scrollback=200)
+        s.draw('א!' * 400)
+        self.ae(s.historybuf.count, 100)
+        seen = []
+        for _ in range(3):
+            self.assertGreater(self.frame(s)[0], 0)
+            seen.append(self.vmaps(s))
+        self.ae(seen, seen[:1] * 3)
+
+    def test_cache_paused_rendering(self):
+        # paragraphs entirely inside the view keep their entries through a pause: no resolves while paused or unpausing
+        rows = ['אבג abc', 'abc אבג']
+        s = self.filled(rows)
+        self.warm(s)
+        s.pause_rendering(True, 1000)
+        self.ae(self.frame(s)[0], 0)
+        s.pause_rendering(False)
+        self.ae(self.frame(s)[0], 0)
+        f = self.filled(rows)
+        self.frame(f)
+        self.ae(self.vmaps(s), self.vmaps(f))
+
+        # a paragraph with rows above the view is cut by the snapshot, so it resolves while paused and again unpaused
+        def build():
+            s = self.screen(cols=5, lines=3, scrollback=10)
+            s.draw('אבגד.12 34abcdeאבגד.12 34')
+            self.ae(s.historybuf.count, 2)
+            return s
+
+        s = build()
+        self.warm(s)
+        s.pause_rendering(True, 1000)
+        self.assertGreater(self.frame(s)[0], 0)
+        s.pause_rendering(False)
+        self.assertGreater(self.frame(s)[0], 0)
+        f = build()
+        self.frame(f)
+        self.ae(self.state(s), self.state(f))
+
+    def test_cache_reset(self):
+        # RIS clears the stamps and both flags: no maps until CSI 8 h, and the text written after it resolves
+        s = self.drawn('abc' + A)
+        self.warm(s)
+        self.ae(self.vmaps(s)[0], self.ABC_A)
+        parse_bytes(s, b'\x1bc')
+        self.frame(s)
+        self.ae((self.vmaps(s), s.test_bidi_state()), ((None,) * 5, (False,) * 5))
+        s.draw('abc' + A)
+        self.frame(s)
+        self.assertIsNone(self.vmaps(s)[0])
+        parse_bytes(s, b'\x1b[8h\r')
+        s.draw('abc' + A)
+        self.assertGreater(self.frame(s)[0], 0)
+        self.ae((self.vmaps(s)[0], self.frame(s)[0]), (self.ABC_A, 0))
+
+    def test_cache_counter_wrap(self):
+        # the generation wraps from UINT64_MAX to 0: rows moved by the index must not hit the entries of the lines they replace
+        rows = ['אבג abc', 'abc אבג', 'אבגדה abc', 'a אב', 'abcd אבגדה']
+        s = self.filled(rows)
+        s.test_bidi_set_generation(0xFFFFFFFFFFFFFFFF)
+        self.warm(s)
+        before = self.vmaps(s)
+        self.ae(len(set(before)), 5)
+        parse_bytes(s, b'\x1b[5;1H\x1bD')
+        self.assertGreaterEqual(self.frame(s)[0], 1)
+        self.ae(self.vmaps(s), self.plain_maps(rows[1:], lines=5))
+        self.assertNotIn(self.vmaps(s)[0], before[:1])
+
+    def test_cache_resize_while_paused(self):
+        # a resize unpauses first: no entry written for the old size or the snapshot may be used for the new one
+        rows = ['אבגדה abc', 'abc אבגדה', 'אב 12 abcdef', 'xyz', 'אבגדהוזח']
+
+        def build():
+            s = self.filled(rows)
+            self.warm(s)
+            return s
+
+        s = build()
+        s.pause_rendering(True, 1000)
+        self.frame(s)
+        s.resize(5, 6)
+        self.ae(self.frame(s)[0], 3)  # P2 and P3 on the screen, and P1 in the pixel scroll row above it
+        # the oracle never rendered at the old size, so it holds no entry a stale lookup could reuse
+        f = self.filled(rows)
+        f.resize(5, 6)
+        self.frame(f)
+        self.ae(self.state(s), self.state(f))
+        self.ae(self.frame(s), (0, 0))
+
+    def test_hit_counts(self):
+        s = self.filled(self.CACHE_ROWS)
+        self.ae(self.frame(s)[0], 4)
+        self.ae(self.frame(s), (0, 0))  # unchanged
+        self.put(s, 2, 8, 'z')
+        self.ae(self.frame(s)[0], 1)  # one cell
+        self.ae(self.frame(s), (0, 0))
+        s = self.history(['אבג', 'abאב', 'אב12', 'xyz', 'אבגדה', 'a', 'אבג abc'], up=2)
+        self.warm(s)
+        self.ae(self.frame(s), (0, 0))  # static, scrolled back
+        # a paragraph with rows above the view (up=0), above and below it (up=1) and below it (up=2)
+        for up in range(3):
+            with self.subTest(straddling=up):
+                s = self.screen(cols=5, lines=3, scrollback=10)
+                s.draw('אבגד.12 34abcdeאבגד.12 34')
+                if up:
+                    self.frame(s)  # output is shown before the user scrolls back, so the rows below the view are clean
+                    s.scroll(up, True)
+                self.warm(s)
+                self.ae(self.frame(s), (0, 0))
+                self.ae(self.frame(s), (0, 0))
+
+    def test_cache_scrolled_back_streaming(self):
+        # output while scrolled back keeps the view on its lines: visible history paragraphs need no resolve
+        lines = ['אבג', 'abאב', 'אב12', 'xyz', 'אבגדה', 'a', 'אבג abc', 'ב(12)', 'אב אב', 'ab', 'אבגדה1', 'xx']
+
+        def build():
+            s = self.screen(cols=5, lines=4, scrollback=50)
+            for text in lines:
+                parse_bytes(s, text.encode() + b'\r\n')
+            return s
+
+        s = build()
+        s.scroll(6, True)
+        self.warm(s)
+        self.ae(self.frame(s)[0], 0)
+        streamed = ['אב', 'cd', 'אבג', 'ef', 'אבגד']
+        for text in streamed:
+            parse_bytes(s, text.encode() + b'\r\n')
+            self.ae(self.frame(s)[0], 0, text)
+        f = build()
+        for text in streamed:
+            parse_bytes(f, text.encode() + b'\r\n')
+        f.scroll(s.scrolled_by, True)
+        self.ae(f.scrolled_by, s.scrolled_by)
+        self.frame(f)
+        self.ae(self.state(s), self.state(f))
+        self.assertTrue(any(self.vmaps(s)))
+
+    def test_cache_above_view_recycled_history_number(self):
+        # a paragraph with rows above the view: its newest history row is popped and a different line pushed at the same
+        # absolute number, which changes the level of the number starting the first row in view
+        opts = {'pixel_scroll': False}
+        p0, p1, p1b, p2, p3, p4 = '12 34', 'אבגדה', 'abcde', '12 אב', 'ab cd', 'אב ef'
+
+        def build(mid):
+            s = self.screen(cols=5, lines=3, scrollback=10, **opts)
+            s.draw(p0 + mid + p2 + p3 + p4)
+            self.ae((s.historybuf.count, str(s.historybuf.line(0))), (2, mid))
+            return s
+
+        s = build(p1)
+        self.warm(s)
+        before = self.state(s)
+        s.reverse_scroll(1, True)  # p1 back onto the screen, p4 lost
+        self.ae(s.historybuf.count, 1)
+        self.put(s, 1, 1, p1b)
+        s.cursor_position(3, 1)
+        parse_bytes(s, b'\n')  # p1b into the history at the number of p1
+        self.ae((s.historybuf.count, str(s.historybuf.line(0))), (2, p1b))
+        self.put(s, 2, 5, p3[-1] + p4)  # p4 again as the continuation of p3, so the paragraph keeps its first row, last row and size
+        self.assertGreater(self.frame(s)[0], 0)
+        f = build(p1b)
+        self.frame(f)
+        self.ae(self.state(s), self.state(f))
+        self.assertNotEqual(self.state(s), before)
+
+    def test_cache_prompt_erase_moves_history_lines(self):
+        # erasing a command deletes history lines from the middle: lines above move down and take the deleted lines' numbers
+        def build(erased):
+            s = self.screen(cols=10, lines=4, scrollback=30)
+            s.draw('before\r\n')
+            if erased:
+                parse_bytes(s, b'\x1b]133;A\a')
+                s.draw('$ p1\r\n')
+                parse_bytes(s, b'\x1b]133;C\a')
+                s.draw('o0 אב\r\nאבג o1\r\n')
+            parse_bytes(s, b'\x1b]133;A\a')
+            s.draw('$ l0\r\nאבגדהוזחטיכלמ\r\nabc אבג\r\nl3\r\nl4')
+            return s
+
+        s = build(True)
+        self.warm(s)
+        self.assertGreater(s.historybuf.count, 4)
+        self.assertTrue(s.erase_last_command())
+        self.assertGreater(self.frame(s)[0], 0)
+        f = build(False)
+        self.ae(s.historybuf.count, f.historybuf.count)
+        self.frame(f)
+        self.ae(self.state(s), self.state(f))
+        self.assertTrue(any(self.vmaps(s)))
+
+    def test_cache_below_view_rows_moved_under_a_history_entry(self):
+        # scrolled back so only history is in view: a paragraph starts in its last row and continues on the screen below,
+        # where a clean unrelated line moves into its last row without any row being written
+        def build(region=False):
+            s = self.screen(cols=5, lines=3, scrollback=10)
+            parse_bytes(s, b'x1\r\nx2\r\n')
+            s.draw('אבגד(' + '12 34' + 'a) cd')  # Q0 is pushed; Q1 at y0 and Q2 at y1 continue it, Q2 closing Q0's (
+            parse_bytes(s, b'\r\nxyz')
+            self.ae((s.historybuf.count, str(s.historybuf.line(0))), (3, 'אבגד('))
+            self.frame(s)  # every screen row clean
+            if region:
+                parse_bytes(s, b'\x1b[2;3r')
+            s.scroll(3, True)
+            self.ae(s.scrolled_by, 3)
+            return s
+
+        for what, trigger, region in (
+            ('CSI M', lambda s: parse_bytes(s, b'\x1b[2;1H\x1b[M'), False),
+            ('CSI L', lambda s: parse_bytes(s, b'\x1b[2;1H\x1b[L'), False),
+            ('region index', lambda s: parse_bytes(s, b'\x1b[3;1H\x1bD\x1b[r'), True),
+        ):
+            with self.subTest(what):
+                s = build(region)
+                self.warm(s)
+                before = self.lv(s, 2)
+                self.assertIsNotNone(before)
+                trigger(s)
+                self.assertTrue(s.linebuf.is_continued(1), 'Q1 still wraps into y1')
+                self.ae(self.frame(s)[0], 1)
+                self.assertNotEqual(self.lv(s, 2), before)
+                f = build(region)
+                trigger(f)
+                self.frame(f)
+                self.ae(self.state(s), self.state(f))
+                self.ae(self.frame(s), (0, 0))
+
+    def test_cache_placeholder_and_preedit_rows_never_hit(self):
+        # a paragraph with an image placeholder row is never resolved, whatever entries its rows had; the pre-edit row's
+        # paragraph resolves in every frame while the overlay is shown
+        s = self.paragraph('אבגדה', '(12ב')
+        self.warm(s)
+        self.ae((self.frame(s)[0], self.vmaps(s)[0] is not None), (0, True))  # the unchanged paragraph is cached
+        self.put(s, 2, 1, 'ab' + chr(0x10EEEE))
+        self.assertTrue(s.linebuf.is_continued(1))
+        for _ in range(3):
+            self.ae((self.frame(s)[0], self.vmaps(s)[:2]), (0, (None, None)))
+        s = self.paragraph('אבגדה', '(12ב')
+        self.warm(s)
+        s.test_update_overlay_text('xy')
+        self.ae([self.frame(s)[0] > 0 for _ in range(3)], [True] * 3)
+        s.test_update_overlay_text('')
+        self.assertGreater(self.frame(s)[0], 0)
+        self.ae(self.frame(s)[0], 0)
+        f = self.paragraph('אבגדה', '(12ב')
+        self.frame(f)
+        self.ae(self.state(s), self.state(f))
+
+    def test_cache_changes_during_a_pause(self):
+        # lines moved on the live screen while paused, with no row written: the snapshot keeps showing the old rows, and the
+        # next live frame must show the moved ones
+        rows = ['אבג abc', 'abc אבג', 'אבגדה abc', 'a אב', 'abcd אבגדה']
+        for what, trigger in (
+            ('index', lambda s: parse_bytes(s, b'\x1b[5;1H\x1bD')),
+            ('CSI M', lambda s: parse_bytes(s, b'\x1b[2;1H\x1b[M')),
+            ('CSI L', lambda s: parse_bytes(s, b'\x1b[2;1H\x1b[L')),
+        ):
+            with self.subTest(what):
+                s = self.filled(rows)
+                self.warm(s)
+                before = self.vmaps(s)
+                s.pause_rendering(True, 1000)
+                trigger(s)
+                self.assertFalse(any(str(s.line(y)) for y in s.linebuf.dirty_lines()), 'only blank rows may be dirty')
+                self.ae(self.frame(s)[0], 0)
+                self.ae(self.vmaps(s), before)
+                s.pause_rendering(False)
+                self.frame(s)
+                f = self.filled(rows)
+                trigger(f)
+                self.frame(f)
+                self.ae(self.vmaps(s), self.vmaps(f))
+                self.assertNotEqual(self.vmaps(s), before)
+                self.ae(self.frame(s), (0, 0))
