@@ -2944,7 +2944,7 @@ class TestBidiReorder(BaseTest):
             self.ae((self.frame(s)[0], self.shifts(s)), (1, shifted), text)
             self.ae(self.state(s), self.streamed_state(build, done), text)
 
-    # G7: cursor and IME
+    # Cursor and IME
 
     def test_cursor_visual_in_bidi_rows(self):
         # The beam goes to the left edge of an RTL run it follows; block, underline and hollow stay on the cell's own column unless blank

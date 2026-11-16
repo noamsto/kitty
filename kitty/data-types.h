@@ -293,7 +293,7 @@ typedef struct {
     CursorShape shape;
     unsigned x, y, multicursor_count;
     float cursor_opacity, text_blink_opacity;
-    unsigned visual_x; // the column x is drawn at, see screen_cursor_render_x(); beam_mirrored: a beam is drawn at the right edge of it
+    unsigned visual_x; // the column x is drawn at, see screen_cursor_render_x(); with beam_mirrored a beam is on its right edge
 } CursorRenderInfo;
 
 typedef enum DynamicColorType { COLOR_NOT_SET, COLOR_IS_SPECIAL, COLOR_IS_INDEX, COLOR_IS_RGB } DynamicColorType;
