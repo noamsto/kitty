@@ -976,7 +976,7 @@ cursor_needs_render(Window *w) {
 }
 
 static bool
-collect_cursor_info(CursorRenderInfo *ans, Window *w, monotonic_t now, OSWindow *os_window) {
+collect_cursor_info(CursorRenderInfo *ans, Window *w, monotonic_t now, OSWindow *os_window, bool focused) {
     WindowRenderData *rd = &w->render_data;
     const Cursor *cursor;
     if (screen_is_overlay_active(rd->screen)) {
@@ -989,7 +989,11 @@ collect_cursor_info(CursorRenderInfo *ans, Window *w, monotonic_t now, OSWindow 
         ans->x = cursor->x;
         ans->y = cursor->y;
     }
-    ans->visual_x = rd->screen->bidi_maps ? screen_cursor_render_x(rd->screen, ans->x, ans->y) : ans->x;
+    ans->shape = cursor->shape ? cursor->shape : OPT(cursor_shape);
+    ans->is_focused = focused;
+    ans->beam_mirrored = false;
+    ans->visual_x = rd->screen->bidi_maps ?
+        screen_cursor_render_x(rd->screen, ans->x, ans->y, cursor_shape_drawn(focused, ans->shape), &ans->beam_mirrored) : ans->x;
     ans->is_visible = false;
     ans->multicursor_count = 0;
     ans->cursor_opacity = 1;
@@ -1020,8 +1024,6 @@ collect_cursor_info(CursorRenderInfo *ans, Window *w, monotonic_t now, OSWindow 
     }
     ans->text_blink_opacity = blink_opacity;
     ans->cursor_opacity = cursor_blinking ? blink_opacity : 1.0f;
-    ans->shape = cursor->shape ? cursor->shape : OPT(cursor_shape);
-    ans->is_focused = os_window->is_focused;
     return cursor_needs_render(w);
 }
 
@@ -1124,8 +1126,7 @@ prepare_to_render_os_window(
             bool is_active_window = i == tab->active_window;
             if (is_active_window) {
                 *active_window_id = w->id;
-                if (collect_cursor_info(&WD.screen->cursor_render_info, w, now, os_window)) needs_render = true;
-                WD.screen->cursor_render_info.is_focused = os_window->is_focused;
+                if (collect_cursor_info(&WD.screen->cursor_render_info, w, now, os_window, os_window->is_focused)) needs_render = true;
                 if (global_state.ime_used && os_window->is_focused) sync_ime_position_with_cursor(os_window, w);
                 set_os_window_title_from_window(w, os_window);
                 *active_window_bg = window_bg;
@@ -1171,12 +1172,10 @@ prepare_to_render_os_window(
                 }
             } else {
                 if (WD.screen->cursor_render_info.render_even_when_unfocused) {
-                    if (collect_cursor_info(&WD.screen->cursor_render_info, w, now, os_window)) needs_render = true;
-                    WD.screen->cursor_render_info.is_focused = false;
+                    if (collect_cursor_info(&WD.screen->cursor_render_info, w, now, os_window, false)) needs_render = true;
                 } else {
                     if (WD.screen->sgr_blink_was_used) {
-                        if (collect_cursor_info(&WD.screen->cursor_render_info, w, now, os_window)) needs_render = true;
-                        WD.screen->cursor_render_info.is_focused = false;
+                        if (collect_cursor_info(&WD.screen->cursor_render_info, w, now, os_window, false)) needs_render = true;
                     } else {
                         WD.screen->cursor_render_info.text_blink_opacity = 1;
                     }

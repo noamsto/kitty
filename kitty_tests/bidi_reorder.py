@@ -3047,12 +3047,13 @@ class TestBidiReorder(BaseTest):
                             self.ae(s.test_cursor_visual(x, row, shape), block)
                         if variant == 'paused':
                             s.pause_rendering(False)
-        # no map means no mirroring: force_ltr, and a screen that never sent CSI 8 h
-        for name, s in (
-            ('force_ltr', self.screen(force_ltr=True)),
-            ('no CSI 8 h', self.create_screen(cols=10, lines=5, scrollback=5, options={})),
+        # no map means no mirroring: force_ltr, and a screen that never sent CSI 8 h. Options are global, so each screen is made just before use.
+        for name, make in (
+            ('force_ltr', lambda: self.screen(force_ltr=True)),
+            ('no CSI 8 h', lambda: self.create_screen(cols=10, lines=5, scrollback=5, options={})),
         ):
             with self.subTest(name):
+                s = make()
                 s.draw(MIXED)
                 test_screen_update_cell_data(s)
                 for x in (0, 3, 4, 6, 7):

@@ -5259,7 +5259,9 @@ update_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE fonts_data,
     }
     b->valid = true;
     // The cursor info was collected from the maps of the previous frame
-    self->cursor_render_info.visual_x = screen_cursor_render_x(self, self->cursor_render_info.x, self->cursor_render_info.y);
+    self->cursor_render_info.visual_x = screen_cursor_render_x(
+        self, self->cursor_render_info.x, self->cursor_render_info.y,
+        cursor_shape_drawn(self->cursor_render_info.is_focused, self->cursor_render_info.shape), &self->cursor_render_info.beam_mirrored);
     return true;
 }
 
@@ -5303,7 +5305,9 @@ update_paused_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE font
         }
     }
     b->valid = true;
-    self->cursor_render_info.visual_x = screen_cursor_render_x(self, self->cursor_render_info.x, self->cursor_render_info.y);
+    self->cursor_render_info.visual_x = screen_cursor_render_x(
+        self, self->cursor_render_info.x, self->cursor_render_info.y,
+        cursor_shape_drawn(self->cursor_render_info.is_focused, self->cursor_render_info.shape), &self->cursor_render_info.beam_mirrored);
     return true;
 }
 
@@ -5377,11 +5381,14 @@ cell_span(const CPUCell *c) {
 static bool cell_is_blank(const CPUCell *c);
 
 // The column the cursor at x on linebuf row y is drawn at: the visual column
-// of its cell, except on a blank cell or the pending wrap column after a
-// right-to-left character, where it is the column visually left of that
-// character, as the next right-to-left character goes there
-index_type
-screen_cursor_render_x(Screen *self, index_type x, index_type y) {
+// of its cell. After a right-to-left character a beam goes to the column
+// visually left of it, as the next right-to-left character goes there, and a
+// block, underline or hollow cursor does too when on a blank cell or the
+// pending wrap column. A beam on a right-to-left cell is drawn at the right
+// edge of the cell, flagged by mirrored.
+static index_type
+cursor_visual_in_row(Screen *self, index_type x, index_type y, CursorShape shape, bool *mirrored) {
+    *mirrored = false;
     if (!screen_bidi_maps_usable(self)) return x;
     const BidiMaps *b = self->bidi_maps;
     const index_type render_row = y + rendered_scrolled_by(self) + pixel_scroll_enabled(self);
@@ -5389,15 +5396,29 @@ screen_cursor_render_x(Screen *self, index_type x, index_type y) {
     // The paused snapshot is indexed by render row, as the maps are
     const CPUCell *cells = self->paused_rendering.expires_at ? linebuf_cpu_cells_for_line(self->paused_rendering.linebuf, render_row)
                                                              : linebuf_cpu_cells_for_line(self->linebuf, y);
-    if (x > 0 && (x == self->columns || (x < self->columns && cell_is_blank(cells + x)))) {
+    if (x > 0 && x <= self->columns) {
         index_type p = x - 1;
         while (p && cells[p].is_multicell && cells[p].x) p--;
         if (bidi_cell_is_rtl(b, render_row, p)) {
             const index_type left = bidi_visual_x(b, render_row, p, cell_span(cells + p));
-            return left ? left - 1 : 0;
+            if (shape == CURSOR_BEAM) {
+                *mirrored = left > 0;
+                return left ? left - 1 : 0;
+            }
+            if (x == self->columns || cell_is_blank(cells + x)) return left ? left - 1 : 0;
         }
     }
-    return x < self->columns ? bidi_visual_x(b, render_row, x, cell_span(cells + x)) : x;
+    if (x >= self->columns) return x;
+    const index_type span = cell_span(cells + x);
+    const index_type visual = bidi_visual_x(b, render_row, x, span);
+    if (shape != CURSOR_BEAM || !bidi_cell_is_rtl(b, render_row, x)) return visual;
+    *mirrored = true;
+    return visual + span - 1;
+}
+
+index_type
+screen_cursor_render_x(Screen *self, index_type x, index_type y, CursorShape shape, bool *mirrored) {
+    return cursor_visual_in_row(self, x, y, shape, mirrored);
 }
 // }}}
 
@@ -9014,9 +9035,40 @@ test_bidi_is_rtl(Screen *self, PyObject *args) {
 }
 
 static PyObject *
+test_cursor_visual(Screen *self, PyObject *args) {
+    unsigned x, y;
+    int shape;
+    if (!PyArg_ParseTuple(args, "IIi", &x, &y, &shape)) return NULL;
+    bool mirrored;
+    const index_type col = cursor_visual_in_row(self, x, y, shape, &mirrored);
+    return Py_BuildValue("IO", col, mirrored ? Py_True : Py_False);
+}
+
+static index_type
+test_cursor_render_picked(Screen *self, CursorShape shape, bool focused, bool *mirrored) {
+    index_type x, y;
+    if (screen_is_overlay_active(self)) x = self->overlay_line.cursor_x, y = self->overlay_line.ynum;
+    else {
+        const Cursor *c = self->paused_rendering.expires_at ? &self->paused_rendering.cursor : self->cursor;
+        x = c->x, y = c->y;
+    }
+    return screen_cursor_render_x(self, x, y, cursor_shape_drawn(focused, shape), mirrored);
+}
+
+static PyObject *
+test_cursor_render(Screen *self, PyObject *args) {
+    int shape;
+    int focused = 1;
+    if (!PyArg_ParseTuple(args, "i|p", &shape, &focused)) return NULL;
+    bool mirrored;
+    const index_type col = test_cursor_render_picked(self, shape, focused, &mirrored);
+    return Py_BuildValue("IO", col, mirrored ? Py_True : Py_False);
+}
+
+static PyObject *
 test_cursor_render_x(Screen *self, PyObject *a UNUSED) {
-    const Cursor *c = self->paused_rendering.expires_at ? &self->paused_rendering.cursor : self->cursor;
-    return PyLong_FromUnsignedLong(screen_cursor_render_x(self, c->x, c->y));
+    bool mirrored;
+    return PyLong_FromUnsignedLong(test_cursor_render_picked(self, CURSOR_BLOCK, true, &mirrored));
 }
 
 static PyObject *
@@ -9095,6 +9147,8 @@ static PyMethodDef methods[] = {
     METHODB(test_bidi_logical_x, METH_VARARGS),
     METHODB(test_bidi_logical_click, METH_VARARGS),
     METHODB(test_bidi_is_rtl, METH_VARARGS),
+    METHODB(test_cursor_visual, METH_VARARGS),
+    METHODB(test_cursor_render, METH_VARARGS),
     METHODB(test_cursor_render_x, METH_NOARGS),
     METHODB(test_apply_selection, METH_O),
     METHODB(test_bidi_mode_changed, METH_NOARGS),

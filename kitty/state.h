@@ -794,6 +794,11 @@ typedef struct GlobalState {
 
 extern GlobalState global_state;
 
+static inline CursorShape
+cursor_shape_drawn(bool focused, CursorShape shape) {
+    return (focused || OPT(cursor_shape_unfocused) == NO_CURSOR_SHAPE) ? shape : OPT(cursor_shape_unfocused);
+}
+
 #define call_boss(name, ...)                                                          \
     if (global_state.boss) {                                                          \
         PyObject *cret_ = PyObject_CallMethod(global_state.boss, #name, __VA_ARGS__); \
