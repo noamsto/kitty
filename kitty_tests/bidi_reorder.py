@@ -2212,6 +2212,12 @@ class TestBidiReorder(BaseTest):
         def build():
             return self.filled(['דהו', 'זחט', 'אבג', 'דהז'], scrollback=20, pixel_scroll=False)
 
+        def build_alt():
+            s = self.screen(scrollback=20, pixel_scroll=False)
+            parse_bytes(s, b'\x1b[?1049h\x1b[8h')
+            self.fill(s, ['דהו', 'זחט', 'אבג', 'דהז'])
+            return s
+
         def build_prompt():
             s = self.screen(cols=10, lines=4, scrollback=30, pixel_scroll=False)
             s.draw('before\r\n')
@@ -2240,6 +2246,8 @@ class TestBidiReorder(BaseTest):
         # the streamed line is 'אבד' on row 3; the RTL paragraphs on view after the op all resolve, as the entries are dropped
         cases = (
             ('region index', build, lambda s: (parse_bytes(s, b'\x1b[2;4r'), at(4, b'\x1bD\x1b[r')(s)), 3),  # rows 1..3 scroll: 3 left
+            # the alternate screen pushes nothing, so only the counters tell the region scroll from a full-height one
+            ('region index on the alternate screen', build_alt, lambda s: (parse_bytes(s, b'\x1b[2;4r'), at(4, b'\x1bD\x1b[r')(s)), 3),
             ('insert line', build, at(2, b'\x1b[L'), 4),
             ('delete line', build, at(2, b'\x1b[M'), 3),
             ('reverse index', build, at(1, b'\x1bM'), 4),  # the bottom row is lost
