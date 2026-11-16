@@ -3163,6 +3163,7 @@ class TestBidiReorder(BaseTest):
         s.cursor_position(2, 1)
         parse_bytes(s, b'ab\x1b[2K')
         self.ae(self.refresh(s, 1), ID10[::-1])
+        s.cursor_position(2, 1)
         self.ae(s.test_ime_anchor_x(), 9)  # beam column 9, mirrored, +1 clamped to the last column
         # no map: the anchor is the cursor, or the overlay's start
         s = self.create_screen(cols=10, lines=5, scrollback=5, options={})

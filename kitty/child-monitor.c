@@ -1048,11 +1048,11 @@ sync_ime_position_with_cursor(OSWindow *os_window, Window *w) {
     OverlayLine *ol = &screen->overlay_line;
     if (screen_is_overlay_active(screen)) {
         // During a composition the IME is anchored to the pre-edit text, see
-        // render_overlay_line(), so resync with the cursor once it ends.
+        // update_overlay_ime_position(), so resync with the anchor once it ends.
         ol->last_ime_cursor.valid = false;
         return;
     }
-    const index_type x = screen->cursor->x, y = screen->cursor->y;
+    const index_type x = screen_ime_anchor_x(screen), y = screen->cursor->y;
     if (ol->last_ime_cursor.valid && ol->last_ime_cursor.x == x && ol->last_ime_cursor.y == y) return;
     ol->last_ime_cursor.x = x;
     ol->last_ime_cursor.y = y;
