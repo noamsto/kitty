@@ -2285,7 +2285,7 @@ class TestBidiReorder(BaseTest):
 
         cases = (
             ('dirty row', basic, lambda s: parse_bytes(s, b'\x1b[4;4H\xd7\x93'), base, None),
-            # since #30 a full-height index follows the cached paragraphs: no resolve
+            # a full-height index follows the cached paragraphs: no resolve
             ('index', basic, lambda s: parse_bytes(s, b'\x1b[5;1H\x1bD'), (mix, rev, rev, None, None), 0),
             ('reverse index', basic, lambda s: parse_bytes(s, b'\x1b[1;1H\x1bM'), (None, rev, mix, rev, rev), None),
             ('insert then delete line', alt, lambda s: parse_bytes(s, b'\x1b[L\x1b[M'), (rev, mix, None, rev, rev), None),
