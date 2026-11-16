@@ -109,20 +109,24 @@ ensure_scratch(BidiMaps *b, size_t cap) {
 // Appends to b->text the characters row r of a paragraph feeds FriBidi, one per
 // cell a character starts in, a blank as U+0020. Returns the new length, or
 // UINT32_MAX for a row with a cell spanning several rows, which cannot be reordered.
-static uint32_t
+static inline uint32_t
 feed_row(BidiMaps *b, const CPUCell *cells, const TextCache *tc, uint32_t r, uint32_t n) {
-    for (index_type col = 0; col < b->cols; col++) {
+    // Locals, as the stores through b->text could otherwise alias b's fields and make every iteration reload them
+    FriBidiChar *restrict text = b->text + n, *const text_start = text;
+    uint32_t *restrict cell_of_char = b->cell_of_char + n;
+    const uint32_t row_bits = r << 16;
+    const index_type cols = b->cols;
+    for (index_type col = 0; col < cols; col++) {
         const CPUCell *c = cells + col;
         if (c->is_multicell) {
             if (c->scale > 1) return UINT32_MAX;
             if (col && c->x) continue;
         }
         const char_type ch = cell_first_char(c, tc);
-        b->text[n] = ch ? ch : ' ';
-        b->cell_of_char[n] = (r << 16) | col;
-        n++;
+        *text++ = ch ? ch : ' ';
+        *cell_of_char++ = row_bits | col;
     }
-    return n;
+    return n + (uint32_t)(text - text_start);
 }
 
 static void
@@ -139,10 +143,11 @@ retype_controls(BidiMaps *b, uint32_t n) {
 // Exact: FriBidi type values use bits below 30, and fribidi_get_bracket_types() gives a bracket only to an ON char, so the
 // bracket form implies the type. The blank bit is needed because the trim drops only chars fed as U+0020 (U+2003 is WS
 // too), and n_trim scales the N0 budget threshold.
+// Branch-free so that a row's loop vectorizes.
 static inline uint32_t
 sig_of(FriBidiCharType type, FriBidiBracketType bracket, FriBidiChar ch) {
-    return (bracket != FRIBIDI_NO_BRACKET ? SIG_BRACKET | (FRIBIDI_IS_BRACKET_OPEN(bracket) ? 1u << 21 : 0) | FRIBIDI_BRACKET_ID(bracket) : (uint32_t)type) |
-           (ch == ' ' ? SIG_BLANK : 0);
+    const uint32_t bracket_sig = SIG_BRACKET | (uint32_t)FRIBIDI_IS_BRACKET_OPEN(bracket) << 21 | FRIBIDI_BRACKET_ID(bracket);
+    return (bracket != FRIBIDI_NO_BRACKET ? bracket_sig : (uint32_t)type) | (ch == ' ' ? SIG_BLANK : 0);
 }
 
 // Resolves the levels of the paragraph's characters into b->para_levels.
@@ -237,6 +242,13 @@ write_row(BidiMaps *b, index_type render_row, uint32_t row_first_char, uint32_t 
         const index_type col = b->cell_of_char[logical] & 0xffff;
         const index_type next = logical + 1 < row_end_char ? (b->cell_of_char[logical + 1] & 0xffff) : cols;
         const uint8_t level = (uint8_t)b->para_levels[logical];
+        if (next == col + 1) {
+            // The common char of one cell skips the loop's setup and alignment padding
+            differs |= (levels[col] != level) | (v2l[v] != col);
+            levels[col] = level;
+            v2l[v++] = (uint16_t)col;
+            continue;
+        }
         for (index_type c = col; c < next; c++, v++) {
             // The renderer draws the first slice of a right-to-left multi-cell
             // glyph in its last cell, so those cells are shown last to first
@@ -252,13 +264,24 @@ write_row(BidiMaps *b, index_type render_row, uint32_t row_first_char, uint32_t 
 
 static void
 write_signature(BidiMaps *b, index_type render_row, uint32_t row_first_char, uint32_t row_end_char) {
-    uint32_t *sig = row_of(sig);
-    index_type c = 0;
-    for (uint32_t i = row_first_char; i < row_end_char; i++) {
-        for (const index_type col = b->cell_of_char[i] & 0xffff; c < col; c++) sig[c] = 0;
-        sig[c++] = sig_of(b->types[i], b->brackets[i], b->text[i]);
+    uint32_t *restrict sig = row_of(sig);
+    const index_type cols = b->cols;
+    const FriBidiCharType *restrict types = b->types + row_first_char;
+    const FriBidiBracketType *restrict brackets = b->brackets + row_first_char;
+    const FriBidiChar *restrict text = b->text + row_first_char;
+    const uint32_t n = row_end_char - row_first_char;
+    // A row feeds at most one char per cell, so a full row has char c in cell c
+    if (n == cols) {
+        for (index_type c = 0; c < cols; c++) sig[c] = sig_of(types[c], brackets[c], text[c]);
+        return;
     }
-    for (; c < b->cols; c++) sig[c] = 0;
+    const uint32_t *cell_of_char = b->cell_of_char + row_first_char;
+    index_type c = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        for (const index_type col = cell_of_char[i] & 0xffff; c < col; c++) sig[c] = 0;
+        sig[c++] = sig_of(types[i], brackets[i], text[i]);
+    }
+    for (; c < cols; c++) sig[c] = 0;
 }
 
 bool
