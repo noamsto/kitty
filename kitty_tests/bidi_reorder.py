@@ -3415,7 +3415,7 @@ class TestBidiReorder(BaseTest):
 
     def test_cursor_follows_run(self):
         # At the end of the text the cursor sits where the next char of the run it types into goes: left of an RTL run in an
-        # LTR paragraph, right of an LTR run in an RTL one. Typed spaces are skipped to find that run.
+        # LTR paragraph, right of an LTR run in an RTL one. Typed spaces after a letter are skipped to find that run.
         F, T = False, True
         AUTO, FORCE_RTL = b'\x1b[?2501h', b'\x1b[2 k'
         # (name, escape sequences, text, columns, cursor x, beam (column, mirrored), column of the other shapes)
