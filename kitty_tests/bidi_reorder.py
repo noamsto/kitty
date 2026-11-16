@@ -1778,6 +1778,19 @@ class TestBidiReorder(BaseTest):
         under = 'א(ב)' + '()' * 32  # 68 chars, scan 1057; an open bracket 66 from the last letter makes 1123 > 16 * 69
         crossing('adding a bracket goes over', under + '!', 69, '(', under + '(')
 
+    def test_shortcut_n0_budget_dirty_row_without_brackets(self):
+        # the budget zeroes the brackets of every row of the paragraph, so a same-class edit on a row without brackets would match
+        # a signature written after the zeroing; the paragraph past the budget resolves instead
+        s = self.screen(cols=40, lines=4, scrollback=0)
+        s.draw('א' * 40 + '()' * 50)  # the letters of row 1 come first, so the brackets of rows 2-4 scan from the last of them
+        self.warm(s)
+        for ch in 'גד':
+            self.put(s, 1, 3, ch)
+            self.ae(self.frame(s)[0], 1)
+        f = self.screen(cols=40, lines=4, scrollback=0)
+        f.draw('א' * 2 + 'ד' + 'א' * 37 + '()' * 50)
+        self.same_as(s, f)
+
     def test_shortcut_paused(self):
         # an edit before the pause shortcuts in the paused frame, one during the pause after the unpause
         rows = [self.PARA_ROW] * 4
