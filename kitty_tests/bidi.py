@@ -7,6 +7,8 @@ from .base import BaseTest, draw_multicell, parse_bytes
 
 NONE, LTR, RTL, AUTO = (0, False, False), (1, False, False), (1, True, False), (1, False, True)
 POWER_ON = (False, False, False)
+LRM, RLM, ALM = '\u200e', '\u200f', '\u061c'
+IA = '\x1b[8h\x1b[?2501h'
 CUP = '\x1b[{};1H'.format  # 1-based row
 
 
@@ -470,3 +472,183 @@ class TestBidi(BaseTest):
             s = self.screen()
             pb(s, '\x1b[8h\x1b[?1049h\x1b[8h\x1b[8l\x1b[?1049l')
             self.assertTrue(stamped(s, '', 1))
+
+    def draw_marked(self, s, mark, text, split):
+        if split:
+            pb(s, mark)
+            pb(s, text)
+        else:
+            pb(s, mark + text)
+
+    def test_leading_mark_converts_record(self):
+        for split in (False, True):
+            with self.subTest(split=split):
+                for mark, want in ((LRM, LTR), (RLM, RTL), (ALM, RTL)):
+                    for text in ('abc', ''):
+                        s = self.screen()
+                        pb(s, IA)
+                        self.draw_marked(s, mark, text, split)
+                        self.ae(self.records(s, 0), [want], (mark, text))
+                s = self.screen()
+                pb(s, IA + '\x1b[2 k')
+                self.draw_marked(s, LRM, 'abc', split)
+                self.ae(self.records(s, 0), [LTR])
+
+    def test_leading_mark_mid_line(self):
+        for split in (False, True):
+            with self.subTest(split=split):
+                s = self.screen()
+                pb(s, IA)
+                self.draw_marked(s, 'ab', RLM + 'c', split)
+                self.ae(self.records(s, 0), [AUTO])
+                s = self.screen()
+                pb(s, IA + 'abc')
+                self.draw_marked(s, '\x1b[1;3H', RLM, split)
+                self.ae(self.records(s, 0), [AUTO])
+                s = self.screen()
+                pb(s, IA + '\x1b[1;3H')
+                self.draw_marked(s, RLM, 'x', split)
+                self.ae(self.records(s, 0), [AUTO])
+
+    def cell_texts(self, s, n):
+        return [s.line(0)[x] for x in range(n)]
+
+    def test_leading_mark_cell_splitting(self):
+        for split in (False, True):
+            with self.subTest(split=split):
+                for mark, want in ((LRM, LTR), (RLM, RTL), (ALM, RTL)):
+                    s = self.screen()
+                    pb(s, IA)
+                    self.draw_marked(s, mark, 'abc', split)
+                    self.ae(self.cell_texts(s, 4), ['a', 'b', 'c', '\0'], mark)
+                    self.ae(self.records(s, 0), [want], mark)
+                    s = self.screen()
+                    pb(s, IA + 'ab')
+                    self.draw_marked(s, mark, 'c', split)
+                    self.ae(self.cell_texts(s, 4), ['a', 'b' + mark, 'c', '\0'], mark)
+                    self.ae(self.records(s, 0), [AUTO], mark)
+                for mark in ('\u200c', '\u200d', '\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
+                             '\u2066', '\u2067', '\u2068', '\u2069'):
+                    s = self.screen()
+                    pb(s, IA)
+                    self.draw_marked(s, mark, 'abc', split)
+                    self.ae(self.cell_texts(s, 4), ['a', 'b', 'c', '\0'], mark)
+                    self.ae(self.records(s, 0), [AUTO], mark)
+                    s = self.screen()
+                    pb(s, IA + 'ab')
+                    self.draw_marked(s, mark, 'c', split)
+                    self.ae(self.cell_texts(s, 4), ['a', 'b' + mark, 'c', '\0'], mark)
+                    self.ae(self.records(s, 0), [AUTO], mark)
+
+    def test_leading_mark_needs_auto(self):
+        for split in (False, True):
+            with self.subTest(split=split):
+                s = self.screen()
+                pb(s, '\x1b[8h')
+                self.draw_marked(s, RLM, 'abc', split)
+                self.ae(self.records(s, 0), [LTR])
+                s = self.screen()
+                pb(s, '\x1b[8habc\x1b[?2501h\r')
+                self.draw_marked(s, RLM, 'x', split)
+                self.ae(self.records(s, 0), [LTR])
+                s = self.screen()
+                pb(s, '\x1b[8h\x1b[2 k')
+                self.draw_marked(s, LRM, 'abc', split)
+                self.ae(self.records(s, 0), [RTL])
+
+    def test_leading_mark_first_wins(self):
+        for split in (False, True):
+            with self.subTest(split=split):
+                s = self.screen()
+                pb(s, IA)
+                self.draw_marked(s, RLM, LRM + 'abc', split)
+                self.ae(self.records(s, 0), [RTL])
+                pb(s, '\r')
+                self.draw_marked(s, LRM, '', split)
+                self.ae(self.records(s, 0), [RTL])
+
+    def test_leading_mark_other_zero_width(self):
+        for ch in ('\u200b', '\u200c', '\u200d', '\u202a', '\u202b', '\u202c',
+                   '\u2066', '\u2067', '\u2068', '\u2069'):
+            for split in (False, True):
+                with self.subTest(ch=ch, split=split):
+                    s = self.screen()
+                    pb(s, IA)
+                    self.draw_marked(s, ch, 'abc', split)
+                    self.ae(self.records(s, 0), [AUTO])
+                    s = self.screen()
+                    pb(s, IA + 'abc\r')
+                    pb(s, ch)
+                    self.ae(self.records(s, 0), [AUTO])
+
+    def test_leading_mark_explicit_mode(self):
+        for split in (False, True):
+            with self.subTest(split=split):
+                s = self.screen()
+                pb(s, IA + 'abc')
+                self.ae(self.records(s, 0), [AUTO])
+                pb(s, '\x1b[8l\r')
+                self.draw_marked(s, RLM, 'x', split)
+                self.ae(self.records(s, 0), [AUTO])
+
+    def test_leading_mark_lifetime(self):
+        for split in (False, True):
+            with self.subTest(split=split):
+                def marked():
+                    s = self.screen()
+                    pb(s, IA)
+                    self.draw_marked(s, RLM, 'abc', split)
+                    self.ae(self.records(s, 0), [RTL])
+                    return s
+                for el in ('0K', '1K', '2K'):
+                    s = marked()
+                    pb(s, CUP(1) + '\x1b[' + el)
+                    self.ae(self.records(s, 0), [RTL], el)
+                    pb(s, CUP(1) + 'xyz')
+                    self.ae(self.records(s, 0), [RTL], el)
+                # ED 0 at the cursor row erases it as EL does, so it keeps the record; ED 1 and ED 2 clear the row's attributes
+                for ed, want in (('J', RTL), ('1J', AUTO), ('2J', AUTO)):
+                    s = marked()
+                    pb(s, CUP(1) + '\x1b[' + ed + CUP(1) + 'xyz')
+                    self.ae(self.records(s, 0), [want], ed)
+                s = marked()
+                pb(s, CUP(1) + '\x1b[L' + CUP(1) + 'xyz')
+                self.ae(self.records(s, 0, 1), [AUTO, RTL])
+                s = marked()
+                pb(s, CUP(1) + '\x1b[M')
+                self.ae(self.records(s, 0), [NONE])
+                s = marked()
+                pb(s, '\x1bc')
+                self.ae(self.records(s, 0), [NONE])
+                s = self.screen(lines=5)
+                pb(s, IA + CUP(5))
+                self.draw_marked(s, RLM, 'abc', split)
+                pb(s, '\n')
+                self.ae(self.records(s, 3, 4), [RTL, NONE])
+
+    def test_leading_mark_provisional_limit(self):
+        for split in (False, True):
+            with self.subTest(split=split):
+                s = self.screen()
+                pb(s, IA)
+                self.draw_marked(s, RLM, '', split)
+                self.ae(self.records(s, 0), [RTL])
+                pb(s, '\x1b[2 k')  # a text-less row re-derives, losing the fixed direction
+                self.ae(self.records(s, 0), [(1, True, True)])
+
+    def test_leading_mark_continuation_row(self):
+        for split in (False, True):
+            with self.subTest(split=split):
+                s = self.screen(cols=5)
+                pb(s, IA + 'abcdefg')
+                self.ae(self.records(s, 0, 1), [AUTO, AUTO])
+                self.draw_marked(s, CUP(2), RLM, split)
+                self.ae(self.records(s, 0, 1), [AUTO, AUTO])
+
+    def test_leading_mark_force_ltr(self):
+        for split in (False, True):
+            with self.subTest(split=split):
+                s = self.screen(force_ltr=True)
+                pb(s, IA)
+                self.draw_marked(s, RLM, 'abc', split)
+                self.ae(self.records(s, 0), [RTL])
