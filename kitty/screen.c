@@ -4997,8 +4997,8 @@ bidi_scrolled_id(uint64_t id, uint64_t k, uint64_t pushed, bool on_main) {
 // - 0 < k < lines: else no old row is still on the screen;
 // - the history grown by exactly k on the main screen and by 0 on the alt screen: each scroll pushed its top row, so old row
 //   y < k is history line k - 1 - y, while the alt screen discards it. This does not exclude a clear of the history (CSI ? 3 J
-//   zeroes its count but keeps num_pushed, with no generation bump), so a pushed row can be gone: the verify's
-//   lnum < historybuf->count check skips it, and ids naming lines that no longer exist never collide.
+//   zeroes its count but keeps num_pushed, with no generation bump), so a pushed row can be gone: the verify then rejects
+//   the paragraph, and ids naming cleared lines never collide with a live line's id, which keeps a kept entry correct.
 // The rows scrolled in get no entry, and a pushed row is forced dirty, so the walker checks it when on or below the view.
 static void
 bidi_cache_use_context(Screen *self, BidiMaps *b, const BidiCacheContext *now, bool live) {

@@ -2069,7 +2069,8 @@ class TestBidiReorder(BaseTest):
         # (op, whether it follows, the RTL paragraphs on view after it, which all resolve when nothing is kept)
         cases = (
             ('3 lines', lambda s: self.stream(s, *rtl[:3]), True, 3),  # the 3 new ones; the Latin row moved up
-            ('4 lines', lambda s: self.stream(s, *rtl[:4]), True, 4),  # lines - 1: only the top row of the old screen stays
+            # lines - 1: only the old bottom row stays (now row 0, holding the first new line); no old content survives
+            ('4 lines', lambda s: self.stream(s, *rtl[:4]), True, 4),
             ('5 lines', lambda s: self.stream(s, *rtl[:5]), False, 4),  # lines 2..5 on rows 0..3
             ('CSI 5 S', lambda s: parse_bytes(s, b'\x1b[5S'), False, 0),  # a blank screen
             ('7 lines', lambda s: self.stream(s, *rtl), False, 4),  # lines 4..7 on rows 0..3
@@ -2254,7 +2255,8 @@ class TestBidiReorder(BaseTest):
                 self.ae(self.state(s), self.state(f))
 
     def test_follow_cleared_history(self):
-        # CSI ? 3 J empties the history without a generation bump, so the pushed rows of a later scroll can be gone from it
+        # CSI ? 3 J empties the history without a generation bump, so the pushed rows of a later scroll can be gone from it.
+        # It also blanks the screen rows, so the straddling paragraph is dropped on the signature check, not kept.
         def build():
             s = self.screen(cols=5, lines=4, scrollback=20, pixel_scroll=False)
             s.draw('אבגד.12 34abcde')
@@ -2282,6 +2284,42 @@ class TestBidiReorder(BaseTest):
                 parse_bytes(f, b'\x1b[?3J')
                 self.stream(f, 'zw')
                 self.frame(f)
+                self.ae(self.state(s), self.state(f))
+
+    def test_follow_straddler_kept_across_clear_scrollback(self):
+        # clear_scrollback empties the history but keeps the screen rows, so the straddling paragraph's rows still match their
+        # entries, one of which has a para_first naming a cleared history line. Nothing resolves, as in a fresh replay: the
+        # rows left on screen start in the middle of the paragraph, and the kept entries show as renders a replay would redo.
+        def build():
+            s = self.screen(cols=5, lines=4, scrollback=20, pixel_scroll=False)
+            s.draw('אבגד.12 34abcde')
+            s.cursor_position(4, 1)
+            return s
+
+        for frame_between in (True, False):
+            with self.subTest(frame_between=frame_between):
+                s = build()
+                self.warm(s)
+                before = self.shifts(s)
+                self.stream(s, 'xy')
+                if frame_between:
+                    self.frame(s)
+                    self.ae((s.historybuf.count, self.shifts(s)), (1, before + 1))
+                s.clear_scrollback()
+                self.ae((s.historybuf.count, str(s.line(0))), (0, '12 34'))
+                self.stream(s, 'zw')
+                # without the frame in between, 2 rows were pushed and the older one is gone
+                self.ae(s.historybuf.count, 1)
+                resolves, renders = self.frame(s)
+                # the scroll before the clear is followed in its own frame, the one after it in this frame
+                self.ae((resolves, self.shifts(s)), (0, before + 1 + frame_between))
+                f = build()
+                self.stream(f, 'xy')
+                f.clear_scrollback()
+                self.stream(f, 'zw')
+                fresh_resolves, fresh_renders = self.frame(f)
+                self.ae(fresh_resolves, 0)
+                self.assertLess(renders, fresh_renders)
                 self.ae(self.state(s), self.state(f))
 
     def test_follow_other_moves_drop(self):
