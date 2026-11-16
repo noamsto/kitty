@@ -5000,7 +5000,8 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued, in
     const uint64_t first_id = bidi_row_id(src, first), last_id = bidi_row_id(src, last);
     const uint32_t num_rows = (uint32_t)(last - first + 1);
     // A hit: the same lines with the same text in the same paragraph at the same render rows as when the maps were last written
-    bool hit = cacheable;
+    // A shortcut: the same as a hit except that dirty rows may have signatures to check, and no row is above the view
+    bool hit = cacheable, shortcut = cacheable && first == y0;
     for (int y = first; y <= last && cacheable; y++) {
         const LineAttrs *a = bidi_row_attrs(src, y);
         const int r = y + src->to_render_row;
@@ -5011,11 +5012,15 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued, in
         // changes its key; in-place history edits (clear_multicell_cell, the multicell nukes) only clear chars, which cannot add
         // right-to-left text, and a paragraph whose resolve met a multi-row cell is never cached.
         else if (r < min_render_row) continue;
-        else if (r >= (int)b->rows) hit &= !a->has_dirty_text;
-        else if ((index_type)r == skip_render_row) cacheable = false;
-        else if (hit) {
+        else if (r >= (int)b->rows) {
+            hit &= !a->has_dirty_text;
+            shortcut &= !a->has_dirty_text;
+        } else if ((index_type)r == skip_render_row) cacheable = false;
+        else if (hit || shortcut) {
             const uint64_t id = bidi_row_id(src, y);
-            hit = !a->has_dirty_text && id && b->row_id[r] == id && b->para_first[r] == first_id && b->para_last[r] == last_id && b->para_rows[r] == num_rows;
+            const bool same = id && b->row_id[r] == id && b->para_first[r] == first_id && b->para_last[r] == last_id && b->para_rows[r] == num_rows;
+            hit = hit && same && !a->has_dirty_text;
+            shortcut = shortcut && same && (!a->has_dirty_text || b->sig_valid[r]);
         }
     }
     if (cacheable && hit) return last;
@@ -5030,6 +5035,18 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued, in
         rtl |= a->bidi_stamp == BIDI_STAMP_RTL;
         placeholders |= a->has_image_placeholders;
     }
+    // FriBidi reads only the fed types after the retype, the brackets, n_trim (the blank tail), the base direction and the row
+    // layout; the signature captures all of them per row, and the N0 budget decision follows from them. A row above the view is
+    // excluded because a recycled history row there need not change any checked row. Any other input fed to FriBidi, such as a
+    // paragraph direction or a leading mark, must join this condition. Rows below the view are clean here, so the dirty rows are
+    // all on view.
+    if (cacheable && shortcut && rtl && !placeholders) {
+        bool same = true;
+        for (int y = first; y <= last && same; y++) {
+            if (bidi_row_attrs(src, y)->has_dirty_text) same = bidi_row_signature_matches(b, around[y - y0], tc, (index_type)(y + src->to_render_row));
+        }
+        if (same) return last;
+    }
     const bool resolved = rtl && !placeholders;
     if (resolved) {
         bidi_resolve_paragraph(b, around + (first - y0), last - first + 1, tc, first + src->to_render_row, min_render_row, skip_render_row);
@@ -5042,6 +5059,7 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued, in
         b->para_first[r] = first_id;
         b->para_last[r] = last_id;
         b->para_rows[r] = num_rows;
+        b->sig_valid[r] = keep && resolved && b->resolve_signed;
     }
     return last;
 }
@@ -5077,12 +5095,17 @@ bidi_render_line(Screen *self, BidiMaps *b, FONTS_DATA_HANDLE fonts_data, Line *
 }
 
 static BidiMaps *
-bidi_maps_for_upload(Screen *self, const LineBuf *source) {
-    BidiMaps *b = self->bidi_maps;
-    if (!b) {
-        if (!(b = self->bidi_maps = calloc(1, sizeof(BidiMaps)))) fatal("Out of memory");
-        b->force_ltr_seen = OPT(force_ltr);
+bidi_maps_get_or_alloc(Screen *self) {
+    if (!self->bidi_maps) {
+        if (!(self->bidi_maps = calloc(1, sizeof(BidiMaps)))) fatal("Out of memory");
+        self->bidi_maps->force_ltr_seen = OPT(force_ltr);
     }
+    return self->bidi_maps;
+}
+
+static BidiMaps *
+bidi_maps_for_upload(Screen *self, const LineBuf *source) {
+    BidiMaps *b = bidi_maps_get_or_alloc(self);
     if (!bidi_maps_ensure(b, render_lines_for_screen(self), self->columns)) fatal("Out of memory allocating bidi maps");
     b->source = source;
     b->valid = false;
@@ -5113,6 +5136,7 @@ update_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE fonts_data,
         if (y0 < src.lowest) {
             bidi_set_row_inactive(b, r);
             b->row_id[r] = 0;
+            b->sig_valid[r] = false;
             update_line_data_blank(self->columns, r++, address);
             continue;
         }
@@ -8803,6 +8827,16 @@ test_bidi_set_generation(Screen *self, PyObject *val) {
 }
 
 static PyObject *
+test_bidi_trim(Screen *self, PyObject *flag) {
+    const int trim = PyObject_IsTrue(flag);
+    if (trim < 0) return NULL;
+    BidiMaps *b = bidi_maps_get_or_alloc(self);
+    b->no_trim = !trim;
+    bidi_cache_invalidate(b);
+    Py_RETURN_NONE;
+}
+
+static PyObject *
 test_bidi_counts(Screen *self, PyObject *a UNUSED) {
     const BidiMaps *b = self->bidi_maps;
     return Py_BuildValue("KK", b ? b->resolve_count : 0ull, b ? b->render_count : 0ull);
@@ -8913,6 +8947,7 @@ static PyMethodDef methods[] = {
     METHODB(test_bidi_levels, METH_O),
     METHODB(test_bidi_counts, METH_NOARGS),
     METHODB(test_bidi_set_generation, METH_O),
+    METHODB(test_bidi_trim, METH_O),
     METHODB(test_bidi_flag_misses, METH_NOARGS),
     METHODB(test_bidi_visual_x, METH_VARARGS),
     METHODB(test_bidi_logical_x, METH_VARARGS),
