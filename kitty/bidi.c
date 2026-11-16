@@ -13,6 +13,7 @@ free_row_maps(BidiMaps *b) {
     free(b->v2l);
     free(b->levels);
     free(b->active);
+    free(b->rtl);
     free(b->row_id);
     free(b->para_first);
     free(b->para_last);
@@ -22,6 +23,7 @@ free_row_maps(BidiMaps *b) {
     b->v2l = NULL;
     b->levels = NULL;
     b->active = NULL;
+    b->rtl = NULL;
     b->row_id = NULL;
     b->para_first = NULL;
     b->para_last = NULL;
@@ -56,6 +58,7 @@ bidi_maps_ensure(BidiMaps *b, index_type rows, index_type cols) {
     b->v2l = malloc(cells * sizeof(b->v2l[0]));
     b->levels = malloc(cells * sizeof(b->levels[0]));
     b->active = calloc(rows, sizeof(b->active[0]));
+    b->rtl = calloc(rows, sizeof(b->rtl[0]));
     b->row_id = calloc(rows, sizeof(b->row_id[0]));
     b->para_first = calloc(rows, sizeof(b->para_first[0]));
     b->para_last = calloc(rows, sizeof(b->para_last[0]));
@@ -63,7 +66,7 @@ bidi_maps_ensure(BidiMaps *b, index_type rows, index_type cols) {
     b->sig = malloc(cells * sizeof(b->sig[0]));
     b->sig_valid = calloc(rows, sizeof(b->sig_valid[0]));
     if (!b->v2l || !b->levels || !b->active || !b->row_id || !b->para_first || !b->para_last || !b->para_rows || !b->sig ||
-        !b->sig_valid) {
+        !b->sig_valid || !b->rtl) {
         free_row_maps(b);
         return false;
     }
@@ -238,6 +241,7 @@ bidi_cache_move_rows(BidiMaps *b, index_type d) {
     move_cells(levels);
     move_cells(sig);
     move_rows(active);
+    move_rows(rtl);
     move_rows(sig_valid);
     move_rows(row_id);
     move_rows(para_first);
@@ -246,6 +250,7 @@ bidi_cache_move_rows(BidiMaps *b, index_type d) {
 #undef move_cells
 #undef move_rows
     memset(b->active + kept, 0, d * sizeof(b->active[0]));
+    memset(b->rtl + kept, 0, d * sizeof(b->rtl[0]));
     memset(b->sig_valid + kept, 0, d * sizeof(b->sig_valid[0]));
     memset(b->row_id + kept, 0, d * sizeof(b->row_id[0]));
     b->changed = true;

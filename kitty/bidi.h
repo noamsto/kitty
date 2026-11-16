@@ -41,6 +41,7 @@ typedef struct BidiMaps {
     uint16_t *v2l;   // rows*cols, row-major by render row: the logical cell shown at each visual column
     uint8_t *levels; // rows*cols, the embedding level of each logical cell
     bool *active;    // rows: the row has a map
+    bool *rtl;       // rows: the paragraph that last wrote or kept the row's entry resolved right-to-left
     // The paragraph cache, per render row: the id of the line shown there when its map was last written or kept, and the ids of
     // the first and last rows and the row count of the paragraph that wrote it. Screen ids are valid under the context only.
     uint64_t *row_id, *para_first, *para_last;

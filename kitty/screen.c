@@ -5217,6 +5217,7 @@ update_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE fonts_data,
             bidi_set_row_inactive(b, r);
             b->row_id[r] = 0;
             b->sig_valid[r] = false;
+            b->rtl[r] = false;
             update_line_data_blank(self->columns, r++, address);
             continue;
         }
@@ -8900,6 +8901,15 @@ test_bidi_levels(Screen *self, PyObject *val) {
 }
 
 static PyObject *
+test_bidi_paragraph_rtl(Screen *self, PyObject *val) {
+    const index_type r = PyLong_AsUnsignedLong(val);
+    if (PyErr_Occurred()) return NULL;
+    const BidiMaps *b = self->bidi_maps;
+    if (!screen_bidi_maps_usable(self) || r >= b->rows) Py_RETURN_NONE;
+    return PyBool_FromLong(b->rtl[r]);
+}
+
+static PyObject *
 test_bidi_set_generation(Screen *self, PyObject *val) {
     const unsigned long long n = PyLong_AsUnsignedLongLong(val);
     if (PyErr_Occurred()) return NULL;
@@ -9039,6 +9049,7 @@ static PyMethodDef methods[] = {
     METHODB(test_bidi_state, METH_NOARGS),
     METHODB(test_bidi_v2l, METH_O),
     METHODB(test_bidi_levels, METH_O),
+    METHODB(test_bidi_paragraph_rtl, METH_O),
     METHODB(test_bidi_counts, METH_NOARGS),
     METHODB(test_bidi_set_generation, METH_O),
     METHODB(test_bidi_set_scrolls, METH_O),
