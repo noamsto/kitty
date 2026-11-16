@@ -1934,8 +1934,9 @@ class TestBidiReorder(BaseTest):
                 frozen = len(applied)
             else:
                 applied.append(op)
-                # moving the view unpauses, so the frame after it is live again
-                paused = paused and s.scrolled_by == scrolled
+                # scrolling the view unpauses, so the frame after it is live again; output that keeps a scrolled-back view anchored changes
+                # scrolled_by without unpausing
+                paused = paused and not (name in ('back', 'fwd') and s.scrolled_by != scrolled)
             dirty = s.linebuf.dirty_lines() if not paused and not s.scrolled_by else []
             resolves = self.frame(s)[0]
             # a dirty row inside a paragraph with maps that nothing resolved again: the shortcut kept them
@@ -1946,11 +1947,35 @@ class TestBidiReorder(BaseTest):
             for o in applied[:frozen] if paused else applied:
                 o(f)
             self.frame(f)
-            # a snapshot resolves its top row alone, so one continued from history differs from live
-            if paused and f.historybuf.endswith_wrap():
-                continue
-            self.ae(self.state(s), self.state(f), f'seed {seed}, op {i} ({name})')
+            exempt = self.snapshot_top_rows(f) if paused else 0
+            (vs, ls), (vf, lf) = self.state(s), self.state(f)
+            self.ae((vs[exempt:], ls[exempt:]), (vf[exempt:], lf[exempt:]), f'seed {seed}, op {i} ({name})')
         return shortcuts
+
+    def snapshot_top_rows(self, f):
+        # screen rows of the top paragraph of a snapshot paused at the view of f, which a snapshot resolves without the lines above it
+        sb, count, lines = f.scrolled_by, f.historybuf.count, f.lines
+
+        def exists(v):
+            return sb - 1 - v < count if v < sb else v - sb < lines
+
+        def continued(v):
+            # virtual row v is screen row v at the live bottom; the rows above it are history, and HistoryBuf.is_continued counts
+            # from the oldest line where line() counts from the newest
+            if v < sb:
+                return f.historybuf.is_continued(count - sb + v)
+            return f.linebuf.is_continued(v - sb) if v > sb else bool(count) and f.historybuf.endswith_wrap()
+
+        # the snapshot starts one row above the screen with pixel scroll, and an empty row there has no paragraph
+        top = -self.rr(f, 0)
+        if not exists(top):
+            top += 1
+        if not continued(top):
+            return 0
+        end = top + 1
+        while end < lines and exists(end) and continued(end):
+            end += 1
+        return max(end, 0)
 
     def test_shortcut_random_differential(self):
         # after every frame the maps and levels equal those of a fresh screen replaying the operations so far and rendering once
