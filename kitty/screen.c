@@ -5430,7 +5430,7 @@ screen_overlay_visual_start(Screen *self, index_type *start) {
     bool mirrored;
     const index_type c = cursor_visual_in_row(self, ol->xstart, ol->ynum, CURSOR_BEAM, &mirrored);
     // A mirrored beam is an RTL insertion point: the block grows leftwards from it
-    *start = mirrored ? c + 1 - MIN(n, c + 1) : MIN(c, self->columns - n);
+    *start = MIN(mirrored ? c + 1 - MIN(n, c + 1) : c, self->columns - n);
     return true;
 }
 
@@ -9096,15 +9096,33 @@ test_cursor_visual(Screen *self, PyObject *args) {
     return Py_BuildValue("IO", col, mirrored ? Py_True : Py_False);
 }
 
+static void
+test_cursor_picked(Screen *self, index_type *x, index_type *y) {
+    if (screen_is_overlay_active(self)) *x = self->overlay_line.cursor_x, *y = self->overlay_line.ynum;
+    else {
+        const Cursor *c = self->paused_rendering.expires_at ? &self->paused_rendering.cursor : self->cursor;
+        *x = c->x, *y = c->y;
+    }
+}
+
 static index_type
 test_cursor_render_picked(Screen *self, CursorShape shape, bool focused, bool *mirrored) {
     index_type x, y;
-    if (screen_is_overlay_active(self)) x = self->overlay_line.cursor_x, y = self->overlay_line.ynum;
-    else {
-        const Cursor *c = self->paused_rendering.expires_at ? &self->paused_rendering.cursor : self->cursor;
-        x = c->x, y = c->y;
-    }
+    test_cursor_picked(self, &x, &y);
     return screen_cursor_render_x(self, x, y, cursor_shape_drawn(focused, shape), mirrored);
+}
+
+static PyObject *
+test_cursor_render_info(Screen *self, PyObject *args) {
+    int shape = -1;
+    int focused = 1;
+    if (!PyArg_ParseTuple(args, "|ip", &shape, &focused)) return NULL;
+    if (shape >= 0) {
+        test_cursor_picked(self, &self->cursor_render_info.x, &self->cursor_render_info.y);
+        self->cursor_render_info.shape = shape;
+        self->cursor_render_info.is_focused = focused;
+    }
+    return Py_BuildValue("IO", self->cursor_render_info.visual_x, self->cursor_render_info.beam_mirrored ? Py_True : Py_False);
 }
 
 static PyObject *
@@ -9206,6 +9224,7 @@ static PyMethodDef methods[] = {
     METHODB(test_bidi_is_rtl, METH_VARARGS),
     METHODB(test_cursor_visual, METH_VARARGS),
     METHODB(test_cursor_render, METH_VARARGS),
+    METHODB(test_cursor_render_info, METH_VARARGS),
     METHODB(test_cursor_render_x, METH_NOARGS),
     METHODB(test_ime_anchor_x, METH_NOARGS),
     METHODB(test_apply_selection, METH_O),

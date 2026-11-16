@@ -1308,6 +1308,9 @@ render_prepared_os_window(
                 draw_cells(trd, os_window, i == tab->active_window, true, false, NULL, w, now);
         }
     }
+    // the sync in prepare_to_render_os_window() read the previous frame's bidi maps
+    if (active_window && global_state.ime_used && os_window->is_focused && active_window->render_data.screen->bidi_maps)
+        sync_ime_position_with_cursor(os_window, active_window);
     draw_rounded_borders(br, active_window_bg, num_visible_windows, all_windows_have_same_bg, os_window);
     setup_os_window_for_rendering(os_window, tab, active_window, false, now);
     if (global_state.thumbnail_callback.os_window == os_window->id) {

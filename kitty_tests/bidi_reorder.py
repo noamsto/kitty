@@ -3034,6 +3034,10 @@ class TestBidiReorder(BaseTest):
                         self.ae(s.test_cursor_render(CURSOR_BEAM), beam)
                         self.ae(s.test_cursor_visual(x, row, CURSOR_BLOCK), block)
                         self.ae(s.test_cursor_render(CURSOR_BLOCK), block)
+                        for shape, want in ((CURSOR_BEAM, beam), (CURSOR_BLOCK, block)):
+                            s.test_cursor_render_info(shape)
+                            test_screen_update_cell_data(s)
+                            self.ae(s.test_cursor_render_info(), want)
                         for shape in (CURSOR_UNDERLINE, CURSOR_HOLLOW):
                             self.ae(s.test_cursor_visual(x, row, shape), block)
                         if variant == 'paused':
@@ -3059,6 +3063,10 @@ class TestBidiReorder(BaseTest):
         test_screen_update_cell_data(s)
         self.ae(s.test_cursor_render(CURSOR_BEAM, True), (5, True))
         self.ae(s.test_cursor_render(CURSOR_BEAM, False), (5, False))
+        for focused in (False, True):
+            s.test_cursor_render_info(CURSOR_BEAM, focused)
+            test_screen_update_cell_data(s)
+            self.ae(s.test_cursor_render_info(), (5, focused))
 
     def preedit_reference(self, text, x, preedit='xy'):
         # Rows a screen that never sent CSI 8 h uploads for text, cursor at x, without and with the pre-edit
@@ -3183,6 +3191,8 @@ class TestBidiReorder(BaseTest):
         s.pause_rendering(True, 1000)
         test_screen_update_cell_data(s)
         self.ae(s.test_ime_anchor_x(), 3)  # the live logical x
+        s.cursor_position(1, 8)
+        self.ae(s.test_ime_anchor_x(), 7)  # the live logical x, not the paused cursor's
 
     def test_preedit_block_clamped_left(self):
         # a pre-edit longer than the room left of the cursor starts at the left edge
@@ -3190,7 +3200,9 @@ class TestBidiReorder(BaseTest):
         parse_bytes(s, b'\x1b[?2501h')
         draw_coloured(s, A + ' ' + A)
         _, preedit_ref = self.preedit_reference(A + ' ' + A, 7, 'xyzw')  # the block is right-aligned there, at columns 6-9
+        row0 = self.uploaded(s, 0)
         s.test_update_overlay_text('xyzw')
         row = self.uploaded(s, 0)
         self.ae((s.test_cursor_render(CURSOR_BEAM), s.test_ime_anchor_x()), ((4, False), 0))
         self.ae(row[:4], preedit_ref[6:10])
+        self.ae((row[4:], self.v2l(s, 0)), (row0[4:], ID10[::-1]))
