@@ -5081,6 +5081,8 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued, in
     const int min_render_row = y0 + src->to_render_row, end_render_row = MIN(last + src->to_render_row + 1, (int)b->rows);
     const uint64_t first_id = bidi_row_id(src, first), last_id = bidi_row_id(src, last);
     const uint32_t num_rows = (uint32_t)(last - first + 1);
+    // The paragraph takes the record of its first row
+    const LineAttrs lead = *bidi_row_attrs(src, first);
     // A hit: the same lines with the same text in the same paragraph at the same render rows as when the maps were last written
     // A shortcut: the same as a hit except that dirty rows may have signatures to check, and no row is above the view
     bool hit = cacheable, shortcut = cacheable && first == y0;
@@ -5129,11 +5131,14 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued, in
         }
         if (same) return last;
     }
-    const bool resolved = rtl && !placeholders;
+    const bool resolved = (rtl || lead.bidi_rtl) && !placeholders;
     if (resolved) {
-        bidi_resolve_paragraph(b, around + (first - y0), last - first + 1, tc, first + src->to_render_row, min_render_row, skip_render_row);
+        bidi_resolve_paragraph(b, around + (first - y0), last - first + 1, tc, bidi_record_base(lead), first + src->to_render_row, min_render_row, skip_render_row);
     } else {
-        for (int r = min_render_row; r < end_render_row; r++) bidi_set_row_inactive(b, r);
+        for (int r = min_render_row; r < end_render_row; r++) {
+            bidi_set_row_inactive(b, r);
+            b->rtl[r] = false;
+        }
     }
     const bool keep = cacheable && (!resolved || b->resolve_cacheable);
     for (int r = min_render_row; r < end_render_row; r++) {

@@ -153,17 +153,19 @@ sig_of(FriBidiCharType type, FriBidiBracketType bracket, FriBidiChar ch) {
     return (bracket != FRIBIDI_NO_BRACKET ? bracket_sig : (uint32_t)type) | (ch == ' ' ? SIG_BLANK : 0);
 }
 
-// Resolves the levels of the paragraph's characters into b->para_levels.
-// Returns how many characters FriBidi resolved, the rest being blanks at level
-// 0, or 0 when the resolve failed or left every level at 0.
-static uint32_t
-resolve_levels(BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const TextCache *tc) {
+// Resolves the levels of the paragraph's characters into b->para_levels from
+// the base *base. Returns whether any row may be reordered. Then *base is the
+// resolved FRIBIDI_PAR_LTR or FRIBIDI_PAR_RTL, *n_trim_out the count of
+// characters FriBidi resolved, and the blank tail [*n_trim_out, n) is at the
+// paragraph level.
+static bool
+resolve_levels(BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const TextCache *tc, FriBidiParType *base, uint32_t *n_trim_out) {
     b->resolve_cacheable = true;
     b->resolve_signed = false;
-    if (!num_rows || num_rows > BIDI_MAX_PARAGRAPH_ROWS) return 0;
+    if (!num_rows || num_rows > BIDI_MAX_PARAGRAPH_ROWS) return false;
     if (!ensure_scratch(b, (size_t)num_rows * b->cols)) {
         b->resolve_cacheable = false;
-        return 0;
+        return false;
     }
     uint32_t n = 0;
     for (unsigned r = 0; r < num_rows; r++) {
@@ -171,7 +173,7 @@ resolve_levels(BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const
         n = feed_row(b, rows[r], tc, r, n);
         if (n == UINT32_MAX) {
             b->resolve_cacheable = false;
-            return 0;
+            return false;
         }
     }
     b->row_start[num_rows] = n;
@@ -185,7 +187,15 @@ resolve_levels(BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const
         while (n_trim > b->row_start[num_rows - 1] && b->text[n_trim - 1] == ' ') n_trim--;
     }
     retype_controls(b, n_trim);
-    if (!n_trim) return 0;
+    if (!n_trim) {
+        // A right-to-left base puts the blanks at level 1. The brackets were not computed, so no signature is written.
+        if (*base != FRIBIDI_PAR_RTL && *base != FRIBIDI_PAR_WRTL) return false;
+        *base = FRIBIDI_PAR_RTL;
+        for (uint32_t i = 0; i < n; i++) b->para_levels[i] = 1;
+        b->resolve_count++;
+        *n_trim_out = 0;
+        return true;
+    }
     fribidi_get_bracket_types(b->text, (FriBidiStrIndex)n, b->types, b->brackets);
     // FriBidi before 1.0.17 walks back to the previous strong char for every unresolved bracket pair (N0); scan bounds
     // that walk, and skipping N0 past the budget keeps every version linear.
@@ -199,15 +209,19 @@ resolve_levels(BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const
     if (budget_fired) {
         for (uint32_t i = 0; i < n; i++) b->brackets[i] = FRIBIDI_NO_BRACKET;
     }
-    FriBidiParType base_dir = FRIBIDI_PAR_LTR;
     b->resolve_count++;
     // Returns the highest level plus one: 0 is a failure, which must not be cached, and 1 is a paragraph with every level 0
-    const FriBidiLevel max_level = fribidi_get_par_embedding_levels_ex(b->types, b->brackets, (FriBidiStrIndex)n_trim, &base_dir, b->para_levels);
-    if (!max_level) b->resolve_cacheable = false;
-    else b->resolve_signed = !budget_fired;
-    if (max_level <= 1) return 0;
-    for (uint32_t i = n_trim; i < n; i++) b->para_levels[i] = 0;
-    return n_trim;
+    const FriBidiLevel max_level = fribidi_get_par_embedding_levels_ex(b->types, b->brackets, (FriBidiStrIndex)n_trim, base, b->para_levels);
+    if (!max_level) {
+        b->resolve_cacheable = false;
+        return false;
+    }
+    b->resolve_signed = !budget_fired;
+    // Only an LTR result can leave every level at 0, an RTL one has them all at 1 or more
+    if (max_level <= 1) return false;
+    for (uint32_t i = n_trim; i < n; i++) b->para_levels[i] = *base == FRIBIDI_PAR_RTL;
+    *n_trim_out = n_trim;
+    return true;
 }
 
 void
@@ -342,29 +356,49 @@ bidi_resolve_paragraph(
     const CPUCell *const *rows,
     unsigned num_rows,
     const TextCache *tc,
+    FriBidiParType base,
     int first_render_row,
     index_type min_render_row,
     index_type skip_render_row) {
-    const uint32_t n_trim = resolve_levels(b, rows, num_rows, tc);
-    if (n_trim) {
+    FriBidiParType dir = base;
+    uint32_t n_trim = 0;
+    const bool reorder = resolve_levels(b, rows, num_rows, tc, &dir, &n_trim);
+    const bool rtl = reorder && dir == FRIBIDI_PAR_RTL;
+    if (reorder) {
         for (uint32_t i = 0; i < b->row_start[num_rows]; i++) b->map[i] = (FriBidiStrIndex)i;
     }
     bool any_active = false;
     for (unsigned r = 0; r < num_rows; r++) {
         const int render_row = first_render_row + (int)r;
-        if (render_row < (int)min_render_row || render_row >= (int)b->rows || (index_type)render_row == skip_render_row) continue;
+        if (render_row < (int)min_render_row || render_row >= (int)b->rows) continue;
+        if ((index_type)render_row == skip_render_row) {
+            b->rtl[render_row] = false;
+            continue;
+        }
+        b->rtl[render_row] = rtl;
         // Also when FriBidi left every level at 0 and n_trim is 0
         if (b->resolve_signed) write_signature(b, (index_type)render_row, b->row_start[r], b->row_start[r + 1]);
-        if (!n_trim) {
+        if (!reorder) {
             bidi_set_row_inactive(b, (index_type)render_row);
             continue;
         }
         const uint32_t row_first = b->row_start[r], row_end = b->row_start[r + 1];
         const uint32_t reorder_end = r == num_rows - 1 ? n_trim : row_end;
         // Returns the highest level plus one, or 0 on failure
-        if (reorder_end > row_first &&
-            fribidi_reorder_line(
-                0, b->types, (FriBidiStrIndex)(reorder_end - row_first), (FriBidiStrIndex)row_first, FRIBIDI_PAR_LTR, b->para_levels, NULL, b->map) > 1) {
+        FriBidiLevel ret = 0;
+        if (reorder_end > row_first) {
+            ret = fribidi_reorder_line(
+                0, b->types, (FriBidiStrIndex)(reorder_end - row_first), (FriBidiStrIndex)row_first, dir, b->para_levels, NULL, b->map);
+        }
+        if (rtl && reorder_end < row_end) {
+            // The tail is at level 1 after every other char, so only L2's final level-1 reversal moves it: to the left of the
+            // reordered part, in reverse. An all-blank row is reordered too.
+            const uint32_t k = row_end - reorder_end;
+            memmove(b->map + row_first + k, b->map + row_first, (reorder_end - row_first) * sizeof(b->map[0]));
+            for (uint32_t j = 0; j < k; j++) b->map[row_first + j] = (FriBidiStrIndex)(row_end - 1 - j);
+            if (reorder_end == row_first) ret = 2;
+        }
+        if (ret > 1) {
             write_row(b, (index_type)render_row, row_first, row_end);
             any_active = true;
         } else bidi_set_row_inactive(b, (index_type)render_row);

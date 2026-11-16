@@ -92,8 +92,13 @@ void bidi_maps_free(BidiMaps *b);
 bool bidi_maps_ensure(BidiMaps *b, index_type rows, index_type cols);
 // Whether the base codepoint of some cell passes bidi_codepoint_may_reorder()
 bool bidi_cells_may_reorder(const CPUCell *cells, index_type num, const TextCache *tc);
-// Resolves the paragraph whose rows have the cells rows[0..num_rows) with an
-// LTR base. Every row whose render row, first_render_row + row index, is in
+// The FriBidi base of a paragraph whose first row has this record: with auto set the first strong character wins and rtl is the fallback
+static inline FriBidiParType
+bidi_record_base(LineAttrs a) {
+    return a.bidi_auto ? (a.bidi_rtl ? FRIBIDI_PAR_WRTL : FRIBIDI_PAR_WLTR) : (a.bidi_rtl ? FRIBIDI_PAR_RTL : FRIBIDI_PAR_LTR);
+}
+// Resolves the paragraph whose rows have the cells rows[0..num_rows) with the
+// base direction base. Every row whose render row, first_render_row + row index, is in
 // [min_render_row, b->rows) and is not skip_render_row gets its map written, or
 // dropped when the resolve fails or leaves its cells in logical order. Returns
 // true if any row got a map.
@@ -102,6 +107,7 @@ bool bidi_resolve_paragraph(
     const CPUCell *const *rows,
     unsigned num_rows,
     const TextCache *tc,
+    FriBidiParType base,
     int first_render_row,
     index_type min_render_row,
     index_type skip_render_row);
