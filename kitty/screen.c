@@ -1159,6 +1159,19 @@ stamp_line_for_bidi(Screen *self, index_type y, uint8_t record) {
     self->linebuf->bidi_stamped = true;
 }
 
+static void __attribute__((noinline, cold))
+convert_record_at_leading_mark(Screen *self, char_type ch, uint8_t record) {
+    // A leading mark fixes the direction of a line that would otherwise take it from its text. A line not yet written takes the
+    // draw call's record, as its first write would.
+    LineAttrs *a = self->linebuf->line_attrs + self->cursor->y;
+    LineAttrs r = a->bidi_stamp ? *a : (LineAttrs){.val = record};
+    if (!r.bidi_auto) return;
+    r.bidi_auto = false;
+    r.bidi_rtl = ch != 0x200e;  // LRM
+    set_bidi_record(a, r);
+    self->linebuf->bidi_stamped = true;
+}
+
 static inline __attribute__((always_inline)) void
 record_written_line(Screen *self, index_type y, uint8_t record) {
     // Most writes go to a line that already has its record, so test for it
@@ -2056,6 +2069,8 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
                         const bool was_multicell = pc->is_multicell;
                         draw_combining_char(self, s, ch);
                         if (implicit) record_combining_write(self, pc, py, before, was_multicell, record);
+                    } else if (implicit && (ch == 0x200e || ch == 0x200f || ch == 0x61c)) {  // LRM, RLM, ALM
+                        convert_record_at_leading_mark(self, ch, record);
                     }
                     continue;
                 }
