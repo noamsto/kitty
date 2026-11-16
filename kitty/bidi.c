@@ -28,7 +28,7 @@ free_row_maps(BidiMaps *b) {
     b->para_rows = NULL;
     b->sig = NULL;
     b->sig_valid = NULL;
-    b->ctx_linebuf = NULL;
+    b->ctx.linebuf = NULL;
     b->rows = 0;
     b->cols = 0;
 }
@@ -217,7 +217,7 @@ bidi_set_row_inactive(BidiMaps *b, index_type render_row) {
 void
 bidi_cache_invalidate(BidiMaps *b) {
     if (b->row_id) memset(b->row_id, 0, b->rows * sizeof(b->row_id[0]));
-    b->ctx_linebuf = NULL;
+    b->ctx.linebuf = NULL;
 }
 
 void
@@ -226,6 +226,29 @@ bidi_cache_drop_screen_entries(BidiMaps *b) {
     for (index_type r = 0; r < b->rows; r++) {
         if ((b->row_id[r] | b->para_last[r]) & BIDI_ID_SCREEN) b->row_id[r] = 0;
     }
+}
+
+void
+bidi_cache_move_rows(BidiMaps *b, index_type d) {
+    const index_type kept = b->rows - d;
+    const size_t cells = (size_t)kept * b->cols, skip = (size_t)d * b->cols;
+#define move_cells(arr) memmove(b->arr, b->arr + skip, cells * sizeof(b->arr[0]))
+#define move_rows(arr) memmove(b->arr, b->arr + d, kept * sizeof(b->arr[0]))
+    move_cells(v2l);
+    move_cells(levels);
+    move_cells(sig);
+    move_rows(active);
+    move_rows(sig_valid);
+    move_rows(row_id);
+    move_rows(para_first);
+    move_rows(para_last);
+    move_rows(para_rows);
+#undef move_cells
+#undef move_rows
+    memset(b->active + kept, 0, d * sizeof(b->active[0]));
+    memset(b->sig_valid + kept, 0, d * sizeof(b->sig_valid[0]));
+    memset(b->row_id + kept, 0, d * sizeof(b->row_id[0]));
+    b->changed = true;
 }
 
 // Writes the row's maps from the visual order of its characters in b->map,
