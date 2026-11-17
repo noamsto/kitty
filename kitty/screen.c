@@ -17,6 +17,7 @@
         PyModule_AddIntMacro(module, WIDTH_BITS);                             \
         PyModule_AddIntMacro(module, SUBSCALE_BITS);                          \
         PyModule_AddIntMacro(module, BIDI_MAX_ISOLATES);                      \
+        PyModule_AddIntMacro(module, BIDI_MAX_PARAGRAPH_ROWS);                \
         if (PyModule_AddFunctions(module, module_methods) != 0) return false; \
     }
 
@@ -5276,13 +5277,170 @@ bidi_row_continues(const BidiRows *src, int y, const CPUCell *cells) {
     return cells[src->linebuf->xnum - 1].next_char_was_wrapped && (y != -1 || src->linebuf == src->screen->main_linebuf);
 }
 
+// A chain is a run of rows joined by soft wraps. A group is a chain that holds an isolate opener (LRI RLI FSI after a cell's first
+// char) followed by the chains hard-joined to it: a row ending a chain inside an isolate still open continues the paragraph,
+// as a soft line break inside the isolate. A hard joint from row y into the chain starting at y + 1 needs:
+// 1. the clamped depth of the group's isolates after row y > 0;
+// 2. no opener in that chain, so a new prompt starts a new group;
+// 3. both rows stamped, with equal bidi_rtl and bidi_auto;
+// 4. row y + 1 not marked as a prompt's or an output's start;
+// 5. y + 1 - group start < BIDI_MAX_PARAGRAPH_ROWS, so that a group fits the window and its extent does not depend on the row
+//    the walker starts from.
+// A blank row, one without text that continues no row below it, such as an empty line of a multi-line command or a line
+// erased below the prompt, is passed through: a run of them joins as a whole, the nearest row above it that is not blank giving
+// the record of rule 3 and the first row below it that is not blank standing for row y + 1 in rules 2, 3 and 5, while rule 4
+// holds for every row of the run. A group then never ends in blank rows, which would keep the typed blanks of its last text
+// row at the paragraph level.
+// Every answer comes from the rows' text alone, never from where the walker started.
+
+// Whether row y holds no text and continues no row below it
+static bool
+bidi_row_blank(const BidiRows *src, int y) {
+    const CPUCell *cells = bidi_row_cells(src, y);
+    for (index_type x = 0; x < src->linebuf->xnum; x++) {
+        if (cells[x].ch_and_idx) return false;
+    }
+    return !bidi_row_continues(src, y, cells);
+}
+
+// Whether some cell has ch_is_idx, which every cell holding an isolate control has
+static bool
+bidi_cells_have_idx(const CPUCell *cells, index_type num) {
+    char_type any = 0;
+    for (index_type x = 0; x < num; x++) any |= cells[x].ch_and_idx;
+    return any >> 31;
+}
+
+// The clamped isolate depth after row y from depth before it, -1 for an unstamped row and after it; sets *opener when the row
+// holds an opener and depth is not -1. An unstamped blank row keeps a depth > 0; at depth 0 it gives -1, which is the same to
+// every caller, as it ends its chain and no later chain of a fold holds an opener (rule 2), so it skips the cell scan.
+// The memo of a dirty row may be stale and is refreshed only for the rows of a paragraph: rows above it in history stay dirty
+// until shown, so refreshing them here would rescan every one of them on every frame.
+static int
+bidi_row_fold(const BidiRows *src, int y, int depth, bool *opener) {
+    const LineAttrs *a = bidi_row_attrs(src, y);
+    if (a->bidi_stamp == BIDI_STAMP_NONE) return depth > 0 && bidi_row_blank(src, y) ? depth : -1;
+    if (depth < 0) return depth;
+    const CPUCell *cells = bidi_row_cells(src, y);
+    if (a->has_dirty_text ? !bidi_cells_have_idx(cells, src->linebuf->xnum) : a->bidi_stamp != BIDI_STAMP_ISOLATES) return depth;
+    return bidi_row_fold_isolates(cells, src->linebuf->xnum, src->screen->text_cache, depth, opener);
+}
+
+// Whether the chain starting at row c holds an opener in its first BIDI_MAX_PARAGRAPH_ROWS rows
+static bool
+bidi_chain_holds_opener(const BidiRows *src, int c) {
+    bool opener = false;
+    for (int y = c; !opener; y++) {
+        bidi_row_fold(src, y, 0, &opener);
+        if (y + 1 >= src->end || y + 1 - c >= BIDI_MAX_PARAGRAPH_ROWS || !bidi_row_continues(src, y, bidi_row_cells(src, y))) break;
+    }
+    return opener;
+}
+
+// Stores in *end the row standing for row y at the hard break after row y - 1: the first row from y down that is not blank,
+// within BIDI_MAX_PARAGRAPH_ROWS rows and not past a history row on the alt screen. Returns false if there is none.
+static bool
+bidi_run_end(const BidiRows *src, int y, int *end) {
+    const bool on_main = src->linebuf == src->screen->main_linebuf;
+    for (const int limit = MIN(src->end - 1, y - 1 + BIDI_MAX_PARAGRAPH_ROWS); bidi_row_blank(src, y); y++) {
+        if (y >= limit || (y == -1 && !on_main)) return false;
+    }
+    *end = y;
+    return true;
+}
+
+// Stores in *row the row whose record row y has: the nearest row from y up that is not blank, within BIDI_MAX_PARAGRAPH_ROWS
+// rows and not into the history from the alt screen. Returns false if there is none.
+static bool
+bidi_record_row(const BidiRows *src, int y, int *row) {
+    const bool on_main = src->linebuf == src->screen->main_linebuf;
+    for (const int limit = MAX(src->lowest, y + 1 - BIDI_MAX_PARAGRAPH_ROWS); bidi_row_blank(src, y); y--) {
+        if (y <= limit || (y == 0 && !on_main)) return false;
+    }
+    *row = y;
+    return true;
+}
+
+// Rules 3 and 4 for the hard break after row y, end being the row bidi_run_end() gives for y + 1. An alt screen row 0 continues
+// no history row.
+static bool
+bidi_boundary_may_join(const BidiRows *src, int y, int end) {
+    if (y == -1 && src->linebuf != src->screen->main_linebuf) return false;
+    for (int r = y + 1; r <= end; r++) {
+        const unsigned kind = bidi_row_attrs(src, r)->prompt_kind;
+        if (kind == PROMPT_START || kind == OUTPUT_START) return false;
+    }
+    int record;
+    if (!bidi_record_row(src, y, &record)) return false;
+    const LineAttrs above = *bidi_row_attrs(src, record), below = *bidi_row_attrs(src, end);
+    return above.bidi_stamp != BIDI_STAMP_NONE && below.bidi_stamp != BIDI_STAMP_NONE && above.bidi_rtl == below.bidi_rtl &&
+           above.bidi_auto == below.bidi_auto;
+}
+
+// Whether row y, the last of its chain, hard-joins the chain below it, depth and start being the group's state after row y
+static bool
+bidi_hard_joint(const BidiRows *src, int y, int depth, int start) {
+    int end;
+    return depth > 0 && bidi_run_end(src, y + 1, &end) && end - start < BIDI_MAX_PARAGRAPH_ROWS &&
+           bidi_boundary_may_join(src, y, end) && !bidi_chain_holds_opener(src, end);
+}
+
+// The group state after row y: returns the depth bidi_row_fold() gives after it from the group's first row, stored in *start,
+// or 0 when row y is in no group. The group starts at the nearest chain from row y's up that holds an opener, past chains
+// that hold none across breaks that may join. The scan stops at lowest and BIDI_MAX_PARAGRAPH_ROWS rows from y: rule 5
+// joins no row to a group starting above that, which also holds at every break the scan crosses.
+static int
+bidi_depth_above(const BidiRows *src, int y, int *start) {
+    const int limit = MAX(src->lowest, y + 1 - BIDI_MAX_PARAGRAPH_ROWS);
+    *start = limit;
+    int c = y;
+    while (c > limit && bidi_row_continues(src, c - 1, bidi_row_cells(src, c - 1))) c--;
+    if (!bidi_chain_holds_opener(src, c)) {
+        // The chains above row c tile rows limit to c - 1, so the nearest of them that holds an opener holds the nearest such
+        // row: find it first, then test only the breaks below its chain
+        bool opener = false;
+        int r = c;
+        while (!opener && --r >= limit) bidi_row_fold(src, r, 0, &opener);
+        if (!opener) return 0;
+        while (c > r) {
+            int end;
+            if (!bidi_run_end(src, c, &end) || !bidi_boundary_may_join(src, c - 1, end)) return 0;
+            for (c--; c > limit && bidi_row_continues(src, c - 1, bidi_row_cells(src, c - 1)); c--);
+        }
+    }
+    *start = c;
+    int depth = 0;
+    bool opener;
+    for (int r = *start; r <= y && depth >= 0; r++) depth = bidi_row_fold(src, r, depth, &opener);
+    return depth;
+}
+
+// Whether row first - 1 continues into first, by a soft wrap or a hard joint; if so *depth and *start are the group state after it
+static bool
+bidi_flows_into(const BidiRows *src, int first, int *depth, int *start) {
+    if (first <= src->lowest) return false;
+    *depth = bidi_depth_above(src, first - 1, start);
+    return bidi_row_continues(src, first - 1, bidi_row_cells(src, first - 1)) || bidi_hard_joint(src, first - 1, *depth, *start);
+}
+
 // Moves first up over the rows continued into it while fewer than max_above rows are above y0
 static int
 bidi_extend_paragraph_up(const BidiRows *src, const CPUCell **around, int y0, int first, int max_above) {
     while (y0 - first < max_above && first > src->lowest) {
         const CPUCell *cells = bidi_row_cells(src, first - 1);
-        if (!bidi_row_continues(src, first - 1, cells)) break;
-        around[--first - y0] = cells;
+        if (bidi_row_continues(src, first - 1, cells)) {
+            around[--first - y0] = cells;
+            continue;
+        }
+        int start;
+        const int depth = bidi_depth_above(src, first - 1, &start);
+        if (!bidi_hard_joint(src, first - 1, depth, start)) break;
+        // The group's first chain holds an opener, so no row continues into it
+        for (const int top = MAX(start, y0 - max_above); first > top;) {
+            first--;
+            around[first - y0] = bidi_row_cells(src, first);
+        }
+        break;
     }
     return first;
 }
@@ -5297,22 +5455,31 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued) {
     // The cells of row y are at around[y - y0]
     const CPUCell *window[2 * BIDI_MAX_PARAGRAPH_ROWS - 1], **around = window + BIDI_MAX_PARAGRAPH_ROWS - 1;
     around[0] = bidi_row_cells(src, y0);
-    int first = y0, last = y0, max_above = BIDI_MAX_PARAGRAPH_ROWS / 2;
+    int first = y0, last = y0, max_above = BIDI_MAX_PARAGRAPH_ROWS / 2, depth, start;
     // Half the window above y0, then as much below as fits, then the rest above
     if (*continued) first = bidi_extend_paragraph_up(src, around, y0, first, max_above);
-    while (last - first + 1 < BIDI_MAX_PARAGRAPH_ROWS && last + 1 < src->end && bidi_row_continues(src, last, around[last - y0])) {
+    // The group state is folded down from first, seeded with the state above it when the window cut the paragraph there
+    if (!(y0 - first == max_above && bidi_flows_into(src, first, &depth, &start))) {
+        depth = 0;
+        start = first;
+    }
+    bool opener;
+    for (int y = first; y <= y0; y++) depth = bidi_row_fold(src, y, depth, &opener);
+    while (last - first + 1 < BIDI_MAX_PARAGRAPH_ROWS && last + 1 < src->end &&
+           (bidi_row_continues(src, last, around[last - y0]) || bidi_hard_joint(src, last, depth, start))) {
         last++;
         around[last - y0] = bidi_row_cells(src, last);
+        depth = bidi_row_fold(src, last, depth, &opener);
     }
     if (y0 - first == max_above) {
         max_above = BIDI_MAX_PARAGRAPH_ROWS - 1 - (last - y0);
         first = bidi_extend_paragraph_up(src, around, y0, first, max_above);
     }
-    *continued = last + 1 < src->end && bidi_row_continues(src, last, around[last - y0]);
+    *continued = last + 1 < src->end && (bidi_row_continues(src, last, around[last - y0]) || bidi_hard_joint(src, last, depth, start));
 
     // A window cut from a longer paragraph is never cached. The extend-up loop stops on a row not continued into first, at lowest,
     // or at max_above rows above y0, where only a test of the row above tells whether it was cut.
-    bool cacheable = !*continued && !(y0 - first == max_above && first > src->lowest && bidi_row_continues(src, first - 1, bidi_row_cells(src, first - 1)));
+    bool cacheable = !*continued && !(y0 - first == max_above && bidi_flows_into(src, first, &depth, &start));
     const int min_render_row = y0 + src->to_render_row, end_render_row = MIN(last + src->to_render_row + 1, (int)b->rows);
     const uint64_t first_id = bidi_row_id(src, first), last_id = bidi_row_id(src, last);
     const uint32_t num_rows = (uint32_t)(last - first + 1);
@@ -5349,9 +5516,9 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued) {
     for (int y = first; y <= last; y++) {
         LineAttrs *a = bidi_row_attrs(src, y);
         // Every change to a row's text marks it dirty, so the memo of a clean row is current
-        if (a->has_dirty_text && a->bidi_stamp != BIDI_STAMP_NONE)
-            a->bidi_stamp = bidi_cells_may_reorder(around[y - y0], src->linebuf->xnum, tc) ? BIDI_STAMP_RTL : BIDI_STAMP_IMPLICIT;
-        rtl |= a->bidi_stamp == BIDI_STAMP_RTL;
+        if (a->has_dirty_text && a->bidi_stamp != BIDI_STAMP_NONE) a->bidi_stamp = bidi_row_memo(around[y - y0], src->linebuf->xnum, tc);
+        rtl |= a->bidi_stamp == BIDI_STAMP_RTL ||
+               (a->bidi_stamp == BIDI_STAMP_ISOLATES && bidi_cells_may_reorder(around[y - y0], src->linebuf->xnum, tc));
         placeholders |= a->has_image_placeholders;
     }
     const bool resolved = (rtl || lead.bidi_rtl) && !placeholders;
@@ -9217,7 +9384,11 @@ test_bidi_line_record(Screen *self, PyObject *val) {
         return NULL;
     }
     const LineAttrs a = self->linebuf->line_attrs[y];
-    return Py_BuildValue("iOO", (int)a.bidi_stamp, a.bidi_rtl ? Py_True : Py_False, a.bidi_auto ? Py_True : Py_False);
+    // The memo of a row with isolate controls is reported as the RTL question's answer
+    int stamp = a.bidi_stamp;
+    if (stamp == BIDI_STAMP_ISOLATES)
+        stamp = bidi_cells_may_reorder(linebuf_cpu_cells_for_line(self->linebuf, y), self->columns, self->text_cache) ? BIDI_STAMP_RTL : BIDI_STAMP_IMPLICIT;
+    return Py_BuildValue("iOO", stamp, a.bidi_rtl ? Py_True : Py_False, a.bidi_auto ? Py_True : Py_False);
 }
 
 static PyObject *
