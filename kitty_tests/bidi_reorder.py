@@ -4419,6 +4419,7 @@ class TestBidiReorder(BaseTest):
             ('wide first cell takes none', R + '中' + N, '中', None),
             ('combining mark after the control', R + 'a\u0301', 'aRLI\u0301', None),
             ('a PDI after the cell closes the opener before it', R + '1' + PDI + '2 34', '1', 'plain'),
+            ('a PDI after a matched pair is dropped', '\u2066\u2069' + '1' + PDI + '2 34', '1LRIPDI', None),
             ('an opener after the cell is dropped', R + '1' + '\u2066' + '2 34', '1RLI', None),
             ('lrm at column 0 keeps the g8 handling', LRM + N, '1', None),
             ('an embedding stays inert', '\u202b' + N, '1', None),
@@ -4466,17 +4467,20 @@ class TestBidiReorder(BaseTest):
             s = self.screen(cols=n, lines=3)
             parse_bytes(s, (R + N).encode() + b'\x1b[1;1H\x1b[2@')
             self.ae(self.lead_cell(s, 0, 2), '1RLI')
-        with self.subTest('a narrow default emoji with VS16 after the control is widened'):
-            # the controls then read as trailing: the cell is a multicell
+        with self.subTest('a narrow default emoji with VS16 after the control is widened and drops the controls, as a wide cell does'):
             s = self.screen(cols=n, lines=3)
             parse_bytes(s, (R + '\u2600\ufe0f').encode())
-            self.ae((self.lead_cell(s), s.cursor.x), ('\u2600RLI\ufe0f', 2))
+            self.ae((self.lead_cell(s), s.cursor.x, str(s.line(0))[:2]), ('\u2600\ufe0f', 2, '\u2600\ufe0f'))
         with self.subTest('SARA AM widens a cell with leading controls, in one write and in a later one'):
             for chunks in ((R + 'ก\u0e33',), (R + 'ก', '\u0e33')):
                 s = self.screen(cols=n, lines=3)
                 for chunk in chunks:
                     parse_bytes(s, chunk.encode())
-                self.ae((self.lead_cell(s, 0, 0), self.lead_cell(s, 0, 1), s.cursor.x), ('กRLI\u0e33', '', 2), chunks)
+                self.ae((self.lead_cell(s, 0, 0), self.lead_cell(s, 0, 1), s.cursor.x), ('ก\u0e33', '', 2), chunks)
+        with self.subTest('a wide char moved past a multiline multicell is not the cell the controls were kept for'):
+            s = self.screen(cols=n, lines=3)
+            parse_bytes(s, b'\x1b[2;1Hz\x1b[1;2H\x1b]66;s=2;X\x07\x1b[2;1H' + R.encode() + '中'.encode())
+            self.ae(self.lead_cell(s, 1), 'z')
         with self.subTest('controls kept on the bottom row do not follow a scroll over a blank row'):
             s = self.screen(cols=n, lines=2)
             parse_bytes(s, b'x\r\n' + R.encode() + b'\n' + N.encode())

@@ -1107,6 +1107,17 @@ init_prev_cell(Screen *self, text_loop_state *s) {
         if (!s->prev.cc->next_char_was_wrapped) s->prev.cc = NULL;
     }
 }
+static void __attribute__((noinline))
+segment_over_cell_chars(Screen *self, text_loop_state *s) {
+    text_in_cell(s->prev.cc, self->text_cache, self->lc);
+    // The leading controls of a cell come before its base char, so they do not end the cluster the cell holds
+    const bool leading = cell_has_leading_controls(s->prev.cc);
+    for (index_type i = 0; i < self->lc->count; i++) {
+        if (leading && i && self->lc->chars[i] - 0x2066u <= 0x2069u - 0x2066u) continue;
+        s->seg = grapheme_segmentation_step(s->seg, char_props_for(self->lc->chars[i]));
+    }
+}
+
 static void
 init_segmentation_state(Screen *self, text_loop_state *s) {
     init_prev_cell(self, s);
@@ -1129,15 +1140,7 @@ init_segmentation_state(Screen *self, text_loop_state *s) {
                 }
                 s->seg = empty_cell_seg;
             } else s->seg = grapheme_segmentation_step(s->seg, char_props_for(ch));
-        } else {
-            text_in_cell(s->prev.cc, self->text_cache, self->lc);
-            // The leading controls of a cell come before its base char, so they do not end the cluster the cell holds
-            const bool leading = cell_has_leading_controls(s->prev.cc);
-            for (index_type i = 0; i < self->lc->count; i++) {
-                if (leading && i && self->lc->chars[i] - 0x2066u <= 0x2069u - 0x2066u) continue;
-                s->seg = grapheme_segmentation_step(s->seg, char_props_for(self->lc->chars[i]));
-            }
-        }
+        } else segment_over_cell_chars(self, s);
     }
 }
 
@@ -1234,8 +1237,15 @@ close_leading_control(Screen *self, CPUCell *c, char_type ch) {
     if (ch != 0x2069) return;
     ListOfChars *lc = self->lc;
     text_in_cell(c, self->text_cache, lc);
+    // The last opener no PDI among the leading controls has closed
     size_t i = lc->count;
-    while (--i > 0 && lc->chars[i] - 0x2066u > 0x2068u - 0x2066u);
+    for (unsigned depth = 0; --i > 0;) {
+        if (lc->chars[i] == 0x2069) depth++;
+        else if (lc->chars[i] - 0x2066u <= 0x2068u - 0x2066u) {
+            if (!depth) break;
+            depth--;
+        }
+    }
     if (!i) return;
     memmove(lc->chars + i, lc->chars + i + 1, (lc->count - i - 1) * sizeof(lc->chars[0]));
     lc->count--;
@@ -1698,9 +1708,24 @@ move_widened_char_past_multiline_chars(Screen *self, text_loop_state *s, CPUCell
     else init_text_loop_line(self, s);
 }
 
+// A cell widened to a multicell, as a wide first cell does, takes no leading isolate controls: drops them
+static void __attribute__((noinline, cold))
+drop_leading_controls(Screen *self, CPUCell *c) {
+    ListOfChars *lc = self->lc;
+    text_in_cell(c, self->text_cache, lc);
+    size_t n = 1;
+    for (size_t i = 1; i < lc->count; i++) {
+        if (lc->chars[i] - 0x2066u > 0x2069u - 0x2066u) lc->chars[n++] = lc->chars[i];
+    }
+    lc->count = n;
+    cell_set_chars(c, self->text_cache, lc);
+    c->natural_width = false;
+}
+
 static void
 widen_cell_to_two(Screen *self, text_loop_state *s, CPUCell *cp, index_type xpos) {
     CPUCell *cpu_cell = cp + xpos;
+    if (UNLIKELY(cell_has_leading_controls(cpu_cell))) drop_leading_controls(self, cpu_cell);
     cpu_cell->is_multicell = true;
     cpu_cell->width = 2;
     cpu_cell->natural_width = true;
