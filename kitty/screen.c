@@ -1182,9 +1182,10 @@ convert_record_at_leading_mark(Screen *self, char_type ch, uint8_t record) {
 }
 
 // Whether the isolate controls kept for column 0 still stand for the cell at the cursor: the cursor is at (0, y) of the buffer they
-// were written in, no row has moved since (the linebuf's counters) and cell (0, y) is as it was then. An erase, an overwrite, a
-// switch of screen or a garbage collection of the text cache changes the cell, so no hook in any of them is needed; the counters
-// are for a scroll or a row move that leaves a blank row in place of a blank row.
+// were written in, no row has moved since (the linebuf's counters) and cell (0, y) is as it was then. An overwrite, a switch of
+// screen or a garbage collection of the text cache changes the cell, so no hook in any of them is needed; the counters are for a
+// scroll or a row move that leaves a blank row in place of a blank row, and the line and character erases drop the controls
+// themselves as they leave a blank cell as it was.
 static bool
 bidi_lead_stands(Screen *self) {
     const BidiLead *p = &self->bidi.lead;
@@ -3683,6 +3684,7 @@ screen_erase_in_line(Screen *self, unsigned int how, bool private) {
         :param bool private: when ``True`` character attributes are left
                              unchanged.
         */
+    self->bidi.lead.n = 0;  // an erase of a blank cell leaves it as it was, so bidi_lead_stands() cannot see it
     unsigned int s = 0, n = 0;
     switch (how) {
         case 0:
@@ -3972,6 +3974,7 @@ screen_delete_characters(Screen *self, unsigned int count) {
 void
 screen_erase_characters(Screen *self, unsigned int count) {
     // Delete characters clearing the cells
+    self->bidi.lead.n = 0;  // as in screen_erase_in_line()
     if (count == 0) count = 1;
     unsigned int x = self->cursor->x;
     unsigned int num = MIN(self->columns - x, count);

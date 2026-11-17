@@ -4411,6 +4411,8 @@ class TestBidiReorder(BaseTest):
             ('line erased after', R + N + '\x1b[2K', '', None),
             ('cell erased before the text', 'x\x1b[1;1H' + R + '\x1b[K' + N, '1', 'plain'),
             ('row erased before the text', 'x\r' + R + '\x1b[2K' + N, '1', 'plain'),
+            ('blank row erased before the text', R + '\x1b[2K' + N, '1', 'plain'),
+            ('blank cell erased with ECH before the text', R + '\x1b[X' + N, '1', 'plain'),
             ('cursor moved away and back to the untouched cell', 'x\r' + R + '\x1b[1;5H\x1b[1;1H' + N, '1RLI', 'control'),
             ('a cell written elsewhere first', R + '\x1b[1;6Hx\x1b[1;1H' + N, '1', None),
             ('control repeated', R + R + N, '1RLIRLI', None),
@@ -4429,6 +4431,16 @@ class TestBidiReorder(BaseTest):
                 if same is not None:
                     test_screen_update_cell_data(s)
                     self.ae((self.v2l(s, 0), self.levels(s, 0)), with_control if same == 'control' else plain)
+        with self.subTest('text export puts the leading controls before the base char, and replaying it keeps them'):
+            s = self.screen(cols=n, lines=3)
+            parse_bytes(s, (R + N).encode())
+            self.ae(str(s.line(0)), R + N)
+            self.ae(s.line(0).as_ansi().replace('\x1b[m', ''), R + N)
+            again = self.screen(cols=n, lines=3)
+            parse_bytes(again, s.line(0).as_ansi().encode())
+            test_screen_update_cell_data(s)
+            test_screen_update_cell_data(again)
+            self.ae((self.lead_cell(again), self.obs(again, 0)), (self.lead_cell(s), self.obs(s, 0)))
         with self.subTest('scrolled away before the text arrives'):
             s = self.screen(cols=n, lines=3)
             parse_bytes(s, b'a\r\nb\r\nx\r' + R.encode() + b'\n\x1b[3;1H' + N.encode())
