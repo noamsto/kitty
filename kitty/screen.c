@@ -5621,14 +5621,16 @@ static bool cell_is_blank(const CPUCell *c);
 // that is where the next character goes. At an odd level that is the column
 // visually left of it, at an even one the column right of it, clamped to the
 // last column (a beam then sits at the clamped cell's right edge). Typed spaces
-// are skipped only after a strong letter, whose direction carries across them to
-// the next letter of the run; after a number or neutral the next character's
-// place depends on its class, so the rules below apply. A cell holding an
-// isolate control leaves that to the rules below as well. Otherwise, after a
-// right-to-left character a beam goes to the column visually left of it, as the
-// next right-to-left character goes there, and a block, underline or hollow
-// cursor does too when on a blank cell or the pending wrap column. A beam on a
-// right-to-left cell is drawn at the right edge of the cell, flagged by mirrored.
+// that joined the run (at its level) end it, as the next letter goes beside
+// them. Otherwise they are skipped, and only after a strong letter, whose
+// direction carries across them to the next letter of the run; after a number
+// or neutral the next character's place depends on its class, so the rules
+// below apply. A cell holding an isolate control leaves that to the rules below
+// as well. Otherwise, after a right-to-left character a beam goes to the column
+// visually left of it, as the next right-to-left character goes there, and a
+// block, underline or hollow cursor does too when on a blank cell or the
+// pending wrap column. A beam on a right-to-left cell is drawn at the right
+// edge of the cell, flagged by mirrored.
 static index_type
 cursor_visual_in_row(Screen *self, index_type x, index_type y, CursorShape shape, bool *mirrored) {
     *mirrored = false;
@@ -5652,8 +5654,10 @@ cursor_visual_in_row(Screen *self, index_type x, index_type y, CursorShape shape
                 !FRIBIDI_IS_LETTER(fribidi_get_bidi_type(cell_first_char(cells + p, self->text_cache)));
             if (lp != b->rtl[render_row] && !skipped_after_non_letter &&
                 !bidi_cell_has_isolates(cells + p, self->text_cache)) {
-                const index_type span = cell_span(cells + p);
-                const index_type left = bidi_visual_x(b, render_row, p, span);
+                index_type q = p;
+                if (t < x && bidi_cell_level(b, render_row, x - 1) == lp) q = x - 1;
+                const index_type span = cell_span(cells + q);
+                const index_type left = bidi_visual_x(b, render_row, q, span);
                 if (lp & 1) {
                     *mirrored = shape == CURSOR_BEAM && left > 0;
                     return left ? left - 1 : 0;
