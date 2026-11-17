@@ -62,7 +62,8 @@ typedef struct BidiMaps {
     bool resolve_cacheable;
     // The last resolve ran FriBidi to success without skipping N0, so the signatures it wrote capture all its inputs
     bool resolve_signed;
-    // For tests: resolve the trailing blanks of a paragraph instead of trimming them
+    // For tests: resolve the trailing blanks of a paragraph with FriBidi, the UAX#9 reference, instead of trimming them. This also
+    // skips keep_typed_blanks(), so typed blanks after a letter in an unclosed fed isolate get the paragraph level
     bool no_trim;
     index_type cols, rows;
     // The LineBuf the maps were made from: the active linebuf, or the paused snapshot
