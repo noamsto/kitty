@@ -103,8 +103,9 @@ typedef union LineAttrs {
     };
     uint8_t val;
 } LineAttrs;
-// BIDI_STAMP_RTL is the upload's memo of an implicit line that holds right-to-left text
-enum { BIDI_STAMP_NONE, BIDI_STAMP_IMPLICIT, BIDI_STAMP_RTL };
+// BIDI_STAMP_RTL and BIDI_STAMP_ISOLATES are the upload's memo of an implicit line: one that holds right-to-left text and no
+// isolate control, and one that holds an isolate control after a cell's first char
+enum { BIDI_STAMP_NONE, BIDI_STAMP_IMPLICIT, BIDI_STAMP_RTL, BIDI_STAMP_ISOLATES };
 static_assert(sizeof(LineAttrs) == sizeof(uint8_t), "Fix the ordering of LineAttrs");
 
 

@@ -96,6 +96,12 @@ void bidi_maps_free(BidiMaps *b);
 bool bidi_maps_ensure(BidiMaps *b, index_type rows, index_type cols);
 // Whether the base codepoint of some cell passes bidi_codepoint_may_reorder(), or some cell holds an RLI
 bool bidi_cells_may_reorder(const CPUCell *cells, index_type num, const TextCache *tc);
+// The memo of a row's cells: BIDI_STAMP_ISOLATES when a cell holds an isolate control after its first char, else BIDI_STAMP_RTL
+// when a base codepoint passes bidi_codepoint_may_reorder(), else BIDI_STAMP_IMPLICIT
+unsigned bidi_row_memo(const CPUCell *cells, index_type num, const TextCache *tc);
+// The depth after the row of the isolates its cells hold after their first char, folded from depth >= 0 with a PDI at depth 0
+// ignored, as FriBidi gets them. Sets *has_opener when the row holds an LRI, RLI or FSI.
+int bidi_row_fold_isolates(const CPUCell *cells, index_type num, const TextCache *tc, int depth, bool *has_opener);
 // The FriBidi base of a paragraph whose first row has this record: with auto set the first strong character wins and rtl is the fallback
 static inline FriBidiParType
 bidi_record_base(LineAttrs a) {
