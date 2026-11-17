@@ -7,7 +7,8 @@
 #include "bidi.h"
 
 #define row_of(arr) (b->arr + (size_t)render_row * b->cols)
-// In cell_of_char: an isolate control fed after its cell's first char, in the cell's column
+// In cell_of_char: an isolate control fed with its cell, in the cell's column, after its first char or, for a cell with leading
+// controls, before it
 #define BIDI_EXTRA_CHAR (1u << 31)
 
 // Stores in buf the isolate controls (LRI RLI FSI PDI) among the chars of a cell after the first, returning how many.
@@ -22,6 +23,12 @@ cell_isolates(const CPUCell *c, const TextCache *tc, char_type buf[MAX_NUM_CODEP
         if (lc.chars[i] - 0x2066u <= 0x2069u - 0x2066u) buf[n++] = lc.chars[i];
     }
     return n;
+}
+
+bool
+bidi_row_starts_with_pdi(const CPUCell *cells, index_type num, const TextCache *tc) {
+    char_type buf[MAX_NUM_CODEPOINTS_PER_CELL];
+    return num && cell_has_leading_controls(cells) && cell_isolates(cells, tc, buf) && buf[0] == 0x2069;
 }
 
 bool
@@ -194,11 +201,18 @@ feed_row(BidiMaps *b, const CPUCell *cells, const TextCache *tc, uint32_t r, uin
             if (col && c->x) continue;
         }
         const char_type ch = cell_first_char(c, tc);
-        *text++ = ch ? ch : ' ';
-        *cell_of_char++ = row_bits | col;
-        if (!feed_iso || !c->ch_is_idx) continue;
         // Within the scratch: resolve_levels sized it for the controls cell_isolates() counted in these same cells
         char_type buf[MAX_NUM_CODEPOINTS_PER_CELL];
+        const bool leading = feed_iso && c->ch_is_idx && cell_has_leading_controls(c);
+        if (UNLIKELY(leading)) {
+            for (unsigned i = 0, k = cell_isolates(c, tc, buf); i < k; i++) {
+                *text++ = buf[i];
+                *cell_of_char++ = row_bits | col | BIDI_EXTRA_CHAR;
+            }
+        }
+        *text++ = ch ? ch : ' ';
+        *cell_of_char++ = row_bits | col;
+        if (leading || !feed_iso || !c->ch_is_idx) continue;
         for (unsigned i = 0, k = cell_isolates(c, tc, buf); i < k; i++) {
             *text++ = buf[i];
             *cell_of_char++ = row_bits | col | BIDI_EXTRA_CHAR;
@@ -406,7 +420,7 @@ write_row(BidiMaps *b, index_type render_row, uint32_t row_first_char, uint32_t 
             v2l[v++] = (uint16_t)col;
             continue;
         }
-        // A cell's isolate controls follow its first char and take no column
+        // A cell's isolate controls, before or after its first char, take no column
         if (at & BIDI_EXTRA_CHAR) continue;
         if (next == col) {
             uint32_t j = logical + 1;

@@ -4056,8 +4056,10 @@ class TestBidiReorder(BaseTest):
 
     def test_history_without_marks_with_many_prompts(self):
         # More prompt and output cycles than BIDI_MAX_ISOLATES, no OSC 133 marks (as through tmux, but the rows written in turn, not
-        # placed by CUP), every fourth command closing its isolate. The groups do not chain across prompts, so the live prompt keeps
-        # the layout it has alone: its FSI is fed and its typed space is kept.
+        # placed by CUP). Every fourth command closes its isolate with a PDI after the command, every fourth from the third with a
+        # PDI at column 0 of the output row (what a shell printing it when the command runs sends), the others leave it open. The
+        # groups do not chain across prompts, so the live prompt keeps the layout it has alone: its FSI is fed and its typed
+        # space is kept.
         cycles = BIDI_MAX_PARAGRAPH_ROWS // 3 + BIDI_MAX_ISOLATES
         n = 24
         ident = tuple(range(n))
@@ -4065,7 +4067,7 @@ class TestBidiReorder(BaseTest):
         parse_bytes(s, self.AUTO)
         for i in range(cycles):
             parse_bytes(s, self.PROMPT_ROW + b'ls' + (self.PDI.encode() if i % 4 == 0 else b'') + b'\r\n')
-            parse_bytes(s, 'שלום עולם'.encode() + b'\r\nfile.txt\r\n')
+            parse_bytes(s, (self.PDI.encode() if i % 4 == 2 else b'') + 'שלום עולם'.encode() + b'\r\nfile.txt\r\n')
         parse_bytes(s, self.PROMPT_ROW + 'אני '.encode())
         self.assertGreater(s.historybuf.count, BIDI_MAX_PARAGRAPH_ROWS)
         y = s.cursor.y
@@ -4079,11 +4081,11 @@ class TestBidiReorder(BaseTest):
         standalone = ident[::-1], (1,) * n, True
         for i in range(cycles):
             self.assert_obs(settled[3 * i + 2], ident, None, False, f'cycle {i}, file.txt')
-            if i % 4 == 0:
+            if i % 4 in (0, 2):
                 self.assert_obs(settled[3 * i + 1], *standalone, f'cycle {i}, output after a closed isolate')
             else:
                 # an isolate left open: the output joins it until the next prompt's FSI starts another group (a shell that
-                # closes the isolate when the command runs would get the layout above)
+                # closes the isolate when the command runs would get the layout above, as the PDI at column 0 does)
                 self.assert_obs(settled[3 * i + 1], (8, 7, 6, 5, 4, 3, 2, 1, 0) + ident[9:], (3,) * 9 + (0,) * (n - 9), False, f'cycle {i}, output')
 
     def test_paused_frame_keeps_the_group_layout_it_can_see(self):
@@ -4318,3 +4320,161 @@ class TestBidiReorder(BaseTest):
         self.ae((s.test_cursor_render(CURSOR_BEAM), s.test_ime_anchor_x()), ((4, False), 0))
         self.ae(row[:4], preedit_ref[6:10])
         self.ae((row[4:], self.v2l(s, 0)), (row0[4:], ID10[::-1]))
+
+    # Isolate controls written at column 0, where no cell precedes them: kept as leading controls of the cell written next,
+    # fed to FriBidi before its base char
+
+    def test_leading_isolate_at_column_0(self):
+        # FSI, then Hebrew and English: one first-strong isolate, RTL from its first letter. The paragraph stays LTR
+        # (the FSI is skipped by P2), so cells after the text are at level 0 and the English stays in reading order
+        n = 40
+        tail = tuple(range(10, n))
+        data = '⁨שלום world'.encode()
+        for name, chunks in (('one write', (data,)), ('split after the control', ('⁨'.encode(), 'שלום world'.encode()))):
+            with self.subTest(name):
+                s = self.screen(cols=n, lines=2)
+                for chunk in chunks:
+                    parse_bytes(s, chunk)
+                test_screen_update_cell_data(s)
+                self.assert_obs(self.obs(s, 0), (5, 6, 7, 8, 9, 4, 3, 2, 1, 0) + tail, (1,) * 5 + (2,) * 5 + (0,) * (n - 10), False)
+        with self.subTest('without the control, the auto direction takes over the row'):
+            s = self.screen(cols=n, lines=2)
+            parse_bytes(s, self.AUTO + 'שלום world'.encode())
+            test_screen_update_cell_data(s)
+            self.assert_obs(self.obs(s, 0), tuple(range(n - 1, 9, -1)) + (5, 6, 7, 8, 9, 4, 3, 2, 1, 0), None, True)
+
+    def test_leading_isolate_two_panes(self):
+        # A row of two panes as the tmux fork writes it with the initiator at column 0: the leftmost pane's FSI first, its text,
+        # the PDI on the pane's last cell, then the border cell carrying the right pane's initiator. The paragraph is fixed LTR.
+        # The left pane's first cell is inside its isolate: the pane is laid out right to left from its first letter, whatever
+        # the right pane holds
+        n = 20
+        left = 'שלום worl' + 'd'
+        for right, right_v2l in (('hello wor', tuple(range(11, 20))), ('שלום עולם', (19, 18, 17, 16, 15, 14, 13, 12, 11))):
+            with self.subTest(right=right):
+                data = b'\x1b[?2501l\x1b[1;1H' + '⁨'.encode() + left.encode() + '⁩'.encode() + '│⁨'.encode() + right.encode() + '⁩'.encode()
+                s = self.replay_bytes(data, cols=n, lines=2)
+                v2l, levels, _ = self.obs(s, 0)
+                self.ae(v2l[:10], (5, 6, 7, 8, 9, 4, 3, 2, 1, 0))
+                self.ae(levels[:10], (1,) * 5 + (2,) * 5)
+                self.ae(v2l[10], 10)
+                self.ae(v2l[11:], right_v2l)
+        with self.subTest('before the change the first cell stayed out of the isolate'):
+            # the initiator written after the first cell, as tmux had to: ש is not in the isolate
+            data = b'\x1b[?2501l\x1b[1;1H' + ('ש⁨' + left[1:] + '⁩│').encode()
+            s = self.replay_bytes(data, cols=n, lines=2)
+            self.assertNotEqual(self.obs(s, 0)[0][:10], (5, 6, 7, 8, 9, 4, 3, 2, 1, 0))
+
+    def test_leading_pdi_ends_prompt_group(self):
+        # A PDI printed when the command runs lands at column 0 of the first output row. It closes the prompt's isolate and
+        # starts the output's own paragraph, auto-RTL when it is Hebrew; without it the rows join the open isolate (#53)
+        n = 40
+        H1 = 'שלום'
+        standalone = (tuple(range(n - 1, -1, -1)), (1,) * n, True)
+        joined = ((3, 2, 1, 0) + tuple(range(4, n)), (3,) * 4 + (0,) * (n - 4), False)
+        prompt = self.PROMPT_ROW + b'hello\r\n'
+        PDI = self.PDI.encode()
+        for name, chunks, expect in (
+            ('PDI, then the output', (prompt + PDI + H1.encode(),), standalone),
+            ('PDI and the output in separate writes', (prompt + PDI, H1.encode()), standalone),
+            ('PDI, then a second output row', (prompt + PDI + H1.encode() + b'\r\n' + H1.encode(),), standalone),
+            ('no PDI keeps the old behaviour', (prompt + H1.encode(),), joined),
+            ('the cursor leaves the row before any text', (prompt + PDI + b'\r\n' + H1.encode(),), joined),
+        ):
+            with self.subTest(name):
+                s = self.screen(cols=n, lines=6)
+                parse_bytes(s, self.AUTO)
+                for chunk in chunks:
+                    parse_bytes(s, chunk)
+                test_screen_update_cell_data(s)
+                row = 2 if name == 'PDI, then a second output row' else 1
+                if name == 'the cursor leaves the row before any text':
+                    row = 2
+                self.assert_obs(self.obs(s, row), *expect)
+
+    def lead_cell(self, s, y=0, x=0):
+        # the chars of a cell, the isolate controls shown by name
+        return ''.join(ch if ch not in ISOLATES else 'LRI RLI FSI PDI'.split()[ISOLATES.index(ch)] for ch in s.cpu_cells(y)[x]['text'])
+
+    def test_leading_isolate_lifetime(self):
+        # What happens to controls kept for column 0 when the row or the cell changes before or after the text arrives. Inside an
+        # RLI the digits of '12 34' are laid out '34 12', so a surviving control shows in the layout
+        R, PDI, N = '⁧', '⁩', '12 34'
+        n = 12
+        with_control = self.maps((R + N).encode(), n, 1)[0]
+        self.assertNotEqual(with_control, self.maps(N.encode(), n, 1)[0])
+        # (name, text, chars of cell 0, whether the row is laid out as under the control, None when not compared)
+        cases = (
+            ('control then text', R + N, '1RLI', True),
+            ('text overwritten at column 0 without a control', R + N + '\x1b[1;1H' + N, '1', False),
+            ('text overwritten with a control again', R + N + '\x1b[1;1H' + R + N, '1RLI', True),
+            ('line erased after', R + N + '\x1b[2K', '', False),
+            ('cell erased before the text', 'x\x1b[1;1H' + R + '\x1b[K' + N, '1', False),
+            ('row erased before the text', 'x\r' + R + '\x1b[2K' + N, '1', False),
+            ('cursor moved away and back to the untouched cell', 'x\r' + R + '\x1b[1;5H\x1b[1;1H' + N, '1RLI', True),
+            ('a cell written elsewhere first', R + '\x1b[1;6Hx\x1b[1;1H' + N, '1', False),
+            ('control repeated', R + R + N, '1RLIRLI', None),
+            ('wide first cell takes none', R + '中' + N, '中', None),
+            ('combining mark after the control', R + 'a\u0301', 'aRLI\u0301', None),
+            ('a control after the first cell has nowhere to go', R + '1' + PDI + '2 34', '1RLI', None),
+            ('lrm at column 0 keeps the g8 handling', LRM + N, '1', None),
+            ('an embedding stays inert', '\u202b' + N, '1', None),
+        )
+        for name, text, chars, same in cases:
+            with self.subTest(name):
+                s = self.screen(cols=n, lines=3)
+                parse_bytes(s, text.encode())
+                self.ae(self.lead_cell(s), chars)
+                if same is not None:
+                    test_screen_update_cell_data(s)
+                    self.ae((self.v2l(s, 0), self.levels(s, 0)) == with_control, same)
+        with self.subTest('scrolled away before the text arrives'):
+            s = self.screen(cols=n, lines=3)
+            parse_bytes(s, b'a\r\nb\r\nx\r' + R.encode() + b'\n\x1b[3;1H' + N.encode())
+            self.ae(self.lead_cell(s, 2), '1')
+        with self.subTest('alternate screen'):
+            s = self.screen(cols=n, lines=3)
+            parse_bytes(s, R.encode() + b'\x1b[?1049h' + N.encode())
+            self.ae(self.lead_cell(s), '1')
+        with self.subTest('bidi mode off: nothing kept'):
+            s = self.create_screen(cols=n, lines=3, options={})
+            parse_bytes(s, (R + N).encode())
+            self.ae(self.lead_cell(s), '1')
+        with self.subTest('soft wrapped continuation keeps the control with the cell before'):
+            s = self.screen(cols=4, lines=3)
+            parse_bytes(s, ('אבגד' + R + 'ה').encode())
+            self.ae((self.lead_cell(s, 0, 3), self.lead_cell(s, 1, 0)), ('דRLI', 'ה'))
+        with self.subTest('the control follows its cell when characters are inserted'):
+            s = self.screen(cols=n, lines=3)
+            parse_bytes(s, (R + N).encode() + b'\x1b[1;1H\x1b[2@')
+            self.ae(self.lead_cell(s, 0, 2), '1RLI')
+        with self.subTest('a narrow default emoji with VS16 after the control does not widen'):
+            s = self.screen(cols=n, lines=3)
+            parse_bytes(s, (R + '\u2600\ufe0f').encode())
+            self.ae(self.lead_cell(s), '\u2600RLI\ufe0f')
+        with self.subTest('SARA AM widens a cell with leading controls in one write, not in a later one'):
+            s = self.screen(cols=n, lines=3)
+            parse_bytes(s, (R + 'ก\u0e33').encode())
+            self.ae(self.lead_cell(s), 'กRLI\u0e33')
+            s = self.screen(cols=n, lines=3)
+            parse_bytes(s, (R + 'ก').encode())
+            parse_bytes(s, '\u0e33'.encode())
+            self.ae((self.lead_cell(s, 0, 0), self.lead_cell(s, 0, 1)), ('กRLI', '\u0e33'))
+
+    def test_leading_isolate_cap(self):
+        # A leading control counts toward BIDI_MAX_ISOLATES like any other: RLI 12 34 PDI and 15 empty isolates, one over the cap
+        # when a PDI is added, and a cell keeps at most BIDI_MAX_LEAD leading controls
+        from kitty.fast_data_types import BIDI_MAX_LEAD
+
+        body = '⁧12 34⁩ ' + 'b⁦⁩' * ((BIDI_MAX_ISOLATES - 2) // 2)
+        for name, text, expect in (
+            ('at the cap', body, (3, 4, 2, 0, 1)),
+            ('over the cap', body + '⁩', (0, 1, 2, 3, 4)),
+        ):
+            with self.subTest(name):
+                got = self.maps(text.encode(), 60, 1)[0][0]
+                self.ae(tuple(range(5)) if got is None else got[:5], expect)
+        with self.subTest('leading controls kept per cell'):
+            s = self.screen(cols=12, lines=2)
+            parse_bytes(s, ('⁦' * (BIDI_MAX_LEAD + 3) + 'a').encode())
+            self.ae(len(s.cpu_cells(0)[0]['text']), 1 + BIDI_MAX_LEAD)
