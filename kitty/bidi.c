@@ -201,11 +201,36 @@ sig_of(FriBidiCharType type, FriBidiBracketType bracket, FriBidiChar ch) {
     return (bracket != FRIBIDI_NO_BRACKET ? bracket_sig : (uint32_t)type) | (ch == ' ' ? SIG_BLANK : 0);
 }
 
+// In a paragraph that ends inside an isolate fed without its PDI, the blanks written right after a strong letter keep
+// the letter's level instead of taking the paragraph's (L1), so a space typed after a word sits where the next word of the
+// isolate's run will push it. Empty cells, and any blank after one, stay at the paragraph level. Retypes the kept blanks
+// as the letter so that fribidi_reorder_line()'s own L1 leaves them. Returns their count, which follow the n_trim chars
+// FriBidi resolved and end in the last row.
+static uint32_t
+keep_typed_blanks(BidiMaps *b, const CPUCell *last_row, uint32_t n_trim, uint32_t n) {
+    const uint32_t letter = n_trim - 1;
+    if ((b->cell_of_char[letter] & BIDI_EXTRA_CHAR) || !FRIBIDI_IS_LETTER(b->types[letter])) return 0;
+    int depth = 0;
+    for (uint32_t i = 0; i < n_trim; i++) {
+        if (b->types[i] == FRIBIDI_TYPE_PDI) depth -= depth > 0;
+        else if (FRIBIDI_IS_ISOLATE(b->types[i])) depth++;
+    }
+    if (!depth) return 0;
+    uint32_t k = 0;
+    while (n_trim + k < n && cell_is_char(last_row + (b->cell_of_char[n_trim + k] & 0xffff), ' ')) k++;
+    for (uint32_t i = n_trim; i < n_trim + k; i++) {
+        b->para_levels[i] = b->para_levels[letter];
+        b->types[i] = b->types[letter];
+    }
+    return k;
+}
+
 // Resolves the levels of the paragraph's characters into b->para_levels from
 // the base *base. Returns whether any row may be reordered. Then *base is the
 // resolved FRIBIDI_PAR_LTR or FRIBIDI_PAR_RTL, *n_trim_out the count of
-// characters FriBidi resolved, and the blank tail [*n_trim_out, n) is at the
-// paragraph level.
+// characters resolved, and the blank tail [*n_trim_out, n) is at the paragraph
+// level. Resolved are the characters FriBidi was given, and the typed blanks
+// kept by keep_typed_blanks().
 static bool
 resolve_levels(BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const TextCache *tc, FriBidiParType *base, uint32_t *n_trim_out) {
     b->resolve_cacheable = true;
@@ -236,7 +261,8 @@ resolve_levels(BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const
     // Blanks at the paragraph's end take the paragraph level (L1) whatever
     // precedes them, so they need not be resolved: only inside an explicit
     // embedding could they set the eos of the run before them (X10), and the
-    // retype below leaves none.
+    // retype below leaves none. The exception, a deviation from L1, is
+    // keep_typed_blanks().
     uint32_t n_trim = n;
     if (!b->no_trim) {
         while (n_trim > b->row_start[num_rows - 1] && b->text[n_trim - 1] == ' ') n_trim--;
@@ -277,6 +303,7 @@ resolve_levels(BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const
     b->resolve_signed = !budget_fired && !isolates;
     // Only an LTR result can leave every level at 0, an RTL one has them all at 1 or more
     if (max_level <= 1) return false;
+    if (feed_iso && n_trim < n && !b->no_trim) n_trim += keep_typed_blanks(b, rows[num_rows - 1], n_trim, n);
     for (uint32_t i = n_trim; i < n; i++) b->para_levels[i] = *base == FRIBIDI_PAR_RTL;
     *n_trim_out = n_trim;
     return true;

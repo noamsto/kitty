@@ -1676,6 +1676,7 @@ class TestBidiReorder(BaseTest):
     def test_trailing_blank_trim_keeps_maps(self):
         # dropping the blanks at a paragraph's end before resolving must not change any row's maps. The trim is exact for
         # FriBidi but not for the N0 budget threshold (it scales with the trimmed length), so these cases stay far from it.
+        # keep_typed_blanks is the exception, pinned at the end: it deliberately differs from the untrimmed FriBidi result.
         def wrapped_blank(s):
             s.draw('א' * 10)
             s.draw('ב')
@@ -1730,6 +1731,18 @@ class TestBidiReorder(BaseTest):
                     s.draw(text)
                     self.warm(s)
                     self.ae(self.vmaps(s)[0], want)
+        # the one deliberate difference: typed blanks after a letter in an unclosed fed isolate keep the letter's level when
+        # trimmed (keep_typed_blanks), while the untrimmed reference resolves them with FriBidi, so they fall to the paragraph level
+        for trim, want_v2l, want_levels in (
+            (True, (0, 4, 3, 2, 1, 5, 6, 7, 8, 9), (0, 1, 1, 1, 1, 0, 0, 0, 0, 0)),
+            (False, (0, 2, 1, 3, 4, 5, 6, 7, 8, 9), (0, 1, 1, 0, 0, 0, 0, 0, 0, 0)),
+        ):
+            with self.subTest(typed_blanks_in_isolate=trim):
+                s = self.dscreen(self.AUTO)
+                s.test_bidi_trim(trim)
+                s.draw('a⁨אב  ')
+                self.warm(s)
+                self.ae((self.vmaps(s)[0], self.lv(s, 0)), (want_v2l, want_levels))
         # positive control: the N0 budget threshold follows the trimmed length (70 against 71 cells), so the switch must reach the engine
         states = []
         for trim in (True, False):
@@ -2175,7 +2188,7 @@ class TestBidiReorder(BaseTest):
         self.ae([(self.vmaps(s)[y], self.lv(s, y), self.prtl(s, y)) for y in (0, 1)], [want, want])
 
     def test_rtl_tail_with_wide_and_multicell(self):
-        # the blank tail goes first, reversed, ahead of the reordered rest; trimming it changes neither maps nor levels
+        # the blank tail goes first, reversed, ahead of the reordered rest; trimming it changes neither maps nor levels, as no fed isolate is involved
         def wide(s):
             s.draw('אב中')
             return 6
@@ -3503,9 +3516,9 @@ class TestBidiReorder(BaseTest):
     # too, then moves the cursor with CUP, and fish appends the typed text
     PROMPT = {'A': PUA + b'\x1b[1;3H', 'B': PUA + b' \xe2\x81\xa8\x1b[1;3H'}
 
-    def replayed(self, prompt, text, cols=40):
+    def replayed(self, prompt, text, cols=40, prefix=None):
         s = self.screen(cols=cols, lines=2)
-        parse_bytes(s, self.AUTO + self.PROMPT[prompt] + text)
+        parse_bytes(s, (self.AUTO if prefix is None else prefix) + self.PROMPT[prompt] + text)
         test_screen_update_cell_data(s)
         return s
 
@@ -3530,8 +3543,8 @@ class TestBidiReorder(BaseTest):
                     (0, 0) + (1,) * 12 + (2,) * 7 + (1,) * 10,
                 ),
             ),
-            # the cursor: the typed space is at the paragraph level
-            ('אני ', ((0, 1, 4, 3, 2, 5), (0, 0, 1, 1, 1, 0)), ((0, 1, 4, 3, 2, 5), (0, 0, 1, 1, 1, 0))),
+            # the cursor: the typed space is at the paragraph level, and in B, with the FSI, it joins the word's run
+            ('אני ', ((0, 1, 4, 3, 2, 5), (0, 0, 1, 1, 1, 0)), ((0, 1, 5, 4, 3, 2), (0, 0, 1, 1, 1, 1))),
         )
         for text, *layouts in cases:
             for prompt, (v2l, levels) in zip('AB', layouts):
@@ -3549,7 +3562,7 @@ class TestBidiReorder(BaseTest):
             for name, data in (('plain', typed), ('idiom', idiom)):
                 with self.subTest(prompt=prompt, typed=name):
                     s = self.replayed(prompt, data)
-                    self.ae(self.v2l(s, 0)[:6], (0, 1, 4, 3, 2, 5))
+                    self.ae(self.v2l(s, 0)[:6], (0, 1, 4, 3, 2, 5) if prompt == 'A' else (0, 1, 5, 4, 3, 2))
                     self.assert_cursor_at(s, 6, (1, True), 1)
         s = self.replayed('B', 'שלום 12 '.encode(), cols=14)
         self.assert_cursor_at(s, 10, (10, False), 10)
@@ -3557,6 +3570,75 @@ class TestBidiReorder(BaseTest):
         s = self.replayed('B', b'')
         self.assertIsNone(self.v2l(s, 0))
         self.assert_cursor_at(s, 2, (2, False), 2)
+
+    def test_typed_space_in_prompt_isolate(self):
+        # Spaces typed after a letter inside the prompt's unclosed FSI take that letter's level, so they show beside the word at once,
+        # and the cursor sits after the last of them. A row has 24 cells, so the RTL paragraph is right-aligned and its v2l is checked
+        # on the last x + 1 visual columns. None for v2l and levels means the row has no map: the identity layout at the paragraph level.
+        F, T = False, True
+        RTL = b'\x1b[2 k'
+        # the isolate cap rows below hardcode their pair counts for this cap
+        self.ae(BIDI_MAX_ISOLATES, 32)
+        # (name, prompt, paragraph prefix, right-aligned, text, cursor x, v2l, levels, beam (column, mirrored), column of the other shapes)
+        # v2l and levels cover the cells up to and including the cursor's
+        cases = (
+            ('hebrew and space', 'B', None, F, 'אני ', 6, (0, 1, 5, 4, 3, 2, 6), (0, 0, 1, 1, 1, 1, 0), (1, T), 1),
+            ('hebrew and two spaces', 'B', None, F, 'אני  ', 7, (0, 1, 6, 5, 4, 3, 2, 7), (0, 0, 1, 1, 1, 1, 1, 0), (1, T), 1),
+            ('hebrew', 'B', None, F, 'אני', 5, (0, 1, 4, 3, 2, 5), (0, 0, 1, 1, 1, 0), (1, T), 1),
+            ('latin and space', 'B', None, F, 'hello ', 8, None, None, (8, F), 8),
+            (
+                'hebrew, latin and space', 'B', None, F, 'שלום abc ', 11,
+                (0, 1, 7, 8, 9, 10, 6, 5, 4, 3, 2, 11), (0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 0), (6, F), 6,
+            ),
+            (
+                'rtl paragraph, hebrew, latin and space', 'B', RTL, T, 'שלום abc ', 11,
+                (11, 7, 8, 9, 10, 6, 5, 4, 3, 2, 1, 0), (2, 1, 3, 3, 3, 3, 3, 4, 4, 4, 4, 1), (17, F), 17,
+            ),
+            ('rtl paragraph, latin', 'B', RTL, T, 'abc', 5, (5, 2, 3, 4, 1, 0), (2, 1, 2, 2, 2, 1), (22, F), 22),
+            ('rtl paragraph, latin and space', 'B', RTL, T, 'abc ', 6, (6, 2, 3, 4, 5, 1, 0), (2, 1, 2, 2, 2, 2, 1), (22, F), 22),
+            (
+                'rtl paragraph, latin and two spaces', 'B', RTL, T, 'abc  ', 7,
+                (7, 2, 3, 4, 5, 6, 1, 0), (2, 1, 2, 2, 2, 2, 2, 1), (22, F), 22,
+            ),
+            # without the FSI the typed space is at the paragraph level, as before
+            ('no isolate, hebrew and space', 'A', None, F, 'אני ', 6, (0, 1, 4, 3, 2, 5, 6), (0, 0, 1, 1, 1, 0, 0), (1, T), 1),
+            # what the rule leaves alone: empty cells, a closed isolate, a number before the space, more isolates than the cap
+            ('cursor moved past empty cells', 'B', None, F, 'אני\x1b[3C', 8, (0, 1, 4, 3, 2, 5, 6, 7, 8), (0, 0, 1, 1, 1, 0, 0, 0, 0), (8, F), 8),
+            # the PDI joins the cell of the first space, and L1 resets the spaces and the PDI at the end to the paragraph level
+            ('closed isolate', 'B', None, F, 'אני \u2069 ', 7, (0, 1, 4, 3, 2, 5, 6, 7), (0, 0, 1, 1, 1, 0, 0, 0), (7, F), 7),
+            (
+                'number and space', 'B', None, F, 'שלום 12 ', 10,
+                (0, 1, 7, 8, 6, 5, 4, 3, 2, 9, 10), (0, 0, 1, 1, 1, 1, 1, 2, 2, 0, 0), (10, F), 10,
+            ),
+            # a cell holds two controls: the FSI and 15 LRI PDI pairs are 31 isolates, under BIDI_MAX_ISOLATES, so they are fed and
+            # the space is kept; with 16 pairs they are 33, no isolate is fed and the space is at the paragraph level
+            (
+                'under the isolate cap', 'B', None, F, 'א\u2066\u2069' * (BIDI_MAX_ISOLATES // 2 - 1) + 'י ', 19,
+                (0, 1) + tuple(range(18, 1, -1)) + (19,), (0, 0) + (1,) * 17 + (0,), (1, T), 1,
+            ),
+            (
+                'over the isolate cap', 'B', None, F, 'א\u2066\u2069' * (BIDI_MAX_ISOLATES // 2) + 'י ', 20,
+                (0, 1) + tuple(range(18, 1, -1)) + (19, 20), (0, 0) + (1,) * 17 + (0, 0), (1, T), 1,
+            ),
+            # readline erases a letter with backspace, space, backspace: the space it writes is a typed blank after a letter, so it
+            # joins the run and shows where the erased letter was
+            ('erase idiom', 'B', None, F, 'אני\x08 \x08', 4, (0, 1, 4, 3, 2), (0, 0, 1, 1, 1), (2, T), 2),
+            ('erase idiom, no isolate', 'A', None, F, 'אני\x08 \x08', 4, (0, 1, 3, 2, 4), (0, 0, 1, 1, 0), (1, T), 1),
+        )
+        for name, prompt, prefix, rtl, text, x, v2l, levels, beam, block in cases:
+            with self.subTest(name):
+                s = self.replayed(prompt, text.encode(), cols=24, prefix=prefix)
+                self.ae(s.cursor.x, x)
+                got_v2l, got_levels = self.v2l(s, 0), self.levels(s, 0)
+                if v2l is None:
+                    self.assertIsNone(got_v2l)
+                else:
+                    self.ae(got_v2l[-len(v2l):] if rtl else got_v2l[: len(v2l)], v2l)
+                if levels is None:
+                    self.assertIsNone(got_levels)
+                else:
+                    self.ae(got_levels[: len(levels)], levels)
+                self.assert_cursor_at(s, x, beam, block)
 
     def test_beam_mirror_drawn_shape(self):
         # An unfocused cursor drawn as a block is not mirrored even when the cursor shape is a beam
