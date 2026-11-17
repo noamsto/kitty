@@ -4432,6 +4432,11 @@ class TestBidiReorder(BaseTest):
             s = self.screen(cols=n, lines=3)
             parse_bytes(s, b'a\r\nb\r\nx\r' + R.encode() + b'\n\x1b[3;1H' + N.encode())
             self.ae(self.lead_cell(s, 2), '1')
+        for name, mode in (('', b''), (' in insert mode, where no write check runs first', b'\x1b[4h')):
+            with self.subTest('controls kept for another row are dropped when a new control arrives' + name):
+                s = self.screen(cols=n, lines=3)
+                parse_bytes(s, R.encode() + b'\x1b[2;1H' + mode + R.encode() + N.encode())
+                self.ae((self.lead_cell(s, 0), self.lead_cell(s, 1)), ('', '1RLI'))
         with self.subTest('alternate screen'):
             s = self.screen(cols=n, lines=3)
             parse_bytes(s, R.encode() + b'\x1b[?1049h' + N.encode())
