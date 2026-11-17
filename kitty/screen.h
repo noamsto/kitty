@@ -81,6 +81,8 @@ typedef struct BidiLead {
     LineBuf *lb;
     index_type y;
     CPUCell cell;
+    // the linebuf's counters when the controls were written: a scroll or a row move leaves a blank row as it was
+    uint64_t generation, scrolls;
     unsigned n;
     char_type chars[BIDI_MAX_LEAD];
 } BidiLead;

@@ -4333,6 +4333,7 @@ class TestBidiReorder(BaseTest):
         for name, chunks in (('one write', (data,)), ('split after the control', ('⁨'.encode(), 'שלום world'.encode()))):
             with self.subTest(name):
                 s = self.screen(cols=n, lines=2)
+                parse_bytes(s, self.AUTO)
                 for chunk in chunks:
                     parse_bytes(s, chunk)
                 test_screen_update_cell_data(s)
@@ -4359,11 +4360,11 @@ class TestBidiReorder(BaseTest):
                 self.ae(levels[:10], (1,) * 5 + (2,) * 5)
                 self.ae(v2l[10], 10)
                 self.ae(v2l[11:], right_v2l)
-        with self.subTest('before the change the first cell stayed out of the isolate'):
+        with self.subTest('an initiator after the first cell leaves it outside the isolate'):
             # the initiator written after the first cell, as tmux had to: ש is not in the isolate
             data = b'\x1b[?2501l\x1b[1;1H' + ('ש⁨' + left[1:] + '⁩│').encode()
             s = self.replay_bytes(data, cols=n, lines=2)
-            self.assertNotEqual(self.obs(s, 0)[0][:10], (5, 6, 7, 8, 9, 4, 3, 2, 1, 0))
+            self.ae(self.obs(s, 0)[0][:10], (0, 5, 6, 7, 8, 9, 4, 3, 2, 1))
 
     def test_leading_pdi_ends_prompt_group(self):
         # A PDI printed when the command runs lands at column 0 of the first output row. It closes the prompt's isolate and
@@ -4374,22 +4375,21 @@ class TestBidiReorder(BaseTest):
         joined = ((3, 2, 1, 0) + tuple(range(4, n)), (3,) * 4 + (0,) * (n - 4), False)
         prompt = self.PROMPT_ROW + b'hello\r\n'
         PDI = self.PDI.encode()
-        for name, chunks, expect in (
-            ('PDI, then the output', (prompt + PDI + H1.encode(),), standalone),
-            ('PDI and the output in separate writes', (prompt + PDI, H1.encode()), standalone),
-            ('PDI, then a second output row', (prompt + PDI + H1.encode() + b'\r\n' + H1.encode(),), standalone),
-            ('no PDI keeps the old behaviour', (prompt + H1.encode(),), joined),
-            ('the cursor leaves the row before any text', (prompt + PDI + b'\r\n' + H1.encode(),), joined),
+        for name, chunks, lines, row, expect in (
+            ('PDI, then the output', (prompt + PDI + H1.encode(),), 6, 1, standalone),
+            ('PDI and the output in separate writes', (prompt + PDI, H1.encode()), 6, 1, standalone),
+            ('PDI, then a second output row', (prompt + PDI + H1.encode() + b'\r\n' + H1.encode(),), 6, 2, standalone),
+            ('PDI on the bottom row, which scrolls to make room', (prompt + b'\r\n' + PDI + H1.encode(),), 3, 2, standalone),
+            ('no PDI keeps the old behaviour', (prompt + H1.encode(),), 6, 1, joined),
+            ('the cursor leaves the row before any text', (prompt + PDI + b'\r\n' + H1.encode(),), 6, 2, joined),
+            ('the cursor leaves the bottom row before any text, scrolling', (prompt + PDI + b'\r\n' + H1.encode(),), 2, 1, joined),
         ):
             with self.subTest(name):
-                s = self.screen(cols=n, lines=6)
+                s = self.screen(cols=n, lines=lines)
                 parse_bytes(s, self.AUTO)
                 for chunk in chunks:
                     parse_bytes(s, chunk)
                 test_screen_update_cell_data(s)
-                row = 2 if name == 'PDI, then a second output row' else 1
-                if name == 'the cursor leaves the row before any text':
-                    row = 2
                 self.assert_obs(self.obs(s, row), *expect)
 
     def lead_cell(self, s, y=0, x=0):
@@ -4401,22 +4401,23 @@ class TestBidiReorder(BaseTest):
         # RLI the digits of '12 34' are laid out '34 12', so a surviving control shows in the layout
         R, PDI, N = '⁧', '⁩', '12 34'
         n = 12
-        with_control = self.maps((R + N).encode(), n, 1)[0]
-        self.assertNotEqual(with_control, self.maps(N.encode(), n, 1)[0])
-        # (name, text, chars of cell 0, whether the row is laid out as under the control, None when not compared)
+        with_control, plain = self.maps((R + N).encode(), n, 1)[0], self.maps(N.encode(), n, 1)[0]
+        self.assertNotEqual(with_control, plain)
+        # (name, text, chars of cell 0, the layout the row has: 'control' as under the control, 'plain' as without, None unchecked)
         cases = (
-            ('control then text', R + N, '1RLI', True),
-            ('text overwritten at column 0 without a control', R + N + '\x1b[1;1H' + N, '1', False),
-            ('text overwritten with a control again', R + N + '\x1b[1;1H' + R + N, '1RLI', True),
-            ('line erased after', R + N + '\x1b[2K', '', False),
-            ('cell erased before the text', 'x\x1b[1;1H' + R + '\x1b[K' + N, '1', False),
-            ('row erased before the text', 'x\r' + R + '\x1b[2K' + N, '1', False),
-            ('cursor moved away and back to the untouched cell', 'x\r' + R + '\x1b[1;5H\x1b[1;1H' + N, '1RLI', True),
-            ('a cell written elsewhere first', R + '\x1b[1;6Hx\x1b[1;1H' + N, '1', False),
+            ('control then text', R + N, '1RLI', 'control'),
+            ('text overwritten at column 0 without a control', R + N + '\x1b[1;1H' + N, '1', 'plain'),
+            ('text overwritten with a control again', R + N + '\x1b[1;1H' + R + N, '1RLI', 'control'),
+            ('line erased after', R + N + '\x1b[2K', '', None),
+            ('cell erased before the text', 'x\x1b[1;1H' + R + '\x1b[K' + N, '1', 'plain'),
+            ('row erased before the text', 'x\r' + R + '\x1b[2K' + N, '1', 'plain'),
+            ('cursor moved away and back to the untouched cell', 'x\r' + R + '\x1b[1;5H\x1b[1;1H' + N, '1RLI', 'control'),
+            ('a cell written elsewhere first', R + '\x1b[1;6Hx\x1b[1;1H' + N, '1', None),
             ('control repeated', R + R + N, '1RLIRLI', None),
             ('wide first cell takes none', R + '中' + N, '中', None),
             ('combining mark after the control', R + 'a\u0301', 'aRLI\u0301', None),
-            ('a control after the first cell has nowhere to go', R + '1' + PDI + '2 34', '1RLI', None),
+            ('a PDI after the cell closes the opener before it', R + '1' + PDI + '2 34', '1', 'plain'),
+            ('an opener after the cell is dropped', R + '1' + '\u2066' + '2 34', '1RLI', None),
             ('lrm at column 0 keeps the g8 handling', LRM + N, '1', None),
             ('an embedding stays inert', '\u202b' + N, '1', None),
         )
@@ -4427,7 +4428,7 @@ class TestBidiReorder(BaseTest):
                 self.ae(self.lead_cell(s), chars)
                 if same is not None:
                     test_screen_update_cell_data(s)
-                    self.ae((self.v2l(s, 0), self.levels(s, 0)) == with_control, same)
+                    self.ae((self.v2l(s, 0), self.levels(s, 0)), with_control if same == 'control' else plain)
         with self.subTest('scrolled away before the text arrives'):
             s = self.screen(cols=n, lines=3)
             parse_bytes(s, b'a\r\nb\r\nx\r' + R.encode() + b'\n\x1b[3;1H' + N.encode())
@@ -4453,18 +4454,21 @@ class TestBidiReorder(BaseTest):
             s = self.screen(cols=n, lines=3)
             parse_bytes(s, (R + N).encode() + b'\x1b[1;1H\x1b[2@')
             self.ae(self.lead_cell(s, 0, 2), '1RLI')
-        with self.subTest('a narrow default emoji with VS16 after the control does not widen'):
+        with self.subTest('a narrow default emoji with VS16 after the control is widened'):
+            # the controls then read as trailing: the cell is a multicell
             s = self.screen(cols=n, lines=3)
             parse_bytes(s, (R + '\u2600\ufe0f').encode())
-            self.ae(self.lead_cell(s), '\u2600RLI\ufe0f')
-        with self.subTest('SARA AM widens a cell with leading controls in one write, not in a later one'):
-            s = self.screen(cols=n, lines=3)
-            parse_bytes(s, (R + 'ก\u0e33').encode())
-            self.ae(self.lead_cell(s), 'กRLI\u0e33')
-            s = self.screen(cols=n, lines=3)
-            parse_bytes(s, (R + 'ก').encode())
-            parse_bytes(s, '\u0e33'.encode())
-            self.ae((self.lead_cell(s, 0, 0), self.lead_cell(s, 0, 1)), ('กRLI', '\u0e33'))
+            self.ae((self.lead_cell(s), s.cursor.x), ('\u2600RLI\ufe0f', 2))
+        with self.subTest('SARA AM widens a cell with leading controls, in one write and in a later one'):
+            for chunks in ((R + 'ก\u0e33',), (R + 'ก', '\u0e33')):
+                s = self.screen(cols=n, lines=3)
+                for chunk in chunks:
+                    parse_bytes(s, chunk.encode())
+                self.ae((self.lead_cell(s, 0, 0), self.lead_cell(s, 0, 1), s.cursor.x), ('กRLI\u0e33', '', 2), chunks)
+        with self.subTest('controls kept on the bottom row do not follow a scroll over a blank row'):
+            s = self.screen(cols=n, lines=2)
+            parse_bytes(s, b'x\r\n' + R.encode() + b'\n' + N.encode())
+            self.ae(self.lead_cell(s, 1), '1')
 
     def test_leading_isolate_cap(self):
         # A leading control counts toward BIDI_MAX_ISOLATES like any other: RLI 12 34 PDI and 15 empty isolates, one over the cap
