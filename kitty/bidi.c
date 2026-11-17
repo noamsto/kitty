@@ -126,6 +126,36 @@ bidi_cells_may_reorder(const CPUCell *cells, index_type num, const TextCache *tc
     return false;
 }
 
+unsigned
+bidi_row_memo(const CPUCell *cells, index_type num, const TextCache *tc) {
+    char_type buf[MAX_NUM_CODEPOINTS_PER_CELL];
+    bool rtl = false;
+    for (const CPUCell *c = cells, *end = cells + num; c < end; c++) {
+        if (!c->ch_is_idx) {
+            rtl |= bidi_codepoint_may_reorder(c->ch_or_idx);
+            continue;
+        }
+        if (cell_isolates(c, tc, buf)) return BIDI_STAMP_ISOLATES;
+        if (!(c->is_multicell && (c->x || c->y))) rtl |= bidi_codepoint_may_reorder(tc_first_char_at_index(tc, c->ch_or_idx));
+    }
+    return rtl ? BIDI_STAMP_RTL : BIDI_STAMP_IMPLICIT;
+}
+
+int
+bidi_row_fold_isolates(const CPUCell *cells, index_type num, const TextCache *tc, int depth, bool *has_opener) {
+    char_type buf[MAX_NUM_CODEPOINTS_PER_CELL];
+    for (index_type x = 0; x < num; x++) {
+        for (unsigned i = 0, k = cell_isolates(cells + x, tc, buf); i < k; i++) {
+            if (buf[i] == 0x2069) depth -= depth > 0;
+            else {
+                depth++;
+                *has_opener = true;
+            }
+        }
+    }
+    return depth;
+}
+
 static bool
 ensure_scratch(BidiMaps *b, size_t cap) {
     if (b->cap >= cap) return true;

@@ -8,7 +8,16 @@ import struct
 import subprocess
 from collections import namedtuple
 
-from kitty.fast_data_types import BIDI_MAX_ISOLATES, CURSOR_BEAM, CURSOR_BLOCK, CURSOR_HOLLOW, CURSOR_UNDERLINE, get_options, test_screen_update_cell_data
+from kitty.fast_data_types import (
+    BIDI_MAX_ISOLATES,
+    BIDI_MAX_PARAGRAPH_ROWS,
+    CURSOR_BEAM,
+    CURSOR_BLOCK,
+    CURSOR_HOLLOW,
+    CURSOR_UNDERLINE,
+    get_options,
+    test_screen_update_cell_data,
+)
 from kitty.fonts.render import setup_for_testing
 
 from .base import BaseTest, draw_multicell, parse_bytes
@@ -3456,14 +3465,17 @@ class TestBidiReorder(BaseTest):
                         self.ae(s.test_cursor_visual(x, 0, shape), (x, False))
 
     def assert_cursor_at(self, s, x, beam, block, msg=''):
-        # the drawn cursor with it at logical x: beam is (column, mirrored), the other shapes share the block's column and are never mirrored
-        if s.cursor.x != x:
-            s.cursor_position(1, x + 1)
-        self.ae(s.cursor.x, x, msg)
+        self.assert_cursor_at_row(s, 0, x, beam, block, msg)
+
+    def assert_cursor_at_row(self, s, y, x, beam, block, msg=''):
+        # the drawn cursor with it at logical x of screen row y: beam is (column, mirrored), the other shapes share the block's column and are never mirrored
+        if (s.cursor.y, s.cursor.x) != (y, x):
+            s.cursor_position(y + 1, x + 1)
+        self.ae((s.cursor.y, s.cursor.x), (y, x), msg)
         test_screen_update_cell_data(s)
-        self.ae((s.test_cursor_visual(x, 0, CURSOR_BEAM), s.test_cursor_render(CURSOR_BEAM)), (beam, beam), msg)
+        self.ae((s.test_cursor_visual(x, y, CURSOR_BEAM), s.test_cursor_render(CURSOR_BEAM)), (beam, beam), msg)
         for shape in (CURSOR_BLOCK, CURSOR_UNDERLINE, CURSOR_HOLLOW):
-            self.ae(s.test_cursor_visual(x, 0, shape), (block, False), msg)
+            self.ae(s.test_cursor_visual(x, y, shape), (block, False), msg)
         for shape in (CURSOR_BLOCK, CURSOR_UNDERLINE):
             self.ae(s.test_cursor_render(shape), (block, False), msg)
         self.ae(s.test_cursor_render_x(), block, msg)
@@ -3639,6 +3651,516 @@ class TestBidiReorder(BaseTest):
                 else:
                     self.ae(got_levels[: len(levels)], levels)
                 self.assert_cursor_at(s, x, beam, block)
+
+    PROMPT_ROW = PUA + b' \xe2\x81\xa8'  # the prompt `PUA SP FSI`: the FSI joins the space's cell and is never closed
+    CONTINUE = b'\r\n\x1b[K\x1b[2C'  # fish's Shift+Enter: the next row, erased and indented by two cells
+    OSC133_A, OSC133_B, OSC133_C = b'\x1b]133;A;click_events=1\x1b\\', b'\x1b]133;B\x1b\\', b'\x1b]133;C\x1b\\'
+
+    def fish_repaint(self, text, col=2):
+        # fish repaints typed text char by char: CR, CUF to the char's column, the char. A word's first letter and every space is
+        # written a second time, over itself after a backspace. The cursor ends at the column after the text.
+        out, word_start = b'', True
+        for ch in text:
+            out += f'\r\x1b[{col}C{ch}'.encode()
+            if word_start or ch == ' ':
+                out += f'\r\x1b[{col + 1}C\x08{ch}'.encode()
+            word_start = ch == ' '
+            col += 1
+        return out + f'\r\x1b[{col}C'.encode()
+
+    def shell_rows(self, form, rows):
+        # the bytes for a prompt row with rows[0] typed after it and each later row a continuation line indented by two cells.
+        # plain: the text drawn as is. fish: the repaint idiom. tmux: every row placed with CUP, the indent cells never written.
+        first, *rest = rows
+        if form == 'tmux':
+            return b'\x1b[1;1H' + self.PROMPT_ROW + first.encode() + b''.join(
+                f'\x1b[{i + 2};3H{row}'.encode() for i, row in enumerate(rest))
+        if form == 'fish':
+            return self.PROMPT_ROW + b'\x1b[K' + self.fish_repaint(first) + b''.join(self.CONTINUE + self.fish_repaint(row) for row in rest)
+        return self.PROMPT_ROW + first.encode() + b''.join(self.CONTINUE + row.encode() for row in rest)
+
+    def replay_bytes(self, data, cols=40, lines=6):
+        s = self.screen(cols=cols, lines=lines)
+        parse_bytes(s, self.AUTO + data)
+        test_screen_update_cell_data(s)
+        return s
+
+    def test_continuation_rows_in_prompt_isolate(self):
+        # A row below the prompt's row is a hard break, but the prompt's FSI is still open, so the rows are one paragraph under the
+        # prompt's LTR base (U+F023A is class L) and the row lies inside the FSI's isolate, which takes its direction from the first
+        # strong letter after it. The indent cells are blanks inside the isolate, a blank between two letters follows N1, and L1 sets
+        # the blanks at the end of a row to the paragraph level. Layouts are the UAX#9 result for the joined text with each row as a
+        # line (checked with libfribidi), not what kitty printed, except for typed blanks after a letter in the last row, which keep
+        # the letter's level by kitty's own rule instead of L1's.
+        F, T = False, True
+        n = 40
+        ident = tuple(range(n))
+
+        def v(*head):
+            return head + ident[len(head):]
+
+        def lv(*head):
+            return head + (0,) * (n - len(head))
+
+        H1, H2, H3 = 'שלום', 'שורה שניה', 'עוד שורה'
+        # row 1 under a first strong 'h': an LTR isolate at level 2; under a Hebrew first letter: an RTL one, the word at level 1
+        english = (ident, lv(0, 0, 2, 2, 2, 2, 2))
+        hebrew = (v(0, 1, 5, 4, 3, 2), lv(0, 0, 1, 1, 1, 1))
+        # (name, rows, (v2l, levels) of each row, (cursor row, cursor x, beam, block column))
+        # The cursor is where the next letter of the run goes. A Hebrew run at level 3 starting at column 2 grows leftwards in
+        # place, so its next letter takes column 2 and the beam is on that column's left edge, drawn mirrored in column 1.
+        cases = (
+            (
+                'english, hebrew', ('hello', H2),
+                (english, (v(0, 1, *range(10, 1, -1)), lv(2, 2, *(3,) * 9))),
+                (1, 11, (1, T), 1),
+            ),
+            # the isolate is RTL: indent and text are one run at level 1 (N1 between two R), so the indent lands right of the text.
+            # The run starts at column 0, the beam on its left edge, which is the left edge of the row.
+            (
+                'hebrew, hebrew', (H1, H2),
+                (hebrew, (v(*range(10, -1, -1)), lv(*(1,) * 11))),
+                (1, 11, (0, F), 0),
+            ),
+            # the English at level 2 inside the RTL isolate's level 1; the blanks between the Hebrew and the English are R (N2)
+            (
+                'hebrew, english', (H1, 'hello'),
+                (hebrew, (v(2, 3, 4, 5, 6, 1, 0), lv(1, 1, 2, 2, 2, 2, 2))),
+                (1, 7, (5, F), 5),
+            ),
+            # the second Hebrew row's indent lies between two Hebrew letters, so it joins their run at level 3. The first Hebrew
+            # row's trailing blanks are at the paragraph level, as at the end of any line
+            (
+                'english, hebrew, hebrew', ('hello', H2, H3),
+                (english, (v(0, 1, *range(10, 1, -1)), lv(2, 2, *(3,) * 9)), (v(*range(9, -1, -1)), lv(*(3,) * 10))),
+                (2, 10, (0, F), 0),
+            ),
+            # the typed space after the letter takes the letter's level (kitty's rule), so the run grows over it
+            (
+                'english, hebrew and a typed space', ('hello', H2 + ' '),
+                (english, (v(0, 1, *range(11, 1, -1)), lv(2, 2, *(3,) * 10))),
+                (1, 12, (1, T), 1),
+            ),
+            # An empty line of the command is a row never written: it joins like any other. As a line of blanks it is all at the
+            # paragraph level (L1). Under 'h' the blanks from 'o' to the Hebrew are between L and R, so take the isolate's L (N2):
+            # the third row is laid out as the second row of 'english, hebrew'
+            (
+                'english, empty line, hebrew', ('hello', '', H2),
+                (english, (ident, lv()), (v(0, 1, *range(10, 1, -1)), lv(2, 2, *(3,) * 9))),
+                (2, 11, (1, T), 1),
+            ),
+            # under a Hebrew first letter the blanks from the first Hebrew word to the next are between two R, so R at level 1 (N1):
+            # the third row is laid out as the second row of 'hebrew, hebrew'
+            (
+                'hebrew, empty line, hebrew', (H1, '', H2),
+                (hebrew, (ident, lv()), (v(*range(10, -1, -1)), lv(*(1,) * 11))),
+                (2, 11, (0, F), 0),
+            ),
+        )
+        for name, rows, layouts, (cy, cx, beam, block) in cases:
+            for form in ('plain', 'fish', 'tmux'):
+                with self.subTest(name, form=form):
+                    s = self.replay_bytes(self.shell_rows(form, rows))
+                    self.ae((s.cursor.y, s.cursor.x), (cy, cx))
+                    for y, (v2l, levels) in enumerate(layouts):
+                        self.assert_obs(self.obs(s, y), v2l, levels, False, f'row {y + 1}')
+                    self.assert_cursor_at_row(s, cy, cx, beam, block)
+
+    def test_blank_rows_below_prompt_isolate(self):
+        # A row without text is passed through whether it is stamped (written, then erased) or not: blank rows below the last
+        # text row join nothing, so the typed space keeps its letter's level as on a single row, and a blank row between two
+        # text rows of a group joins them
+        T = True
+        n = 40
+        ident = tuple(range(n))
+
+        def v(*head):
+            return head + ident[len(head):]
+
+        def lv(*head):
+            return head + (0,) * (n - len(head))
+
+        H2 = 'שורה שניה'
+        english = (ident, lv(0, 0, 2, 2, 2, 2, 2))
+
+        def write_and_erase(form, y):
+            # text written on row y and erased again, the cursor put back: plain erases the line, tmux erases to its end from column 0
+            erase = b'\x1b[2K' if form == 'plain' else f'\x1b[{y + 1};1H\x1b[K'.encode()
+            return b'\x1b7' + f'\x1b[{y + 1};1Hxyz'.encode() + erase + b'\x1b8'
+
+        # (name, rows, blank row, stamped, (v2l, levels) of each row, (cursor row, cursor x, beam, block column))
+        cases = (
+            ('typed space', ('אני ',), 1, True, ((v(0, 1, 5, 4, 3, 2), lv(0, 0, 1, 1, 1, 1)),), (0, 6, (1, T), 1)),
+            ('typed space, unstamped row below', ('אני ',), 1, False, ((v(0, 1, 5, 4, 3, 2), lv(0, 0, 1, 1, 1, 1)),), (0, 6, (1, T), 1)),
+            (
+                'typed space on a continuation row', ('hello', H2 + ' '), 2, True,
+                (english, (v(0, 1, *range(11, 1, -1)), lv(2, 2, *(3,) * 10))), (1, 12, (1, T), 1),
+            ),
+            (
+                'typed space on a continuation row, unstamped row below', ('hello', H2 + ' '), 2, False,
+                (english, (v(0, 1, *range(11, 1, -1)), lv(2, 2, *(3,) * 10))), (1, 12, (1, T), 1),
+            ),
+            (
+                'blank row between two rows', ('hello', '', H2), 1, True,
+                (english, (ident, lv()), (v(0, 1, *range(10, 1, -1)), lv(2, 2, *(3,) * 9))), (2, 11, (1, T), 1),
+            ),
+        )
+        for name, rows, blank, stamped, layouts, (cy, cx, beam, block) in cases:
+            for form in ('plain', 'tmux'):
+                with self.subTest(name, form=form):
+                    data = self.shell_rows(form, rows) + (write_and_erase(form, blank) if stamped else b'')
+                    s = self.replay_bytes(data)
+                    self.ae(str(s.line(blank)), '')
+                    self.ae(bool(s.test_bidi_line_record(blank)[0]), stamped)
+                    self.ae((s.cursor.y, s.cursor.x), (cy, cx))
+                    for y, (v2l, levels) in enumerate(layouts):
+                        self.assert_obs(self.obs(s, y), v2l, levels, False, f'row {y + 1}')
+                    self.assert_cursor_at_row(s, cy, cx, beam, block)
+
+    def test_output_rows_after_prompt_isolate(self):
+        # What stays as it is: a row that is not a continuation of an open isolate is its own paragraph, auto-RTL when it has only
+        # Hebrew, so right-aligned with every cell at level 1
+        n = 40
+        rtl_row = (tuple(range(n - 1, -1, -1)), (1,) * n, True)
+        ltr_row = (tuple(range(n)), None, False)
+        H1, H2, H3 = 'שלום', 'שורה שניה', 'עוד שורה'
+        PDI = '⁩'.encode()
+        # a row after an explicit record: LTR under 2501 off, the Hebrew at level 1 and the indent at 0
+        head = tuple(range(2)) + tuple(range(10, 1, -1)) + tuple(range(11, n))
+        ltr_hebrew = (head, (0, 0) + (1,) * 9 + (0,) * (n - 11), False)
+        prompt = self.PROMPT_ROW + b'hello'
+        cases = (
+            ('output after OSC 133 C', prompt + b'\r\n' + self.OSC133_C + H1.encode() + b'\r\n' + H3.encode(), (ltr_row, rtl_row, rtl_row)),
+            (
+                'output after OSC 133 A, B and C',
+                self.OSC133_A + self.PROMPT_ROW + self.OSC133_B + b'hello\r\n' + self.OSC133_C + H1.encode(),
+                (ltr_row, rtl_row),
+            ),
+            ('output row after a PDI', prompt + PDI + self.CONTINUE + H2.encode(), (ltr_row, rtl_row)),
+            ('output row at column 0 after a PDI', prompt + PDI + b'\r\n' + H1.encode(), (ltr_row, rtl_row)),
+            # its own LTR paragraph from 'w', the Hebrew at level 1; joined into a still open isolate it would be at level 3
+            (
+                'english and hebrew output after a PDI', prompt + PDI + self.CONTINUE + b'world ' + H1.encode(),
+                (ltr_row, (tuple(range(8)) + (11, 10, 9, 8) + tuple(range(12, n)), (0,) * 8 + (1,) * 4 + (0,) * (n - 12), False)),
+            ),
+            # an empty row joins nothing by itself: the output row after it is still cut by the PDI or the mark
+            ('output row after a PDI and an empty row', prompt + PDI + self.CONTINUE + self.CONTINUE + H2.encode(), (ltr_row, ltr_row, rtl_row)),
+            ('output after an empty row and OSC 133 C', prompt + b'\r\n\r\n' + self.OSC133_C + H1.encode(), (ltr_row, ltr_row, rtl_row)),
+            ('output after an empty row marked by OSC 133 C', prompt + b'\r\n' + self.OSC133_C + b'\r\n' + H1.encode(), (ltr_row, ltr_row, rtl_row)),
+            (
+                'hebrew first row closed by a PDI', self.PROMPT_ROW + H1.encode() + PDI + b'\r\n' + H3.encode(),
+                ((tuple(range(2)) + (5, 4, 3, 2) + tuple(range(6, n)), (0, 0, 1, 1, 1, 1) + (0,) * (n - 6), False), rtl_row),
+            ),
+            (
+                'three rows closed by a PDI', prompt + PDI + self.CONTINUE + H2.encode() + self.CONTINUE + H3.encode(),
+                (ltr_row, rtl_row, rtl_row),
+            ),
+            ('row under another record, 2501 off', prompt + b'\r\n\x1b[?2501l\x1b[K\x1b[2C' + H2.encode(), (ltr_row, ltr_hebrew)),
+            ('row under another record, RTL', prompt + b'\r\n\x1b[2 k\x1b[K\x1b[2C' + H2.encode(), (ltr_row, rtl_row)),
+        )
+        for name, data, layouts in cases:
+            with self.subTest(name):
+                s = self.replay_bytes(data)
+                for y, (v2l, levels, rtl) in enumerate(layouts):
+                    self.assert_obs(self.obs(s, y), v2l, levels, rtl, f'row {y + 1}')
+
+    def test_continuation_stops_at_output_start(self):
+        # with the shell's marks, the rows between the prompt (A) and the output (C) join, the output after C does not
+        n = 40
+        ident = tuple(range(n))
+        data = (
+            self.OSC133_A + self.PROMPT_ROW + self.OSC133_B + b'hello' + self.CONTINUE + 'שורה שניה'.encode()
+            + b'\r\n' + self.OSC133_C + 'עוד שורה'.encode()
+        )
+        s = self.replay_bytes(data)
+        with self.subTest('rows between the marks join'):
+            self.assert_obs(self.obs(s, 0), ident, (0, 0, 2, 2, 2, 2, 2) + (0,) * (n - 7), False)
+            self.assert_obs(self.obs(s, 1), (0, 1) + tuple(range(10, 1, -1)) + ident[11:], (2, 2) + (3,) * 9 + (0,) * (n - 11), False)
+        with self.subTest('the output does not'):
+            self.assert_obs(self.obs(s, 2), ident[::-1], (1,) * n, True)
+
+    FSI, PDI = '⁨', '⁩'
+
+    def obs(self, s, y):
+        # (v2l, levels, paragraph rtl) of screen row y, None for a row without a map; the screens here have no pixel scroll
+        r = self.rr(s, y)
+        return s.test_bidi_v2l(r), self.lv(s, y), s.test_bidi_paragraph_rtl(r)
+
+    def assert_obs(self, got, v2l, levels, rtl, msg=''):
+        # a row without a map is the identity at the paragraph level, so its levels are only checked when it has one
+        v2l_got, levels_got, rtl_got = got
+        self.ae(tuple(range(len(v2l))) if v2l_got is None else v2l_got, v2l, msg)
+        if levels_got is not None and levels is not None:
+            self.ae(levels_got, levels, msg)
+        self.ae(bool(rtl_got), rtl, msg)
+
+    def view_obs(self, s):
+        # {absolute line: obs} of the rows on view; absolute line 0 is the oldest history row
+        test_screen_update_cell_data(s)
+        top = s.historybuf.count - s.scrolled_by
+        return {top + y: self.obs(s, y) for y in range(s.lines)}
+
+    def sweep(self, s, positions):
+        # {absolute line: {obs: [scrolled_by]}} over the scroll positions, back at the bottom afterwards
+        seen = {}
+        for sb in positions:
+            s.scroll(s.historybuf.count, False)
+            if sb:
+                s.scroll(sb, True)
+            self.ae(s.scrolled_by, min(sb, s.historybuf.count))
+            for line, ob in self.view_obs(s).items():
+                seen.setdefault(line, {}).setdefault(ob, []).append(sb)
+        s.scroll(s.historybuf.count, False)
+        return seen
+
+    def settled(self, seen):
+        # the one obs of each line, failing when a line is laid out differently at two scroll positions
+        for line, by_obs in seen.items():
+            self.ae(len(by_obs), 1, f'line {line} differs by scroll position: {dict(enumerate(by_obs.values()))}')
+        return {line: next(iter(by_obs)) for line, by_obs in seen.items()}
+
+    def test_continuation_group_relaid_when_the_row_above_is_edited(self):
+        # The group's extent is part of the cache key: a row below the edited one is clean, but its paragraph changes with the edit
+        n = 40
+        ident = tuple(range(n))
+        H2 = 'שורה שניה'
+        joined = (0, 1) + tuple(range(10, 1, -1)) + ident[11:], (2, 2) + (3,) * 9 + (0,) * (n - 11), False
+        own = ident[::-1], (1,) * n, True
+        row1 = ident, None, False
+        for form in ('plain', 'fish', 'tmux'):
+            with self.subTest(form=form):
+                s = self.replay_bytes(self.shell_rows(form, ('hello', H2)))
+                self.assert_obs(self.obs(s, 1), *joined, 'before')
+                # a plain space over the cell of the space and the FSI: row 2 is not written
+                parse_bytes(s, b'\x1b[1;2H ')
+                test_screen_update_cell_data(s)
+                self.assert_obs(self.obs(s, 0), *row1, 'FSI removed, row 1')
+                self.assert_obs(self.obs(s, 1), *own, 'FSI removed, row 2')
+                parse_bytes(s, b'\x1b[1;2H \xe2\x81\xa8')
+                test_screen_update_cell_data(s)
+                self.assert_obs(self.obs(s, 1), *joined, 'FSI back')
+
+    def test_continuation_group_scrolled_into_history(self):
+        # The opener moves into the history by linefeeds; the rows still on screen keep their layout, and unchanged frames resolve nothing
+        n = 40
+        ident = tuple(range(n))
+        H2, H3 = 'שורה שניה', 'עוד שורה'
+        first = ident, (0, 0, 2, 2, 2, 2, 2) + (0,) * (n - 7), False
+        second = (0, 1) + tuple(range(10, 1, -1)) + ident[11:], (2, 2) + (3,) * 9 + (0,) * (n - 11), False
+        third = tuple(range(9, -1, -1)) + ident[10:], (3,) * 10 + (0,) * (n - 10), False
+        for form in ('plain', 'tmux'):
+            with self.subTest(form=form):
+                s = self.screen(cols=n, lines=4, scrollback=20, pixel_scroll=False)
+                parse_bytes(s, self.AUTO + self.shell_rows(form, ('hello', H2, H3)))
+                for linefeeds in range(5):
+                    if linefeeds:
+                        parse_bytes(s, b'\r\n')
+                    self.frame(s)
+                    top = s.historybuf.count
+                    self.ae(top, max(0, linefeeds - 1), 'linefeeds scrolled the rows into the history')
+                    seen = self.view_obs(s)
+                    for line, want in ((0, first), (1, second), (2, third)):
+                        if line in seen:
+                            self.assert_obs(seen[line], *want, f'{linefeeds} linefeeds, line {line}')
+                    self.ae(self.frame(s), (0, 0), 'an unchanged frame resolves nothing')
+                # every position of the view sees the same layout of the three rows
+                settled = self.settled(self.sweep(s, range(s.historybuf.count + 1)))
+                for line, want in ((0, first), (1, second), (2, third)):
+                    self.assert_obs(settled[line], *want, f'line {line}')
+        with self.subTest('opener evicted from the history'):
+            # a ring of three history rows: after three linefeeds it holds the opener and the two rows, after four the opener is gone
+            # and the rows revert to a paragraph each, the Hebrew ones auto-RTL
+            own = ident[::-1], (1,) * n, True
+            for linefeeds, want in ((3, (first, second, third)), (4, (own, own))):
+                with self.subTest(linefeeds=linefeeds):
+                    s = self.screen(cols=n, lines=3, scrollback=3, pixel_scroll=False)
+                    parse_bytes(s, self.AUTO + self.shell_rows('plain', ('hello', H2, H3)) + b'\r\n' * linefeeds)
+                    self.ae(s.historybuf.count, 3)
+                    s.scroll(3, True)
+                    seen = self.view_obs(s)
+                    for line, ob in enumerate(want):
+                        self.assert_obs(seen[line], *ob, f'{linefeeds} linefeeds, line {line}')
+
+    def test_pdi_typed_on_a_continuation_row_ends_the_group(self):
+        n = 40
+        ident = tuple(range(n))
+        H2, H3 = 'שורה שניה', 'עוד שורה'
+        # the PDI joins the cell of the last letter, which keeps its level
+        second = (0, 1) + tuple(range(10, 1, -1)) + ident[11:], (2, 2) + (3,) * 9 + (0,) * (n - 11), False
+        third = ident[::-1], (1,) * n, True
+        for form in ('plain', 'tmux'):
+            with self.subTest(form=form):
+                s = self.replay_bytes(self.shell_rows(form, ('hello', H2 + self.PDI, H3)))
+                self.assert_obs(self.obs(s, 1), *second, 'row 2')
+                self.assert_obs(self.obs(s, 2), *third, 'row 3')
+
+    def group_screen(self, continuation_rows):
+        # three plain rows, a prompt row with a continuation_rows Hebrew rows under its FSI, a prompt closing its isolate on its own
+        # row, then twelve Hebrew rows. 20 columns, 10 lines: all but the last rows are in the history.
+        s = self.screen(cols=20, lines=10, scrollback=2000, pixel_scroll=False)
+        parse_bytes(s, self.AUTO + b'one\r\ntwo\r\nthree\r\n' + self.PROMPT_ROW + b'hello')
+        parse_bytes(s, (b'\r\n\x1b[2C' + 'שורה'.encode()) * continuation_rows)
+        parse_bytes(s, b'\r\n' + self.PROMPT_ROW + b'x' + self.PDI.encode())
+        parse_bytes(s, (b'\r\n' + 'שורה'.encode()) * 12)
+        return s
+
+    def test_group_extent_independent_of_scroll_position(self):
+        # A group is capped at BIDI_MAX_PARAGRAPH_ROWS rows from its opener, whatever row the walker starts from: every row of the
+        # group has the same layout at every scroll position, across the 128 and 256 row marks of the window
+        n = 20
+        ident = tuple(range(n))
+        cap = BIDI_MAX_PARAGRAPH_ROWS
+        first_cont = (0, 1, 5, 4, 3, 2) + ident[6:], (2, 2, 3, 3, 3, 3) + (0,) * (n - 6), False
+        later_cont = (5, 4, 3, 2, 1, 0) + ident[6:], (3,) * 6 + (0,) * (n - 6), False
+        standalone = ident[::-1], (1,) * n, True
+        prompt = 3  # the absolute line of the prompt row
+        for rows in (cap // 2 + 2, cap + 44):
+            with self.subTest(continuation_rows=rows):
+                s = self.group_screen(rows)
+                settled = self.settled(self.sweep(s, range(s.historybuf.count + 1)))
+                self.ae(len(settled), s.historybuf.count + s.lines)
+                self.assert_obs(settled[prompt], ident, (0, 0, 2, 2, 2, 2, 2) + (0,) * (n - 7), False)
+                self.assert_obs(settled[prompt + 1], *first_cont, 'first continuation row')
+                # the group is the prompt row and cap - 1 rows below it
+                last_in_group = prompt + min(rows, cap - 1)
+                for line in range(prompt + 2, last_in_group + 1):
+                    self.assert_obs(settled[line], *later_cont, f'line {line}')
+                # the rows after the cap are standalone auto-RTL paragraphs, as are the output rows after the closed isolate
+                for line in range(last_in_group + 1, prompt + rows + 1):
+                    self.assert_obs(settled[line], *standalone, f'line {line} is past the cap')
+                closed = prompt + rows + 1
+                for line in range(closed + 1, closed + 13):
+                    self.assert_obs(settled[line], *standalone, f'output line {line}')
+
+    def test_wrapped_prompt_below_open_group_starts_its_own_group(self):
+        # The second prompt wraps and has its FSI on the chain's second row: the chain holds an opener, so no row of it joins the
+        # group above, however the view cuts the chain
+        n = 20
+        ident = tuple(range(n))
+        s = self.screen(cols=n, lines=4, scrollback=50, pixel_scroll=False)
+        parse_bytes(s, self.AUTO + self.PROMPT_ROW + b'hello')
+        parse_bytes(s, (b'\r\n\x1b[2C' + 'שורה'.encode()) * 3)
+        parse_bytes(s, b'\r\n' + b'p' * n + b' \xe2\x81\xa8' + 'שלום'.encode() + b'\r\n\x1b[2C' + 'שורה'.encode())
+        parse_bytes(s, b'\r\nabc' * 6)
+        settled = self.settled(self.sweep(s, range(s.historybuf.count + 1)))
+        group = (0, 1, 5, 4, 3, 2) + ident[6:], (2, 2, 3, 3, 3, 3) + (0,) * (n - 6), False
+        self.assert_obs(settled[1], *group, 'first continuation row of the first group')
+        for line in (2, 3):
+            self.assert_obs(settled[line], (5, 4, 3, 2, 1, 0) + ident[6:], (3,) * 6 + (0,) * (n - 6), False, f'line {line}')
+        self.assert_obs(settled[4], ident, None, False, 'first row of the wrapped chain')
+        # the wrapped chain's FSI isolate starts at its Hebrew word, which is RTL; the indent row is inside it
+        self.assert_obs(settled[5], (0, 4, 3, 2, 1) + ident[5:], (0, 1, 1, 1, 1) + (0,) * (n - 5), False, 'second row of the wrapped chain')
+        self.assert_obs(settled[6], (5, 4, 3, 2, 1, 0) + ident[6:], (1,) * 6 + (0,) * (n - 6), False, 'continuation of the wrapped chain')
+        for line in range(7, 13):
+            self.assert_obs(settled[line], ident, None, False, f'line {line}')
+
+    def test_history_without_marks_with_many_prompts(self):
+        # More prompt and output cycles than BIDI_MAX_ISOLATES, no OSC 133 marks (as through tmux, but the rows written in turn, not
+        # placed by CUP), every fourth command closing its isolate. The groups do not chain across prompts, so the live prompt keeps
+        # the layout it has alone: its FSI is fed and its typed space is kept.
+        cycles = BIDI_MAX_PARAGRAPH_ROWS // 3 + BIDI_MAX_ISOLATES
+        n = 24
+        ident = tuple(range(n))
+        s = self.screen(cols=n, lines=8, scrollback=500, pixel_scroll=False)
+        parse_bytes(s, self.AUTO)
+        for i in range(cycles):
+            parse_bytes(s, self.PROMPT_ROW + b'ls' + (self.PDI.encode() if i % 4 == 0 else b'') + b'\r\n')
+            parse_bytes(s, 'שלום עולם'.encode() + b'\r\nfile.txt\r\n')
+        parse_bytes(s, self.PROMPT_ROW + 'אני '.encode())
+        self.assertGreater(s.historybuf.count, BIDI_MAX_PARAGRAPH_ROWS)
+        y = s.cursor.y
+        self.ae(s.cursor.x, 6)
+        test_screen_update_cell_data(s)
+        self.ae((s.test_bidi_v2l(y)[:7], self.lv(s, y)[:7]), ((0, 1, 5, 4, 3, 2, 6), (0, 0, 1, 1, 1, 1, 0)))
+        self.assert_cursor_at_row(s, y, 6, (1, True), 1)
+        for _ in range(2):
+            self.ae(self.frame(s), (0, 0), 'an unchanged frame resolves and renders nothing')
+        settled = self.settled(self.sweep(s, range(s.historybuf.count + 1)))
+        standalone = ident[::-1], (1,) * n, True
+        for i in range(cycles):
+            self.assert_obs(settled[3 * i + 2], ident, None, False, f'cycle {i}, file.txt')
+            if i % 4 == 0:
+                self.assert_obs(settled[3 * i + 1], *standalone, f'cycle {i}, output after a closed isolate')
+            else:
+                # an isolate left open: the output joins it until the next prompt's FSI starts another group (a shell that
+                # closes the isolate when the command runs would get the layout above)
+                self.assert_obs(settled[3 * i + 1], (8, 7, 6, 5, 4, 3, 2, 1, 0) + ident[9:], (3,) * 9 + (0,) * (n - 9), False, f'cycle {i}, output')
+
+    def test_paused_frame_keeps_the_group_layout_it_can_see(self):
+        n = 20
+        ident = tuple(range(n))
+        s = self.screen(cols=n, lines=6, scrollback=50, pixel_scroll=False)
+        parse_bytes(s, self.AUTO + self.PROMPT_ROW + b'hello')
+        for text in ('שלום', 'abc', 'עולם'):
+            parse_bytes(s, b'\r\n\x1b[2C' + text.encode())
+        english = ident, (2, 2, 2, 2, 2) + (0,) * (n - 5), False
+        group = [
+            (ident, (0, 0, 2, 2, 2, 2, 2) + (0,) * (n - 7), False),
+            ((0, 1, 5, 4, 3, 2) + ident[6:], (2, 2, 3, 3, 3, 3) + (0,) * (n - 6), False),
+            english,
+            ((0, 1, 5, 4, 3, 2) + ident[6:], (2, 2, 3, 3, 3, 3) + (0,) * (n - 6), False),
+        ]
+        live = self.view_obs(s)
+        for y, want in enumerate(group):
+            self.assert_obs(live[y], *want, f'live row {y}')
+        s.pause_rendering(True, 100000)
+        paused = self.view_obs(s)
+        self.ae(paused, live, 'the paused frame sees the opener')
+        s.pause_rendering(False)
+        self.ae(self.view_obs(s), live)
+
+    def test_paused_frame_cut_through_a_group_reverts_to_rows(self):
+        # The snapshot's top row is the group's third row: its opener is not in the snapshot, so each row is a paragraph of its own,
+        # Hebrew rows auto-RTL and an English row after a Hebrew row LTR; the live rows keep the group
+        n = 20
+        ident = tuple(range(n))
+        s = self.screen(cols=n, lines=4, scrollback=50, pixel_scroll=False)
+        parse_bytes(s, self.AUTO + self.PROMPT_ROW + b'hello')
+        for text in ('שלום', 'abc', 'עולם', 'עוד', 'def'):
+            parse_bytes(s, b'\r\n\x1b[2C' + text.encode())
+        self.ae(s.historybuf.count, 2)
+        english = ident, (2, 2, 2, 2, 2) + (0,) * (n - 5), False
+        live = [
+            english,
+            ((0, 1, 5, 4, 3, 2) + ident[6:], (2, 2, 3, 3, 3, 3) + (0,) * (n - 6), False),
+            ((4, 3, 2, 1, 0) + ident[5:], (3,) * 5 + (0,) * (n - 5), False),
+            english,
+        ]
+        own = [(ident, None, False), (ident[::-1], (1,) * n, True), (ident[::-1], (1,) * n, True), (ident, None, False)]
+        for y, want in enumerate(live):
+            self.assert_obs(self.view_obs(s)[2 + y], *want, f'live row {y}')
+        s.pause_rendering(True, 100000)
+        paused = self.view_obs(s)
+        for y, want in enumerate(own):
+            self.assert_obs(paused[2 + y], *want, f'paused row {y}')
+        s.pause_rendering(False)
+        for y, want in enumerate(live):
+            self.assert_obs(self.view_obs(s)[2 + y], *want, f'unpaused row {y}')
+
+    def test_english_isolate_rows_do_not_call_fribidi(self):
+        # An isolate opened by the prompt and English rows below it have nothing to reorder, so no frame resolves anything
+        for rows in (('hello', 'world'), ('hello', 'world', 'again'), ('hello world', '')):
+            for form in ('plain', 'tmux'):
+                with self.subTest(rows=rows, form=form):
+                    s = self.replay_bytes(self.shell_rows(form, rows))
+                    self.ae(s.test_bidi_counts()[0], 0)
+                    parse_bytes(s, b'\x1b[2;3Hx' + self.PDI.encode() + b'\r\nabc')
+                    self.ae(self.frame(s)[0], 0)
+        with self.subTest('control'):
+            s = self.replay_bytes(self.shell_rows('plain', ('hello', 'שלום')))
+            self.assertGreater(s.test_bidi_counts()[0], 0)
+
+    def test_continuation_under_a_hebrew_first_line(self):
+        # Row 1 holds the FSI and a Hebrew word only. P2 skips the isolate, so row 1's paragraph is LTR, the isolate is RTL, and
+        # row 2 inside it is right-to-left from its indent on.
+        n = 40
+        ident = tuple(range(n))
+        for form in ('plain', 'tmux'):
+            with self.subTest(form=form):
+                data = self.shell_rows(form, ('שלום', 'שורה שניה')).replace(self.PROMPT_ROW, b' \xe2\x81\xa8')
+                s = self.replay_bytes(data)
+                self.assert_obs(self.obs(s, 0), (0, 4, 3, 2, 1) + ident[5:], (0, 1, 1, 1, 1) + (0,) * (n - 5), False, 'row 1')
+                self.assert_obs(self.obs(s, 1), tuple(range(10, -1, -1)) + ident[11:], (1,) * 11 + (0,) * (n - 11), False, 'row 2')
 
     def test_beam_mirror_drawn_shape(self):
         # An unfocused cursor drawn as a block is not mirrored even when the cursor shape is a beam
