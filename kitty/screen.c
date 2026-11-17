@@ -5284,7 +5284,6 @@ bidi_boundary_may_join(const BidiRows *src, int y, int end) {
         const unsigned kind = bidi_row_attrs(src, r)->prompt_kind;
         if (kind == PROMPT_START || kind == OUTPUT_START) return false;
     }
-    // Rule 6
     if (bidi_row_starts_with_pdi(bidi_row_cells(src, end), src->linebuf->xnum, src->screen->text_cache)) return false;
     int record;
     if (!bidi_record_row(src, y, &record)) return false;
