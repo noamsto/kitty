@@ -69,7 +69,7 @@ def osc66_controls(text, control_as=None):
     return ''.join(f'\x1b]66;w=1;{control_as or ch}\x07' if ch in BIDI_CONTROLS else ch for ch in text).encode()
 
 
-# Isolate regions (#55)
+# Isolate regions
 FSI, LRI, RLI, PDI = '⁨', '⁦', '⁧', '⁩'
 REGION_GUTTER = ('   12 ' + FSI + 'שלום world' + PDI).encode()
 REGION_GUTTER_V2L = tuple(range(6)) + (11, 12, 13, 14, 15, 10, 9, 8, 7, 6) + tuple(range(16, 20))
@@ -4518,7 +4518,7 @@ class TestBidiReorder(BaseTest):
             parse_bytes(s, ('⁦' * (BIDI_MAX_LEAD + 3) + 'a').encode())
             self.ae(len(s.cpu_cells(0)[0]['text']), 1 + BIDI_MAX_LEAD)
 
-    # Isolate regions (#55)
+    # Isolate regions
 
     def alt(self, cols, lines=3):
         # the alternate screen, BDSM never sent
@@ -4625,7 +4625,7 @@ class TestBidiReorder(BaseTest):
                 self.assert_region(s, 1, (5, 4, 3, 2, 1, 0) + ID(6, 10), (1, 1, 1, 1, 1, 2) + (0,) * 4)
 
     def test_region_column_0_one_cell_then_region(self):
-        # #54's closing-PDI rule cancels a one-cell isolate written at column 0 (a cell's leading controls hold no PDI), so cell 0
+        # The closing-PDI rule of leading controls cancels a one-cell isolate written at column 0 (a cell's leading controls hold no PDI), so cell 0
         # stays at level 0, unlike the same isolate at another column
         s = self.alt(10)
         parse_bytes(s, (FSI + 'א' + PDI + ' ' + FSI + 'בג' + PDI).encode())
@@ -4877,7 +4877,7 @@ class TestBidiReorder(BaseTest):
         s = self.alt(12)
         parse_bytes(s, ('\x1b[8h' + 'ab' + RLI + 'שלום').encode())
         parse_bytes(s, ('\x1b[8l\x1b[1;9H' + PDI + 'xyz').encode())
-        # a stamped row drops a control written with BDSM off, as base does, instead of keeping it as a region's PDI
+        # a stamped row drops a control written with BDSM off after an empty cell instead of keeping it as a region's PDI
         self.assertNotIn(PDI, str(s.line(0)))
         parse_bytes(s, ('\x1b[1;1H' + FSI + 'q').encode())
         # nor does it keep one at column 0 as the next cell's leading control
