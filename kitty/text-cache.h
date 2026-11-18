@@ -77,6 +77,7 @@ TextCacheGCData *tc_gc_begin(TextCache *self);
 bool tc_gc_map_index(TextCache *self, TextCacheGCData *gc, char_type old_idx, char_type *new_idx);
 void tc_gc_end(TextCache *self, TextCacheGCData *gc);
 char_type tc_first_char_at_index(const TextCache *self, char_type idx);
+char_type tc_base_char_at_index(const TextCache *self, char_type idx);
 char_type tc_last_char_at_index(const TextCache *self, char_type idx);
 bool tc_chars_at_index_without_alloc(const TextCache *self, char_type idx, ListOfChars *ans);
 unsigned tc_num_codepoints(const TextCache *self, char_type idx);
