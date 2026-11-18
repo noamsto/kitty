@@ -713,16 +713,22 @@ class TestBidiReorder(BaseTest):
         # the pre-edit row keeps its map and is uploaded through it, then is as before once the overlay closes
         s = self.screen()
         draw_coloured(s, 'abc' + A)
-        # moved explicitly: left at x 6, right after the RTL run, the beam rule mirrors and the block would land over b/c
+        # moved explicitly: left at x 8, past the empty cells; the cursor gap (the empty cells join the RTL run)
         s.cursor_position(1, 9)
-        logical = [s.cell_style_idx(0, x) for x in range(6)]
-        visual = [logical[v] for v in MIXED_V2L[:6]]
-        self.ae((self.refresh(s, 0), styles(self.uploaded(s, 0))[:6]), (MIXED_V2L, visual))
+        gap_v2l = (0, 1, 2, 7, 6, 5, 4, 3, 8, 9)
+        logical = [s.cell_style_idx(0, x) for x in range(10)]
+        visual = [logical[v] for v in gap_v2l[:6]]
+        visual[1:3] = [None] * 2  # the cursor is drawn over b/c (its anchor is the left edge of the run)
+        def uploaded():
+            return [None if i in (1, 2) else x for i, x in enumerate(styles(self.uploaded(s, 0))[:6])]
+        self.ae((self.refresh(s, 0), uploaded()), (gap_v2l, visual))
         s.test_update_overlay_text('xy')
-        self.ae((self.refresh(s, 0), styles(self.uploaded(s, 0))[:6]), (MIXED_V2L, visual))
+        self.ae((self.refresh(s, 0), uploaded()), (gap_v2l, visual))
         s.test_update_overlay_text('')
-        self.ae((self.refresh(s, 0), styles(self.uploaded(s, 0))[:6]), (MIXED_V2L, visual))
-        self.assert_shaped(s, 0, self.fresh_sprites('abc' + A, cols=10))
+        self.ae((self.refresh(s, 0), uploaded()), (gap_v2l, visual))
+        fresh = self.fresh_sprites('abc' + A, cols=10)  # in the screen without the gap, in the MIXED_V2L order
+        by_cell = {v: fresh[i] for i, v in enumerate(MIXED_V2L)}
+        self.assert_shaped(s, 0, [by_cell[v] for v in gap_v2l])
 
     def test_split_paragraph_reshapes_lower_part(self):
         # the split changes row 1 to 0,0,0,1,0: paused frames show the snapshot, so a split made during the pause shows once unpaused
@@ -1734,6 +1740,7 @@ class TestBidiReorder(BaseTest):
                         s = self.dscreen(*seqs)
                         s.test_bidi_trim(trim)
                         build(s)
+                        s.cursor_position(5, 1)  # the cursor off the row: its gap would take the probe level (cursor gap rule)
                         screens.append(s)
                     for s in screens:
                         self.warm(s)
@@ -1751,8 +1758,20 @@ class TestBidiReorder(BaseTest):
                     s = self.dscreen(*seqs)
                     s.test_bidi_trim(trim)
                     s.draw(text)
+                    s.cursor_position(5, 1)  # the cursor off the row: its gap would take the probe level (cursor gap rule)
                     self.warm(s)
                     self.ae(self.vmaps(s)[0], want)
+        # with the cursor left in the gap the trimmed and untrimmed results differ: only the trimmed one (the no_trim
+        # reference skips the cursor gap rule) lays the blanks out at the probe level, off the paragraph level
+        lv = {}
+        for trim in (True, False):
+            s = self.dscreen()
+            s.test_bidi_trim(trim)
+            s.draw('אבג   ')
+            self.warm(s)
+            lv[trim] = self.lv(s, 0)
+        self.ae(lv[False], (1, 1, 1, 0, 0, 0, 0, 0, 0, 0))
+        self.ae(lv[True], (1, 1, 1, 1, 1, 1, 0, 0, 0, 0))
         # the one deliberate difference: typed blanks after a letter in an unclosed fed isolate keep the letter's level when
         # trimmed (keep_typed_blanks), while the untrimmed reference resolves them with FriBidi, so they fall to the paragraph level
         for trim, want_v2l, want_levels in (
@@ -3425,7 +3444,9 @@ class TestBidiReorder(BaseTest):
         rtl_v2l = (9, 8, 7, 6, 5, 4, 3, 0, 1, 2)
         # (name, rtl base, row, erased row, v2l, ((x, (beam column, mirrored), (block column, mirrored))..))
         cases = (
-            ('ltr base', F, 0, F, ltr_v2l, ((0, (0, F), (0, F)), (3, (5, T), (5, F)), (4, (4, T), (4, F)), (6, (2, T), (2, F)), (7, (7, F), (7, F)))),
+            # x=7: the cursor gap, the empty cells join the run
+            ('ltr base', F, 0, F, ltr_v2l, (
+                (0, (0, F), (0, F)), (3, (5, T), (5, F)), (4, (4, T), (4, F)), (6, (2, T), (2, F)), (7, (2, T), (2, F)))),
             ('rtl base', T, 0, F, rtl_v2l, ((0, (7, F), (7, F)), (3, (6, T), (6, F)), (4, (5, T), (5, F)), (6, (3, T), (3, F)), (7, (2, T), (2, F)))),
             ('rtl base, erased row', T, 1, T, ID10[::-1], ((0, (9, T), (9, F)),)),
         )
@@ -3515,19 +3536,31 @@ class TestBidiReorder(BaseTest):
             ('inside the run', b'', 'ab אני', 10, 4, (4, T), 4),
             ('after latin text', b'', 'ab אני abc  ', 14, 12, (12, F), 12),
             ('blank between words', b'', 'אני   abc', 10, 4, (4, F), 4),
-            ('after an empty cell', b'', 'ab אני', 10, 8, (8, F), 8),
+            ('after an empty cell', b'', 'ab אני', 10, 8, (2, T), 2),  # #45: the empty cells join the run
             ('latin only', b'', 'abc  ', 10, 5, (5, F), 5),
             ('rtl paragraph, hebrew', AUTO, 'שלום', 10, 4, (5, T), 5),
             ('rtl paragraph, hebrew and space', AUTO, 'שלום ', 10, 5, (4, T), 4),
-            # after a number or neutral the next char's place depends on its class, so the older rules apply
-            ('digits and space after hebrew', b'', 'שלום 123 ', 12, 9, (9, F), 9),
+            # after a number or neutral the next char's place is what the probe char gives the gap (#45)
+            ('digits and space after hebrew', b'', 'שלום 123 ', 12, 9, (0, F), 0),  # #45: the space joins the run, the next char lands at 0
             ('rtl paragraph, digits and space', AUTO, 'שלום 123 ', 12, 9, (2, T), 2),
             ('wide latin after hebrew', AUTO, 'שלום 中', 10, 7, (5, F), 5),
             # the PDI closes the isolate, so the next char is outside it
             ('closed isolate', b'', 'a⁧12 34⁩', 10, 6, (6, F), 6),
             ('latin digits in an rli and space', b'', 'x⁧abc 12 ', 16, 8, (8, F), 8),
-            ('percent after digits and space', b'', 'שלום 50% ', 12, 9, (9, F), 9),
-            ('latin digits after latin, rtl', AUTO, 'שלום abc 123 ', 16, 13, (2, T), 2),
+            ('percent after digits and space', b'', 'שלום 50% ', 12, 9, (0, F), 0),  # #45: the space joins the run
+            ('latin digits after latin, rtl', AUTO, 'שלום abc 123 ', 16, 13, (11, F), 11),  # #45: the space joins the level 2 run
+            # #45 rows
+            ('digits and space after hebrew, rtl in rli', AUTO, 'ש⁦123 ', 12, 5, (11, F), 11),
+            ('degree after digit and space', b'', 'שלום 5° ', 12, 8, (0, F), 0),
+            ('shekel after digit and space', b'', 'שלום 5₪ ', 12, 8, (0, F), 0),
+            ('arabic digits and space', b'', 'مرحبا ١٢ ', 14, 9, (0, F), 0),
+            ('closed isolate and space', b'', 'a⁧12 34⁩ ', 10, 7, (7, F), 7),
+            ('latin in an rli and space', b'', 'x⁧abc ', 10, 5, (5, F), 5),
+            # neutrals before the typed space wait for the next char: they join the run with it
+            ('comma and space after hebrew', b'', 'שלום, ', 12, 6, (0, F), 0),
+            ('full stop and space after hebrew', b'', 'שלום. ', 12, 6, (0, F), 0),
+            ('comma and space after digits', b'', 'שלום 12, ', 14, 9, (0, F), 0),
+            ('comma and space after latin', b'', 'abc, ', 10, 5, (5, F), 5),
         )
         for name, seqs, text, cols, x, beam, block in cases:
             with self.subTest(name):
@@ -3569,7 +3602,8 @@ class TestBidiReorder(BaseTest):
                 ),
             ),
             # the cursor: the typed space is at the paragraph level, and in B, with the FSI, it joins the word's run
-            ('אני ', ((0, 1, 4, 3, 2, 5), (0, 0, 1, 1, 1, 0)), ((0, 1, 5, 4, 3, 2), (0, 0, 1, 1, 1, 1))),
+            # #45: the typed space joins the run in A too, so A takes B's layout
+            ('אני ', ((0, 1, 5, 4, 3, 2), (0, 0, 1, 1, 1, 1)), ((0, 1, 5, 4, 3, 2), (0, 0, 1, 1, 1, 1))),
         )
         for text, *layouts in cases:
             for prompt, (v2l, levels) in zip('AB', layouts):
@@ -3587,10 +3621,10 @@ class TestBidiReorder(BaseTest):
             for name, data in (('plain', typed), ('idiom', idiom)):
                 with self.subTest(prompt=prompt, typed=name):
                     s = self.replayed(prompt, data)
-                    self.ae(self.v2l(s, 0)[:6], (0, 1, 4, 3, 2, 5) if prompt == 'A' else (0, 1, 5, 4, 3, 2))
+                    self.ae(self.v2l(s, 0)[:6], (0, 1, 5, 4, 3, 2))  # #45: A's typed space joins the run like B's
                     self.assert_cursor_at(s, 6, (1, True), 1)
         s = self.replayed('B', 'שלום 12 '.encode(), cols=14)
-        self.assert_cursor_at(s, 10, (10, False), 10)
+        self.assert_cursor_at(s, 10, (1, True), 1)  # #45: the space after the digits joins the run, the next char lands at column 2
         # no typed text: the cursor is on the cell after the prompt, which has no map
         s = self.replayed('B', b'')
         self.assertIsNone(self.v2l(s, 0))
@@ -3625,25 +3659,28 @@ class TestBidiReorder(BaseTest):
                 'rtl paragraph, latin and two spaces', 'B', RTL, T, 'abc  ', 7,
                 (7, 2, 3, 4, 5, 6, 1, 0), (2, 1, 2, 2, 2, 2, 2, 1), (22, F), 22,
             ),
-            # without the FSI the typed space is at the paragraph level, as before
-            ('no isolate, hebrew and space', 'A', None, F, 'אני ', 6, (0, 1, 4, 3, 2, 5, 6), (0, 0, 1, 1, 1, 0, 0), (1, T), 1),
-            # what the rule leaves alone: empty cells, a closed isolate, a number before the space, more isolates than the cap
-            ('cursor moved past empty cells', 'B', None, F, 'אני\x1b[3C', 8, (0, 1, 4, 3, 2, 5, 6, 7, 8), (0, 0, 1, 1, 1, 0, 0, 0, 0), (8, F), 8),
+            # without the FSI the cursor's gap still takes the run's level
+            ('no isolate, hebrew and space', 'A', None, F, 'אני ', 6, (0, 1, 5, 4, 3, 2, 6), (0, 0, 1, 1, 1, 1, 0), (1, T), 1),  # #45: the space joins the run
+            # empty cells, a space after a number and a space over the isolate cap now join the run; a closed isolate is left alone
+            (
+                'cursor moved past empty cells', 'B', None, F, 'אני\x1b[3C', 8,
+                (0, 1, 7, 6, 5, 4, 3, 2, 8), (0, 0, 1, 1, 1, 1, 1, 1, 0), (1, T), 1,  # #45: the empty cells join the run
+            ),
             # the PDI joins the cell of the first space, and L1 resets the spaces and the PDI at the end to the paragraph level
             ('closed isolate', 'B', None, F, 'אני \u2069 ', 7, (0, 1, 4, 3, 2, 5, 6, 7), (0, 0, 1, 1, 1, 0, 0, 0), (7, F), 7),
             (
                 'number and space', 'B', None, F, 'שלום 12 ', 10,
-                (0, 1, 7, 8, 6, 5, 4, 3, 2, 9, 10), (0, 0, 1, 1, 1, 1, 1, 2, 2, 0, 0), (10, F), 10,
+                (0, 1, 9, 7, 8, 6, 5, 4, 3, 2, 10), (0, 0, 1, 1, 1, 1, 1, 2, 2, 1, 0), (1, T), 1,  # #45: the space joins the run
             ),
             # a cell holds two controls: the FSI and 15 LRI PDI pairs are 31 isolates, under BIDI_MAX_ISOLATES, so they are fed and
-            # the space is kept; with 16 pairs they are 33, no isolate is fed and the space is at the paragraph level
+            # #52 keeps the space; with 16 pairs they are 33, no isolate is fed, and the cursor's gap puts the space beside the word
             (
                 'under the isolate cap', 'B', None, F, 'א\u2066\u2069' * (BIDI_MAX_ISOLATES // 2 - 1) + 'י ', 19,
                 (0, 1) + tuple(range(18, 1, -1)) + (19,), (0, 0) + (1,) * 17 + (0,), (1, T), 1,
             ),
             (
                 'over the isolate cap', 'B', None, F, 'א\u2066\u2069' * (BIDI_MAX_ISOLATES // 2) + 'י ', 20,
-                (0, 1) + tuple(range(18, 1, -1)) + (19, 20), (0, 0) + (1,) * 17 + (0, 0), (1, T), 1,
+                (0, 1) + tuple(range(19, 1, -1)) + (20,), (0, 0) + (1,) * 18 + (0,), (1, T), 1,  # #45: the space joins the run without #52
             ),
             # readline erases a letter with backspace, space, backspace: the space it writes is a typed blank after a letter, so it
             # joins the run and shows where the erased letter was
@@ -3664,6 +3701,332 @@ class TestBidiReorder(BaseTest):
                 else:
                     self.ae(got_levels[: len(levels)], levels)
                 self.assert_cursor_at(s, x, beam, block)
+
+    def test_cursor_follows_run_lands(self):
+        # The cursor is drawn where the next char of the run lands. Type the char the probe rule predicts at the cursor (a Hebrew
+        # letter after an odd level, a digit after an even one, an Arabic-Indic digit after one) and read the column it gets.
+        AUTO = b'\x1b[?2501h'
+
+        def row(text, cols, seqs=b''):
+            s = self.screen(cols=cols)
+            parse_bytes(s, seqs)
+            s.draw(text)
+            return s
+
+        def prompt(text, cols):
+            return self.replayed('B', text.encode(), cols=cols)
+
+        # (name, screen with the cursor after the text, typed char, column it lands at)
+        cases = (
+            ('digits and space after hebrew', row('שלום 123 ', 12), '0', 0),
+            ('percent after digits and space', row('שלום 50% ', 12), '0', 0),
+            ('degree after digit and space', row('שלום 5° ', 12), '0', 0),
+            ('shekel after digit and space', row('שלום 5₪ ', 12), '0', 0),
+            ('latin digits in an rli and space', row('x⁧abc 12 ', 16), '0', 8),
+            ('latin in an rli and space', row('x⁧abc ', 10), '0', 5),
+            ('latin digits after latin, rtl', row('שלום abc 123 ', 16, AUTO), '0', 10),
+            ('digits in an lri, rtl', row('ש⁦123 ', 12, AUTO), '0', 10),
+            ('arabic digits and space', row('مرحبا ١٢ ', 14), '٠', 0),
+            ('prompt, digits and space', prompt('שלום 12 ', 14), '0', 2),
+            ('prompt, neutral and space', prompt('שלום! ', 14), 'א', 2),
+            ('wrapped ltr', row('abcd שלום 123 ', 10), '0', 0),
+            ('wrapped rtl', row('שלום abcd 12 ', 10, AUTO), '0', 9),
+        )
+        for name, s, ch, col in cases:
+            with self.subTest(name):
+                x, y = s.cursor.x, s.cursor.y
+                s.draw(ch)
+                test_screen_update_cell_data(s)
+                self.ae(s.test_bidi_visual_x(x, y), col)
+
+    def test_cursor_follows_run_prompt_and_wrapped(self):
+        # #45 rows with a prompt isolate or a paragraph over two rows: the gap's level decides the cursor
+        F, T = False, True
+        AUTO = b'\x1b[?2501h'
+        # (name, text, columns, cursor x, beam (column, mirrored), column of the other shapes)
+        for name, text, cols, x, beam, block in (
+            ('digits and space', 'שלום 12 ', 14, 10, (1, T), 1),
+            ('hebrew and space', 'אני ', 40, 6, (1, T), 1),
+            ('neutral and space', 'שלום! ', 14, 8, (1, T), 1),
+        ):
+            with self.subTest('prompt B', name=name):
+                s = self.replayed('B', text.encode(), cols=cols)
+                self.assert_cursor_at(s, x, beam, block)
+        # (name, sequences, text, cursor row, cursor x, beam, block, levels of the cursor row up to the cursor)
+        for name, seqs, text, y, x, beam, block, levels in (
+            ('wrapped ltr', b'', 'abcd שלום 123 ', 1, 4, (0, F), 0, (2, 2, 2, 1)),
+            ('wrapped rtl', AUTO, 'שלום abcd 12 ', 1, 3, (9, T), 9, (2, 2, 2)),
+        ):
+            with self.subTest(name):
+                s = self.screen()
+                parse_bytes(s, seqs)
+                s.draw(text)
+                self.assert_cursor_at_row(s, y, x, beam, block)
+                self.ae(self.levels(s, y)[: len(levels)], levels)
+
+    def test_typed_gap_only_at_cursor(self):
+        # The gap is laid out only on the cursor's row, past its text. Everything else keeps the layout it had.
+        F = False
+        plain = (0, 1, 2, 5, 4, 3, 6) + ID(7, 10)
+        plain_levels = (0, 0, 0, 1, 1, 1, 0, 0, 0, 0)
+        s = self.screen()
+        s.draw('ab אני ')
+        s.cursor_position(3, 1)
+        test_screen_update_cell_data(s)
+        self.ae((self.v2l(s, 0), self.levels(s, 0)), (plain, plain_levels), 'cursor on another row')
+        for x in (0, 4, 6):  # before the text end: not after a blank
+            with self.subTest(x=x):
+                s.cursor_position(1, x + 1)
+                test_screen_update_cell_data(s)
+                self.ae((self.v2l(s, 0), self.levels(s, 0)), (plain, plain_levels))
+        # no RTL: no map
+        s = self.screen()
+        s.draw('hello ')
+        self.assert_cursor_at(s, 6, (6, F), 6)
+        self.assertIsNone(self.v2l(s, 0))
+        # the gap goes away with the cursor and leaves nothing behind
+        s = self.screen()
+        s.draw('שלום ')
+        test_screen_update_cell_data(s)
+        self.ae(self.v2l(s, 0)[:5], (4, 3, 2, 1, 0))  # #45: the blank is left of the word while the cursor is in its gap
+        s.cursor_position(2, 1)
+        test_screen_update_cell_data(s)
+        self.ae(self.v2l(s, 0)[:5], (3, 2, 1, 0, 4))
+        f = self.screen()
+        f.draw('שלום ')
+        f.cursor_position(2, 1)
+        self.same_as(s, f)
+
+    def test_claude_code_typed_gap(self):
+        # Claude Code 2.1.326 keeps the terminal cursor at its input position and never writes the typed space: the blank is an
+        # empty cell, and the space moves the cursor one cell past the word with CSI 16;8H. The row starts with `❯ ` at row 16.
+        prompt = b'\x1b[16;1H\xe2\x9d\xaf '
+        word = b'\x1b[?25l\x1b[H\r\x1b[2C\x1b[15B' + 'הסדר'.encode() + b'\x1b[K\x1b[20;1H\x1b[16;7H\x1b[?25h'
+        space = b'\x1b[?25l\x1b[16;8H\x1b[?25h'
+        more = b'\x1b[?25l\x1b[H\r\x1b[7C\x1b[15B' + 'לא'.encode() + b'\x1b[20;1H\x1b[16;10H\x1b[?25h'
+        T = True
+        y = 15
+
+        def build(seqs, *steps):
+            s = self.create_screen(cols=20, lines=20, scrollback=5, options={})
+            parse_bytes(s, b'\x1b[8h' + seqs + prompt)
+            for step in steps:
+                parse_bytes(s, step)
+            test_screen_update_cell_data(s)
+            return s
+
+        def check(s, v2l, levels, x, beam, block, msg):
+            self.ae(self.v2l(s, y), v2l, msg)
+            self.ae(self.levels(s, y), levels, msg)
+            self.assert_cursor_at_row(s, y, x, beam, block, msg)
+
+        # LTR row (bidi on, no 2501): the empty cell before the cursor joins the word's run
+        steps = (
+            ('word', (word,), (0, 1, 5, 4, 3, 2) + ID(6, 20), (0, 0, 1, 1, 1, 1) + (0,) * 14, 6, (1, T), 1),
+            # #45: the gap is shown left of the word (cell 6 at the run's left edge) and the cursor stays where the next char lands
+            ('space', (word, space), (0, 1, 6, 5, 4, 3, 2) + ID(7, 20), (0, 0, 1, 1, 1, 1, 1) + (0,) * 13, 7, (1, T), 1),
+            # the next word joins the run in one piece, as today
+            ('next word', (word, space, more), (0, 1, 8, 7, 6, 5, 4, 3, 2) + ID(9, 20), (0, 0) + (1,) * 7 + (0,) * 11, 9, (1, T), 1),
+        )
+        for name, seqs, v2l, levels, x, beam, block in steps:
+            with self.subTest('ltr', step=name):
+                check(build(b'', *seqs), v2l, levels, x, beam, block, name)
+        with self.subTest('ltr', step='next char lands'):
+            s = build(b'', word, space)
+            s.draw('ל')  # at x=7, where the cursor is
+            test_screen_update_cell_data(s)
+            self.ae(s.test_bidi_visual_x(7, y), 2)  # at the left edge of the run, where the cursor was drawn
+        # 2501: the row resolves RTL (the ❯ is a neutral, ה the first strong letter). The gap is already left of the word:
+        # all three steps are unchanged
+        rtl = tuple(range(19, -1, -1))
+        for name, seqs, x, col in (('word', (word,), 6, 13), ('space', (word, space), 7, 12), ('next word', (word, space, more), 9, 10)):
+            with self.subTest('2501', step=name):
+                check(build(b'\x1b[?2501h', *seqs), rtl, (1,) * 20, x, (col, T), col, name)
+        with self.subTest('2501', step='next char lands'):
+            s = build(b'\x1b[?2501h', word, space)
+            s.draw('ל')
+            test_screen_update_cell_data(s)
+            self.ae(s.test_bidi_visual_x(7, y), 12)
+
+    def test_tmux_pane_typed_gap(self):
+        # tmux side by side panes: the pane's FSI rides on the glyph cell, the prompt's on the space, the PDI closing the prompt
+        # on the typed space (cell 5), then blanks and the pane's PDI on a space at the pane's end
+        row = '\U000F023A⁨ ⁨אני ⁩' + ' ' * 10 + ' ⁩'
+        F, T = False, True
+        for seqs in (b'', b'\x1b[?2501h'):  # the glyph is class L, so the paragraph is LTR with and without 2501
+            s = self.screen(cols=24)
+            parse_bytes(s, seqs)
+            s.draw(row)
+            with self.subTest('cursor after the typed space', seqs=seqs):
+                s.cursor_position(1, 7)
+                test_screen_update_cell_data(s)
+                # #45: the typed space is level 3 beside the word, not reset to 0 by L1 before the PDI
+                self.ae(self.v2l(s, 0)[:7], (0, 1, 5, 4, 3, 2, 6))
+                self.ae(self.levels(s, 0)[:7], (0, 2, 3, 3, 3, 3, 0))
+                self.assert_cursor_at(s, 6, (1, T), 1)
+            with self.subTest('blank after the closing PDI', seqs=seqs):
+                # the probe lands inside the pane's isolate and turns it RTL, moving cells before the gap: it is rejected and the
+                # layout and cursor stay as today
+                s.cursor_position(1, 8)
+                test_screen_update_cell_data(s)
+                self.ae(self.v2l(s, 0)[:7], (0, 1, 4, 3, 2, 5, 6))
+                self.ae(self.levels(s, 0)[:7], (0, 2, 3, 3, 3, 0, 0))
+                self.assert_cursor_at(s, 7, (7, F), 7)
+
+    def test_typed_gap_cache(self):
+        # The cursor's gap is part of the paragraph cache key: moving the cursor into or out of a gap resolves only the cursor's
+        # paragraph, and no layout made for one cursor state is served for another
+        rows = ['אני ', 'גדה ', 'abc']
+        gap = (3, 2, 1, 0, 4)  # row 0 with its gap shown
+        plain = (2, 1, 0, 3, 4)
+
+        def build(first='אני ', cursor=(1, 5)):
+            f = self.filled([first] + rows[1:])
+            f.cursor_position(*cursor)
+            return f
+
+        s = build()
+        self.warm(s)
+        self.ae((self.v2l(s, 0)[:5], self.v2l(s, 1)[:5]), (gap, plain))
+        # out of the gap, and in again: one resolve each, the cursor's paragraph only
+        s.cursor_position(3, 1)
+        self.ae(self.frame(s)[0], 1)
+        self.ae(self.v2l(s, 0)[:5], plain)
+        self.same_as(s, build(cursor=(3, 1)))
+        s.cursor_position(1, 5)
+        self.ae(self.frame(s)[0], 1)
+        self.ae(self.v2l(s, 0)[:5], gap)
+        self.same_as(s, build())
+        # a same-class edit (one Hebrew letter for another) after leaving the gap shortcuts, and equals a fresh screen's layout
+        s.cursor_position(3, 1)
+        self.frame(s)
+        self.put(s, 1, 1, 'ב')
+        s.cursor_position(3, 1)
+        self.ae(self.frame(s)[0], 0)
+        self.same_as(s, build('בני ', (3, 1)))
+        # the same edit while the gap is applied cannot shortcut: the layout holds retyped blanks
+        s = build()
+        self.warm(s)
+        self.put(s, 1, 1, 'ב')
+        s.cursor_position(1, 5)
+        self.ae(self.frame(s)[0], 1)
+        self.ae(self.v2l(s, 0)[:5], gap)
+        self.same_as(s, build('בני '))
+        # cursor moves between positions that are no gap, on other paragraphs' rows: no resolve
+        s = build(cursor=(3, 1))
+        self.warm(s)
+        for y, x in ((3, 2), (3, 4), (2, 3), (2, 2), (3, 3)):
+            with self.subTest(y=y, x=x):
+                s.cursor_position(y, x)
+                self.ae(self.frame(s)[0], 0)
+        self.ae((self.v2l(s, 0)[:5], self.v2l(s, 1)[:5]), (plain, plain))
+
+    def test_typed_gap_rejected_probe_leaves_no_trace(self):
+        # the tmux row with the cursor on the blank after its closing PDI: the probe is rejected, and no frame after it differs
+        # from a fresh screen's, whatever the cursor does next
+        def build(first='א', x=7):
+            s = self.screen(cols=24)
+            s.draw('\U000F023A⁨ ⁨' + first + 'ני ⁩' + ' ' * 10 + ' ⁩')
+            s.cursor_position(1, x + 1)
+            return s
+
+        s = build()
+        self.warm(s)
+        today = ((0, 1, 4, 3, 2, 5, 6), (0, 2, 3, 3, 3, 0, 0))
+        self.ae((tuple(self.v2l(s, 0)[:7]), self.levels(s, 0)[:7]), today)
+        for name, x in (('same-class edit', 7), ('cursor into the gap', 6), ('cursor out again', 7), ('cursor far away', 20)):
+            with self.subTest(name):
+                if name == 'same-class edit':
+                    self.put(s, 1, 3, 'ב')
+                s.cursor_position(1, x + 1)
+                buf = self.frame_buf(s)[1]
+                self.assert_same_as_fresh(s, buf, build('ב', x), name)
+        s.cursor_position(1, 8)
+        test_screen_update_cell_data(s)
+        self.ae((tuple(self.v2l(s, 0)[:7]), self.levels(s, 0)[:7]), today)
+
+    def test_typed_gap_paused(self):
+        # A paused frame lays out the gap on the snapshot row of the cursor only: that row is cursor.y + scrolled_by + pixel_scroll,
+        # not cursor.y + pixel_scroll. The history line above the cursor's line has a blank tail too and keeps its layout.
+        for pixel_scroll in (True, False):
+            with self.subTest(pixel_scroll=pixel_scroll):
+                s = self.screen(cols=10, lines=3, scrollback=10, pixel_scroll=pixel_scroll)
+                parse_bytes(s, 'אב  \r\n\r\n\r\n'.encode())
+                s.cursor_position(1, 1)
+                s.draw('אני ')
+                test_screen_update_cell_data(s)
+                s.scroll(1, True)
+                self.ae((s.historybuf.count, s.scrolled_by, s.cursor.y, s.cursor.x), (1, 1, 0, 4))
+                parse_bytes(s, b'\x1b[?2026h')
+                test_screen_update_cell_data(s)
+                first = int(pixel_scroll)  # the render row of the history line; the cursor's line is the next
+                self.ae(tuple(s.test_bidi_v2l(first)[:5]), (1, 0, 2, 3, 4))
+                self.ae(tuple(s.test_bidi_v2l(first + 1)[:5]), (3, 2, 1, 0, 4))  # #45: the gap is shown in the cursor's line
+
+    def test_typed_gap_cursor_gap_changed(self):
+        # the trigger for a cursor-only move: true when the move enters, leaves or changes a gap, false otherwise
+        def moved(s, y, x):
+            s.cursor_position(y + 1, x + 1)
+            return s.test_bidi_cursor_gap_changed()
+
+        def settle(s):
+            test_screen_update_cell_data(s)
+            self.assertFalse(s.test_bidi_cursor_gap_changed(), 'a frame with the cursor unchanged')
+
+        # rows: 0 RTL word and blank, 1 Latin, 2 unstamped, 3 another RTL paragraph
+        s = self.create_screen(cols=10, lines=6, scrollback=5, options={})
+        s.cursor_position(3, 1)
+        s.draw('אבג')  # written before CSI 8 h
+        parse_bytes(s, b'\x1b[8h')
+        self.put(s, 1, 1, 'אני ')
+        self.put(s, 2, 1, 'abc')
+        self.put(s, 4, 1, 'גדה ')
+        s.cursor_position(5, 1)
+        settle(s)
+        for name, y, x, want in (
+            ('into a gap', 0, 4, True),
+            ('out to a latin row', 1, 3, True),
+            ('into the gap again', 0, 4, True),
+            ('out to an unstamped row', 2, 3, True),
+            ('into the gap once more', 0, 4, True),
+            ('out to another paragraph', 3, 2, True),
+            ('a move that stays out of the gap', 3, 1, False),
+        ):
+            with self.subTest(name):
+                self.ae(moved(s, y, x), want)
+                settle(s)
+        # a Latin row with prompt isolates is never active: no upload for a cursor-only space
+        with self.subTest('latin row with isolates'):
+            s = self.replayed('B', 'hello '.encode(), cols=24)
+            settle(s)
+            for x in (2, 8, 5, 8):
+                self.assertFalse(moved(s, 0, x))
+                settle(s)
+        # RTL text on the row above the cursor's, digits only on the cursor's row: the digits are level 2, so the row is active
+        with self.subTest('wrapped paragraph'):
+            s = self.screen()
+            parse_bytes(s, b'\x1b[?2501h')
+            s.draw('שלום abcd 12 ')
+            s.cursor_position(4, 1)
+            settle(s)
+            self.assertTrue(moved(s, 1, 3))
+            settle(s)
+            self.assertTrue(moved(s, 3, 0))
+            settle(s)
+        with self.subTest('paused'):
+            s = self.screen()
+            s.draw('אני ')
+            s.cursor_position(3, 1)
+            settle(s)
+            s.pause_rendering(True, 1000)
+            test_screen_update_cell_data(s)
+            self.assertFalse(moved(s, 0, 4))
+        with self.subTest('force_ltr'):
+            s = self.screen(force_ltr=True)
+            s.draw('אני ')
+            s.cursor_position(3, 1)
+            test_screen_update_cell_data(s)
+            self.assertFalse(moved(s, 0, 4))
 
     PROMPT_ROW = PUA + b' \xe2\x81\xa8'  # the prompt `PUA SP FSI`: the FSI joins the space's cell and is never closed
     CONTINUE = b'\r\n\x1b[K\x1b[2C'  # fish's Shift+Enter: the next row, erased and indented by two cells
@@ -4204,7 +4567,7 @@ class TestBidiReorder(BaseTest):
         # an overlay line on a Hebrew row, then removed: the row keeps its map and every frame resolves nothing
         s = self.screen()
         s.draw(MIXED)
-        s.cursor_position(1, 9)
+        s.cursor_position(1, 7)  # not past empty cells: their gap would take the probe level (cursor gap rule)
         self.warm(s)
         seen = []
         for overlay, n in (('xy', 3), ('', 1)):
@@ -4283,7 +4646,7 @@ class TestBidiReorder(BaseTest):
     def test_ime_anchor_x(self):
         # the IME anchor is the visual column of the cursor, or of the pre-edit's start
         s = self.mixed()
-        for x, want in ((0, 0), (3, 6), (6, 3), (8, 8)):
+        for x, want in ((0, 0), (3, 6), (6, 3), (8, 3)):  # x=8: the cursor gap, the empty cells join the run
             s.cursor_position(1, x + 1)
             test_screen_update_cell_data(s)
             self.ae(s.test_ime_anchor_x(), want, x)

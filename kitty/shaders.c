@@ -1323,7 +1323,7 @@ cell_prepare_to_render(ssize_t vao_idx, Screen *screen, FONTS_DATA_HANDLE fonts_
         if (!screen->paused_rendering.cell_data_updated) update_cell_data;
     } else if (
         screen->reload_all_gpu_data || screen->scroll_changed || screen->is_dirty || screen_resized || styles_remapped ||
-        (disable_ligatures && cursor_pos_changed))
+        (disable_ligatures && cursor_pos_changed) || (screen->bidi_maps && screen_bidi_cursor_gap_changed(screen)))
         update_cell_data;
     // After updating cell data as rendering lines can add styles
     if (!screen->style_texture.texture || screen->style_texture.count != screen->style_table->count ||
