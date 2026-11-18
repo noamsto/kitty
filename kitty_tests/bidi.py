@@ -33,10 +33,13 @@ class TestBidi(BaseTest):
         return s.callbacks.wtcbuf
 
     def test_autodetect_decrqm(self):
-        for opts in ({}, {'force_ltr': True}):
-            s = self.screen(**opts)
-            for setup in ('', '\x1b[?2501h', '\x1b[?2501l'):
-                self.ae(self.reply(s, setup + '\x1b[?2501$p'), b'\x1b[?2501;4$y', (opts, setup))
+        s = self.screen()
+        self.ae(self.reply(s, '\x1b[?2501$p'), b'\x1b[?2501;2$y')
+        for setup, ans in (('\x1b[?2501h', 1), ('\x1b[?2501l', 2), ('\x1b[?2501h', 1)):
+            self.ae(self.reply(s, setup + '\x1b[?2501$p'), f'\x1b[?2501;{ans}$y'.encode(), setup)
+        s = self.screen(force_ltr=True)
+        for setup in ('', '\x1b[?2501h', '\x1b[?2501l'):
+            self.ae(self.reply(s, setup + '\x1b[?2501$p'), b'\x1b[?2501;4$y', setup)
 
     def test_stamp(self):
         s = self.screen()
@@ -150,10 +153,18 @@ class TestBidi(BaseTest):
         pb(s, '\x1b[4;8l')
         self.ae(self.reply(s, '\x1b[4$p'), b'\x1b[4;2$y')
         self.assertFalse(s.test_bidi_state()[0])
+        self.ae(self.reply(s, '\x1b[8$p'), b'\x1b[8;2$y')
+        self.ae(self.reply(s, '\x1b[?2501$p'), b'\x1b[?2501;2$y')
+        for seq, bdsm, auto in (('8h', 1, 2), ('?2501h', 1, 1), ('8l', 2, 1), ('?2501l', 2, 2)):
+            pb(s, f'\x1b[{seq}')
+            self.ae(self.reply(s, '\x1b[8$p'), f'\x1b[8;{bdsm}$y'.encode(), seq)
+            self.ae(self.reply(s, '\x1b[?2501$p'), f'\x1b[?2501;{auto}$y'.encode(), seq)
+        s = self.screen(force_ltr=True)
         for seq in ('8h', '8l', '?2501h', '?2501l'):
             pb(s, f'\x1b[{seq}')
             self.ae(self.reply(s, '\x1b[8$p'), b'\x1b[8;4$y', seq)
             self.ae(self.reply(s, '\x1b[?2501$p'), b'\x1b[?2501;4$y', seq)
+        s = self.screen()
         d = Dump()
         parse_bytes(s, b'\x1b[2 k', d)
         self.ae(list(d), [('screen_set_bidi_direction', 2)])
@@ -416,3 +427,46 @@ class TestBidi(BaseTest):
         pb(s, 'a' + '\u0301' * 23)
         pb(s, '\x1b[8h\u0301')
         self.ae(self.records(s, 0), [NONE])
+
+    def test_draw_follows_mode(self):
+        def stamped(s, setup, row=0):
+            pb(s, setup + CUP(row + 1) + 'a')
+            return self.records(s, row)[0][0] != 0
+
+        s = self.screen()
+        self.assertFalse(stamped(s, ''))
+        self.assertTrue(stamped(s, '\x1b[8h', 1))
+        self.assertFalse(stamped(s, '\x1b[8l', 2))
+        self.assertTrue(stamped(s, '\x1b[8h', 3))
+        pb(s, '\x1b[?1049h')
+        self.assertFalse(stamped(s, '', 0))
+        pb(s, '\x1b[?1049l')
+        self.assertTrue(stamped(s, '', 4))
+        s = self.screen()
+        pb(s, '\x1b[8h\x1b[?s\x1b[8l')
+        self.assertFalse(stamped(s, ''))
+        pb(s, '\x1b[?r')
+        self.assertTrue(stamped(s, '', 1))
+        pb(s, '\x1b[?s\x1b[8l\x1b[?r')
+        self.assertTrue(stamped(s, '', 2))
+        for reset in ('\x1bc', '\x1b[!p'):
+            with self.subTest(reset=reset):
+                s = self.screen()
+                self.assertTrue(stamped(s, '\x1b[8h'))
+                self.assertFalse(stamped(s, reset, 1))
+        # The implicit draw loop run with the mode off writes record 0, which
+        # line records cannot tell apart, but it sets the buffer's stamped
+        # flag, so check the flags on fresh screens.
+        for reset in ('\x1bc', '\x1b[!p'):
+            with self.subTest('flags after', reset=reset):
+                s = self.screen()
+                pb(s, '\x1b[8h' + reset + 'a')
+                self.ae(s.test_bidi_state()[3:], (False, False))
+        with self.subTest('flags in alt'):
+            s = self.screen()
+            pb(s, '\x1b[8h\x1b[?1049ha')
+            self.assertFalse(s.test_bidi_state()[4])
+        with self.subTest('alt toggles the mode on and off, main restores it'):
+            s = self.screen()
+            pb(s, '\x1b[8h\x1b[?1049h\x1b[8h\x1b[8l\x1b[?1049l')
+            self.assertTrue(stamped(s, '', 1))

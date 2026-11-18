@@ -1162,6 +1162,49 @@ class BidiRendering(FontBaseTest):
         for levels, expected in (([0, 0], ltr), ([1, 1], rtl)) * 2:
             self.ae(self.render_text('(a', levels=levels), expected, f'{levels=}')
 
+    def test_force_ltr_shapes_ltr(self):
+        pua = self.pua_ligature_char() + ' '  # an RTL run swaps its two cells
+        lm = self.path_for_font(self.font_name)
+        ctx = partial(setup_for_testing, size=self.font_size, dpi=self.dpi, main_face_path=lm)
+
+        def line(text, force_ltr):
+            s = self.create_screen(cols=len(text), lines=1, scrollback=0, options={'force_ltr': force_ltr})
+            s.draw(text)
+            return s.line(0)
+
+        def shape(text, force_ltr, rtl=False):
+            # a font loaded from a path has its own shaped run cache, so no call reuses a run another one shaped
+            return test_shape(line(text, force_ltr), lm, 0, rtl)
+
+        def render(text, force_ltr, levels=None):
+            with ctx() as (sprites, *_):  # a fresh font group, for the same reason
+                ln = line(text, force_ltr)
+                if levels is None:
+                    test_render_line(ln)
+                else:
+                    test_render_line_levels(ln, bytes(levels))
+                return [bytes(sprites[sprite_idx_to_pos(ln.sprite_at(x), setup_for_testing.xnum, setup_for_testing.ynum)]) for x in range(len(ln))]
+
+        hebrew, pointed = '\u05e9\u05dc\u05d5\u05dd', '\u05e9\u05b8\u05c1\u05dc\u05d5\u05b9\u05dd'
+        mixed = f'({hebrew}) abc'
+        for text in (hebrew, pointed, mixed, f'abc ({hebrew})'):
+            forced = shape(text, True)
+            self.ae(shape(text, True, rtl=True), forced, text)
+            if text[0] == 'a':  # HarfBuzz guesses LTR from the first letter
+                self.ae(shape(text, False), forced, text)
+            else:
+                self.assertNotEqual(shape(text, False), forced, text)
+        # an RTL run mirrors the parentheses
+        self.assertNotEqual(shape(mixed, False, rtl=True), shape(mixed, True))
+
+        for text in (hebrew, pointed, mixed, pua):
+            n = len(text)
+            forced = render(text, True)
+            self.ae(render(text, True, [1] * n), forced, text)
+            self.ae(render(text, False, [0] * n), forced, text)
+            if text != pua:
+                self.assertNotEqual(render(text, False), forced, text)
+
     def test_render_line_levels_length(self):
         s = self.create_screen(cols=4, lines=1, scrollback=0)
         s.draw('abcd')
