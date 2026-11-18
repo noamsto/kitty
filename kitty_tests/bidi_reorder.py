@@ -2680,13 +2680,18 @@ class TestBidiReorder(BaseTest):
             if follows is not None:
                 follows.append(int(s.test_bidi_shifts() > shifted))
             if rlm_rtl is not None and name in ('mark', 'markw') and not paused and not s.scrolled_by:
-                rlm_rtl.append(sum(
-                    1 for y in range(s.lines)
-                    if not (s.linebuf.is_continued(y) if y else s.historybuf.count and s.historybuf.endswith_wrap())
-                    and s.test_bidi_line_record(y)[0] and s.test_bidi_line_record(y)[2]
-                    and s.cpu_cells(y, 0)['text'].startswith(RLM)
-                    and not any('\u0590' <= c <= '\u05ff' for c in str(s.linebuf.line(y)))
-                    and self.prtl(s, y)))
+                rlm_rtl.append(
+                    sum(
+                        1
+                        for y in range(s.lines)
+                        if not (s.linebuf.is_continued(y) if y else s.historybuf.count and s.historybuf.endswith_wrap())
+                        and s.test_bidi_line_record(y)[0]
+                        and s.test_bidi_line_record(y)[2]
+                        and s.cpu_cells(y, 0)['text'].startswith(RLM)
+                        and not any('\u0590' <= c <= '\u05ff' for c in str(s.linebuf.line(y)))
+                        and self.prtl(s, y)
+                    )
+                )
             # a dirty row inside a paragraph with maps that nothing resolved again: the shortcut kept them
             if not resolves and any(self.vmaps(s)[y] is not None for y in dirty):
                 shortcuts += 1
@@ -2942,6 +2947,7 @@ class TestBidiReorder(BaseTest):
         self.assertNotEqual(marked_state, plain_state)
         for split in (False, True):
             for clear in ('\x1b[2J', '\x1b[L'):
+
                 def redraw(s, mark):
                     s.cursor_position(1, 1)
                     parse_bytes(s, clear.encode())

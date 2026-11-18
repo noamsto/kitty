@@ -2248,7 +2248,6 @@ draw_text_loop_implicit(Screen *self, const uint32_t *chars, size_t num_chars, t
 static void
 store_leading_control(Screen *self, char_type ch, const CPUCell *pen) {
     const index_type x = self->cursor->x, y = self->cursor->y;
-    if (x >= self->columns) return;
     CPUCell *c = linebuf_cpu_cells_for_line(self->linebuf, y) + x;
     // there is no cell the control can take without moving the cursor
     if (c->is_multicell && c->y) return;
@@ -2311,7 +2310,6 @@ prepend_leading_controls(Screen *self, index_type x, index_type y, const char_ty
 static size_t
 draw_after_leading_controls(Screen *self, const uint32_t *chars, const CPUCell *pen) {
     const index_type x = self->cursor->x, y = self->cursor->y;
-    if (x >= self->columns) return 0;
     CPUCell *cp = linebuf_cpu_cells_for_line(self->linebuf, y);
     // Where the char goes is decided before the cell is touched, as a draw
     // that scrolls leaves x, y naming another line. At x 0 a char no wider
@@ -2354,8 +2352,8 @@ draw_after_leading_controls(Screen *self, const uint32_t *chars, const CPUCell *
     self->modes.mIRM = false;
     draw_text_loop_implicit(self, chars, 1, &s);
     self->modes.mIRM = irm;
-    // A previous cell from a soft wrap can take the char into its cluster instead, leaving this cell empty, or a scroll can move
-    // this line: then the controls are dropped.
+    // A previous cell from a soft wrap can take the char into its cluster instead, leaving this cell empty: then the controls are
+    // dropped.
     if (s.prev.cc == cp + x && cell_has_text(cp + x)) prepend_leading_controls(self, x, y, controls, lc.count);
     return 1;
 }
