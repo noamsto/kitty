@@ -2113,8 +2113,10 @@ static void draw_text_loop_implicit(Screen *self, const uint32_t *chars, size_t 
 // their own handling of it. Returns true when it handed the rest of the draw to the implicit copy.
 // The state is taken by value so the caller's does not escape, which would make GCC keep redundant stores to it in the hot
 // loop. Nothing the copy changes is needed back: an isolate control changes no state as a combining char.
+// at points to the control itself and num_from counts it, as the loop already holds that pointer while the one past it would
+// keep i * 4 live at the loop head.
 static bool __attribute__((noinline, cold))
-draw_region_control(Screen *self, text_loop_state s, char_type ch, const uint32_t *rest, size_t num_rest, bool hand_off) {
+draw_region_control(Screen *self, text_loop_state s, char_type ch, const uint32_t *at, size_t num_from, bool hand_off) {
     if (!self->cursor->x && !self->linebuf->line_attrs[self->cursor->y].bidi_stamp) {
         // Regions are per row, so the control is kept for the cell written next even when a soft wrap gives this row a
         // previous cell
@@ -2123,7 +2125,7 @@ draw_region_control(Screen *self, text_loop_state s, char_type ch, const uint32_
         bidi_update_draw_dispatch(self);
         if (!hand_off) return false;
         // Only the implicit copy attaches kept controls; with bidi mode off its record is 0
-        draw_text_loop_implicit(self, rest, num_rest, &s);
+        draw_text_loop_implicit(self, at + 1, num_from - 1, &s);
         return true;
     }
     CPUCell *pc = s.prev.cc;
@@ -2248,7 +2250,7 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
                     // they were not added to the prev cell by grapheme segmentation.
                     // Zero width chars can only be represented as combining chars.
                     if (UNLIKELY(ch - 0x2066u <= 0x2069u - 0x2066u) && !self->modes.mBDSM) {
-                        if (draw_region_control(self, *s, ch, chars + i + 1, num_chars - i - 1, !implicit)) return;
+                        if (draw_region_control(self, *s, ch, chars + i, num_chars - i, !implicit)) return;
                         continue;
                     }
                     if (s->prev.cc) {
