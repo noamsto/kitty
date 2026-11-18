@@ -207,15 +207,6 @@ cell_clear_multicell(CPUCell *c) {
     c->width = 0;
 }
 
-// A cell that is not a multicell has no use for natural_width, so a set one marks its stored isolate controls (the chars after the
-// first that are LRI, RLI, FSI or PDI) as leading: a control written with no previous cell, at column 0, is kept as a leading control
-// of the cell written next and is fed to the bidi resolver before the cell's base char. All the isolate controls of such a cell are
-// leading. Overwriting or clearing the cell clears the flag, with the whole cell.
-static inline bool
-cell_has_leading_controls(const CPUCell *c) {
-    return !c->is_multicell && c->natural_width && c->ch_is_idx;
-}
-
 static inline bool
 continues_multicell_char(const CPUCell *c, const CPUCell *ref, index_type y) {
     // Whether c is the cell in row y of the same multicell char as ref in the same column.

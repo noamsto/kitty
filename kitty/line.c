@@ -132,23 +132,6 @@ multicell_is_continuation_of_previous(const CPUCell *prev, const CPUCell *curr) 
     return prev->width == curr->width && !curr->natural_width;
 }
 
-// A cell's leading isolate controls are stored after its base char but come before it in the text: moves the controls among
-// chars[1..n) in front of chars[0]
-static void
-put_leading_controls_first(char_type *chars, size_t n) {
-    char_type controls[MAX_NUM_CODEPOINTS_PER_CELL], others[MAX_NUM_CODEPOINTS_PER_CELL];
-    if (n > MAX_NUM_CODEPOINTS_PER_CELL) return;
-    size_t nc = 0, no = 0;
-    for (size_t i = 1; i < n; i++) {
-        if (chars[i] - 0x2066u <= 0x2069u - 0x2066u) controls[nc++] = chars[i];
-        else others[no++] = chars[i];
-    }
-    const char_type base = chars[0];
-    memcpy(chars, controls, nc * sizeof(chars[0]));
-    chars[nc] = base;
-    memcpy(chars + nc + 1, others, no * sizeof(chars[0]));
-}
-
 static index_type
 text_in_cell_ansi(ANSILineState *s, const CPUCell *c, TextCache *tc, bool skip_multiline_non_zero_lines) {
     index_type num_cells_to_skip_for_tab = 0;
@@ -185,7 +168,6 @@ text_in_cell_ansi(ANSILineState *s, const CPUCell *c, TextCache *tc, bool skip_m
                 }
             } break;
         }
-        if (c->ch_is_idx && cell_has_leading_controls(c)) put_leading_controls_first(s->output_buf->buf + pos, s->output_buf->len - pos);
     }
     return num_cells_to_skip_for_tab;
 }
@@ -560,10 +542,7 @@ unicode_in_range(
                 i++;
                 num_cells_to_skip_for_tab--;
             }
-        } else {
-            if (include_cc && lc.count > 1 && cell_has_leading_controls(self->cpu_cells + i)) put_leading_controls_first(lc.chars, lc.count);
-            buf->len += include_cc ? lc.count : 1;
-        }
+        } else buf->len += include_cc ? lc.count : 1;
     }
     if (add_trailing_newline && !self->cpu_cells[self->xnum - 1].next_char_was_wrapped && buf->len < buf->capacity) buf->buf[buf->len++] = '\n';
     return true;

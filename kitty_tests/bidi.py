@@ -572,8 +572,8 @@ class TestBidi(BaseTest):
                     s = self.screen()
                     pb(s, IA)
                     self.draw_marked(s, mark, 'abc', split)
-                    # an isolate control with no previous cell is kept as a leading control of the cell written next
-                    first = 'a' + mark if mark in ISOLATE_CONTROLS else 'a'
+                    # an isolate control with no previous cell is stored in the cell, before the char written next
+                    first = mark + 'a' if mark in ISOLATE_CONTROLS else 'a'
                     self.ae(self.cell_texts(s, 4), [first, 'b', 'c', '\0'], mark)
                     self.ae(self.records(s, 0), [AUTO], mark)
                     s = self.screen()
@@ -768,10 +768,16 @@ class TestBidi(BaseTest):
             label = re.search(r'L\d{3}', text_of(y)).group()
             labels.add(label)
             cw = leading_controls_codeword(label, controls)
+            before = s.cpu_cells(y, 0)
             pb(s, CUP(y + 1) + cw)
             log.append(f'controls for {label} at row {y}')
             stored = s.cpu_cells(y, 0)['text']
-            if not stored.startswith(cw):
+            if before['mcd'] and before['y'] > 0:
+                # the lower row of a multiline multicell: no cell there can take a control without moving the cursor, so it is dropped
+                after = s.cpu_cells(y, 0)
+                if after != before or any(ch in LEADING_CONTROLS for ch in stored):
+                    self.fail(f'{where()}: cell (0, {y}) under a multiline multicell became {after!r} from {before!r} after {cw!r}')
+            elif not stored.startswith(cw):
                 self.fail(f'{where()}: cell (0, {y}) holds {stored!r} right after {cw!r} was written there')
             return done
 

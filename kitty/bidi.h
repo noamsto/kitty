@@ -105,12 +105,12 @@ void bidi_maps_free(BidiMaps *b);
 // When rows or cols differ from the maps', reallocates them with no row mapped
 // and sets changed. Returns false on allocation failure or cols > UINT16_MAX.
 bool bidi_maps_ensure(BidiMaps *b, index_type rows, index_type cols);
-// Whether the base codepoint of some cell passes bidi_codepoint_may_reorder(), or some cell holds an RLI
+// Whether the base codepoint of some cell passes bidi_codepoint_may_reorder(), or some cell holds an RLI or a leading RLM
 bool bidi_cells_may_reorder(const CPUCell *cells, index_type num, const TextCache *tc);
-// The memo of a row's cells: BIDI_STAMP_ISOLATES when a cell holds an isolate control after its first char, else BIDI_STAMP_RTL
-// when a base codepoint passes bidi_codepoint_may_reorder(), else BIDI_STAMP_IMPLICIT
+// The memo of a row's cells: BIDI_STAMP_ISOLATES when a cell holds an isolate control, else BIDI_STAMP_RTL when a base
+// codepoint passes bidi_codepoint_may_reorder() or a cell holds a leading RLM, else BIDI_STAMP_IMPLICIT
 unsigned bidi_row_memo(const CPUCell *cells, index_type num, const TextCache *tc);
-// The depth after the row of the isolates its cells hold after their first char, folded from depth >= 0 with a PDI at depth 0
+// The depth after the row of the isolate controls its cells hold, folded from depth >= 0 with a PDI at depth 0
 // ignored, as FriBidi gets them. Sets *has_opener when the row holds an LRI, RLI or FSI.
 int bidi_row_fold_isolates(const CPUCell *cells, index_type num, const TextCache *tc, int depth, bool *has_opener);
 // The FriBidi base of a paragraph whose first row has this record: with auto set the first strong character wins and rtl is the fallback
@@ -132,7 +132,8 @@ bool bidi_resolve_paragraph(
     int first_render_row,
     index_type min_render_row,
     index_type gap_x);
-// Whether the cell is blank for the cursor gap: no text, a lone space, or a space followed by isolate controls only
+// Whether the cell is blank for the cursor gap: no text, a lone space, or a space followed by isolate controls only, so
+// never a cell with leading controls
 bool bidi_cell_is_gap(const CPUCell *c, const TextCache *tc);
 // x when 0 < x < cols and the cells before and from x to the row's end are all gap cells, else 0
 index_type bidi_cursor_gap(const CPUCell *cells, index_type cols, index_type x, const TextCache *tc);
@@ -145,11 +146,11 @@ void bidi_cache_drop_screen_entries(BidiMaps *b);
 // Moves every render row's map and cache entry up by 0 < d < rows rows, leaving the bottom d rows with neither
 void bidi_cache_move_rows(BidiMaps *b, index_type d);
 
-// Whether the row's first cell holds leading isolate controls and the first of them is a PDI
+// Whether the first isolate control among the leading controls of the row's first cell is a PDI
 bool bidi_row_starts_with_pdi(const CPUCell *cells, index_type num, const TextCache *tc);
-// Whether the cell holds an isolate control (LRI RLI FSI PDI) after its first char
+// Whether the cell holds an isolate control (LRI RLI FSI PDI), among its leading controls or after its base char
 bool bidi_cell_has_isolates(const CPUCell *c, const TextCache *tc);
-// Whether some cell of the row holds an isolate control after its first char
+// Whether some cell of the row holds an isolate control
 bool bidi_row_has_isolates(const CPUCell *cells, index_type num, const TextCache *tc);
 // Lays out the row's isolate regions, each the chars strictly between a top-level initiator its cells hold as a control and
 // the PDI closing it on the row, as a paragraph of its own with the initiator's base, every other cell in place at level 0.

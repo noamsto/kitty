@@ -4949,8 +4949,9 @@ class TestBidiReorder(BaseTest):
             ('PDI, then a second output row', (prompt + PDI + H1.encode() + b'\r\n' + H1.encode(),), 6, 2, standalone),
             ('PDI on the bottom row, which scrolls to make room', (prompt + b'\r\n' + PDI + H1.encode(),), 3, 2, standalone),
             ('no PDI keeps the old behaviour', (prompt + H1.encode(),), 6, 1, joined),
-            ('the cursor leaves the row before any text', (prompt + PDI + b'\r\n' + H1.encode(),), 6, 2, joined),
-            ('the cursor leaves the bottom row before any text, scrolling', (prompt + PDI + b'\r\n' + H1.encode(),), 2, 1, joined),
+            # the PDI stays in its own row's cell and ends the prompt group there, so the output after it stands alone
+            ('the cursor leaves the row before any text', (prompt + PDI + b'\r\n' + H1.encode(),), 6, 2, standalone),
+            ('the cursor leaves the bottom row before any text, scrolling', (prompt + PDI + b'\r\n' + H1.encode(),), 2, 1, standalone),
         ):
             with self.subTest(name):
                 s = self.screen(cols=n, lines=lines)
@@ -4971,24 +4972,28 @@ class TestBidiReorder(BaseTest):
         n = 12
         with_control, plain = self.maps((R + N).encode(), n, 1)[0], self.maps(N.encode(), n, 1)[0]
         self.assertNotEqual(with_control, plain)
-        # (name, text, chars of cell 0, the layout the row has: 'control' as under the control, 'plain' as without, None unchecked)
+        # (name, text, chars of cell 0, the layout the row has: 'control' as under the control, 'plain' as without, a (v2l, levels)
+        # pair, None unchecked). A cell's controls are stored first, in text order
         cases = (
-            ('control then text', R + N, '1RLI', 'control'),
+            ('control then text', R + N, 'RLI1', 'control'),
             ('text overwritten at column 0 without a control', R + N + '\x1b[1;1H' + N, '1', 'plain'),
-            ('text overwritten with a control again', R + N + '\x1b[1;1H' + R + N, '1RLI', 'control'),
+            ('text overwritten with a control again', R + N + '\x1b[1;1H' + R + N, 'RLI1', 'control'),
             ('line erased after', R + N + '\x1b[2K', '', None),
             ('cell erased before the text', 'x\x1b[1;1H' + R + '\x1b[K' + N, '1', 'plain'),
             ('row erased before the text', 'x\r' + R + '\x1b[2K' + N, '1', 'plain'),
             ('blank row erased before the text', R + '\x1b[2K' + N, '1', 'plain'),
             ('blank cell erased with ECH before the text', R + '\x1b[X' + N, '1', 'plain'),
-            ('cursor moved away and back to the untouched cell', 'x\r' + R + '\x1b[1;5H\x1b[1;1H' + N, '1RLI', 'control'),
-            ('a cell written elsewhere first', R + '\x1b[1;6Hx\x1b[1;1H' + N, '1', None),
-            ('control repeated', R + R + N, '1RLIRLI', None),
-            ('wide first cell takes none', R + '中' + N, '中', None),
-            ('combining mark after the control', R + 'a\u0301', 'aRLI\u0301', None),
-            ('a PDI after the cell closes the opener before it', R + '1' + PDI + '2 34', '1', 'plain'),
-            ('a PDI after a matched pair is dropped', '\u2066\u2069' + '1' + PDI + '2 34', '1LRIPDI', None),
-            ('an opener after the cell is dropped', R + '1' + '\u2066' + '2 34', '1RLI', None),
+            ('cursor moved away and back to the untouched cell', 'x\r' + R + '\x1b[1;5H\x1b[1;1H' + N, 'RLI1', 'control'),
+            # the control lives in its cell, so a write elsewhere leaves it there
+            ('a cell written elsewhere first', R + '\x1b[1;6Hx\x1b[1;1H' + N, 'RLI1', None),
+            ('control repeated', R + R + N, 'RLIRLI1', None),
+            # a wide char goes after the controls as a narrow one does
+            ('wide first cell keeps them', R + '中' + N, 'RLI中', None),
+            ('combining mark after the control', R + 'a\u0301', 'RLIa\u0301', None),
+            # a PDI after the char is stored after it, so the isolate holds only the 1, at level 2
+            ('a PDI after the cell closes the opener before it', R + '1' + PDI + '2 34', 'RLI1PDI', (ID(0, n), (2,) + (0,) * (n - 1))),
+            ('a PDI after a matched pair is kept after the char', '\u2066\u2069' + '1' + PDI + '2 34', 'LRIPDI1PDI', None),
+            ('an opener after the cell is kept after the char', R + '1' + '\u2066' + '2 34', 'RLI1LRI', None),
             ('lrm at column 0 keeps the g8 handling', LRM + N, '1', None),
             ('an embedding stays inert', '\u202b' + N, '1', None),
         )
@@ -4999,7 +5004,7 @@ class TestBidiReorder(BaseTest):
                 self.ae(self.lead_cell(s), chars)
                 if same is not None:
                     test_screen_update_cell_data(s)
-                    self.ae((self.v2l(s, 0), self.levels(s, 0)), with_control if same == 'control' else plain)
+                    self.ae((self.v2l(s, 0), self.levels(s, 0)), {'control': with_control, 'plain': plain}.get(same, same))
         with self.subTest('text export puts the leading controls before the base char, and replaying it keeps them'):
             s = self.screen(cols=n, lines=3)
             parse_bytes(s, (R + N).encode())
@@ -5015,10 +5020,11 @@ class TestBidiReorder(BaseTest):
             parse_bytes(s, b'a\r\nb\r\nx\r' + R.encode() + b'\n\x1b[3;1H' + N.encode())
             self.ae(self.lead_cell(s, 2), '1')
         for name, mode in (('', b''), (' in insert mode, where no write check runs first', b'\x1b[4h')):
-            with self.subTest('controls kept for another row are dropped when a new control arrives' + name):
+            with self.subTest('a control stored on another row stays there when a new control arrives' + name):
                 s = self.screen(cols=n, lines=3)
                 parse_bytes(s, R.encode() + b'\x1b[2;1H' + mode + R.encode() + N.encode())
-                self.ae((self.lead_cell(s, 0), self.lead_cell(s, 1)), ('', '1RLI'))
+                # row 0 keeps its control-only cell
+                self.ae((self.lead_cell(s, 0), self.lead_cell(s, 1)), ('RLI', 'RLI1'))
         with self.subTest('alternate screen'):
             s = self.screen(cols=n, lines=3)
             parse_bytes(s, R.encode() + b'\x1b[?1049h' + N.encode())
@@ -5027,7 +5033,7 @@ class TestBidiReorder(BaseTest):
             # With bidi mode off the row's isolate regions still lay out, so the control is kept for them
             s = self.create_screen(cols=n, lines=3, options={})
             parse_bytes(s, (R + N).encode())
-            self.ae(self.lead_cell(s), '1RLI')
+            self.ae(self.lead_cell(s), 'RLI1')
         with self.subTest('soft wrapped continuation keeps the control with the cell before'):
             s = self.screen(cols=4, lines=3)
             parse_bytes(s, ('אבגד' + R + 'ה').encode())
@@ -5035,21 +5041,24 @@ class TestBidiReorder(BaseTest):
         with self.subTest('the control follows its cell when characters are inserted'):
             s = self.screen(cols=n, lines=3)
             parse_bytes(s, (R + N).encode() + b'\x1b[1;1H\x1b[2@')
-            self.ae(self.lead_cell(s, 0, 2), '1RLI')
-        with self.subTest('a narrow default emoji with VS16 after the control is widened and drops the controls, as a wide cell does'):
+            self.ae(self.lead_cell(s, 0, 2), 'RLI1')
+        with self.subTest('a narrow default emoji with VS16 after the control is widened and keeps the controls, as a wide cell does'):
             s = self.screen(cols=n, lines=3)
             parse_bytes(s, (R + '\u2600\ufe0f').encode())
-            self.ae((self.lead_cell(s), s.cursor.x, str(s.line(0))[:2]), ('\u2600\ufe0f', 2, '\u2600\ufe0f'))
+            # the widened cell carries its controls with the char
+            self.ae((self.lead_cell(s), s.cursor.x, str(s.line(0))[:3]), ('RLI\u2600\ufe0f', 2, R + '\u2600\ufe0f'))
         with self.subTest('SARA AM widens a cell with leading controls, in one write and in a later one'):
             for chunks in ((R + 'ก\u0e33',), (R + 'ก', '\u0e33')):
                 s = self.screen(cols=n, lines=3)
                 for chunk in chunks:
                     parse_bytes(s, chunk.encode())
-                self.ae((self.lead_cell(s, 0, 0), self.lead_cell(s, 0, 1), s.cursor.x), ('ก\u0e33', '', 2), chunks)
+                # the widened cell carries its controls with the char
+                self.ae((self.lead_cell(s, 0, 0), self.lead_cell(s, 0, 1), s.cursor.x), ('RLIก\u0e33', '', 2), chunks)
         with self.subTest('a wide char moved past a multiline multicell is not the cell the controls were kept for'):
             s = self.screen(cols=n, lines=3)
             parse_bytes(s, b'\x1b[2;1Hz\x1b[1;2H\x1b]66;s=2;X\x07\x1b[2;1H' + R.encode() + '中'.encode())
-            self.ae(self.lead_cell(s, 1), 'z')
+            # the control is stored at once, replacing the z, and the wide char lands past the multicell
+            self.ae(self.lead_cell(s, 1), 'RLI')
         with self.subTest('controls kept on the bottom row do not follow a scroll over a blank row'):
             s = self.screen(cols=n, lines=2)
             parse_bytes(s, b'x\r\n' + R.encode() + b'\n' + N.encode())
@@ -5057,8 +5066,8 @@ class TestBidiReorder(BaseTest):
 
     def test_leading_isolate_cap(self):
         # A leading control counts toward BIDI_MAX_ISOLATES like any other: RLI 12 34 PDI and 15 empty isolates, one over the cap
-        # when a PDI is added, and a cell keeps at most BIDI_MAX_LEAD leading controls
-        from kitty.fast_data_types import BIDI_MAX_LEAD
+        # when a PDI is added, and a cell keeps at most one control fewer than it has code points, so the char still fits
+        cap = 23  # MAX_NUM_CODEPOINTS_PER_CELL - 1, not exported
 
         body = '⁧12 34⁩ ' + 'b⁦⁩' * ((BIDI_MAX_ISOLATES - 2) // 2)
         for name, text, expect in (
@@ -5070,8 +5079,8 @@ class TestBidiReorder(BaseTest):
                 self.ae(tuple(range(5)) if got is None else got[:5], expect)
         with self.subTest('leading controls kept per cell'):
             s = self.screen(cols=12, lines=2)
-            parse_bytes(s, ('⁦' * (BIDI_MAX_LEAD + 3) + 'a').encode())
-            self.ae(len(s.cpu_cells(0)[0]['text']), 1 + BIDI_MAX_LEAD)
+            parse_bytes(s, ('⁦' * (cap + 3) + 'a').encode())
+            self.ae(s.cpu_cells(0)[0]['text'], '⁦' * cap + 'a')
 
     # Isolate regions
 
@@ -5180,12 +5189,12 @@ class TestBidiReorder(BaseTest):
                 self.assert_region(s, 1, (5, 4, 3, 2, 1, 0) + ID(6, 10), (1, 1, 1, 1, 1, 2) + (0,) * 4)
 
     def test_region_column_0_one_cell_then_region(self):
-        # The closing-PDI rule of leading controls cancels a one-cell isolate written at column 0 (a cell's leading controls hold no PDI), so cell 0
-        # stays at level 0, unlike the same isolate at another column
+        # A one-cell isolate written at column 0 is stored whole in cell 0, so cell 0 is at level 1 inside its own isolate, as the
+        # same isolate at another column is
         s = self.alt(10)
         parse_bytes(s, (FSI + 'א' + PDI + ' ' + FSI + 'בג' + PDI).encode())
-        self.assert_region(s, 0, (0, 1, 3, 2) + ID(4, 10), (0, 0, 1, 1) + (0,) * 6)
-        self.ae(s.line(0)[0], 'א')
+        self.assert_region(s, 0, (0, 1, 3, 2) + ID(4, 10), (1, 0, 1, 1) + (0,) * 6)
+        self.ae(s.line(0)[0], FSI + 'א' + PDI)
 
     def test_region_column_0_continuation_row(self):
         s = self.alt(5)
@@ -5311,7 +5320,7 @@ class TestBidiReorder(BaseTest):
                 parse_bytes(s, b'\x1b[2;1H\x1b[K')
         self.ae(str(s.line(0)).rstrip(), 'ab')
 
-        def pending_lead(overlay):
+        def column_0_control(overlay):
             s = self.create_screen(cols=20, lines=3, scrollback=0, options={})
             parse_bytes(s, ('\x1b[8h\r' + RLI).encode())
             if overlay:
@@ -5322,9 +5331,9 @@ class TestBidiReorder(BaseTest):
             parse_bytes(s, ('ab אב' + PDI).encode())
             return str(s.line(0))
 
-        with self.subTest('a: the overlay keeps the pending lead'):
-            # the RLI written at column 0 still becomes cell 0's leading control after the overlay comes and goes
-            self.ae((pending_lead(True), pending_lead(False)[:2]), (pending_lead(False), RLI + 'a'))
+        with self.subTest('a: the overlay keeps a control stored at column 0'):
+            # the RLI written at column 0 is still cell 0's leading control after the overlay comes and goes
+            self.ae((column_0_control(True), column_0_control(False)[:2]), (column_0_control(False), RLI + 'a'))
         with self.subTest('b: a lone FSI pre-edit leaves no control behind'):
             s = self.create_screen(cols=20, lines=3, scrollback=0, options={})
             s.cursor.x, s.cursor.y = 0, 1
@@ -5400,12 +5409,11 @@ class TestBidiReorder(BaseTest):
             self.assert_region(s, 0, (0, 1, 5, 4, 3, 2) + ID(6, 12), (0, 0, 1, 1, 1, 1) + (0,) * 6)
 
     def test_region_column_0_wide_first_char(self):
-        # Known limitation, not the intended layout: a wide cell cannot hold leading controls, so the FSI is dropped and the
-        # region is lost
+        # A wide first char keeps the FSI stored before it, so the region is laid out: 中 is L, so only the Hebrew is reversed
         s = self.alt(12)
         parse_bytes(s, (FSI + '中 שלום' + PDI).encode())
-        self.assert_no_region(s)
-        self.ae(s.cpu_cells(0)[0]['text'], '中')
+        self.assert_region(s, 0, (0, 1, 2, 6, 5, 4, 3) + ID(7, 12), (0, 0, 0, 1, 1, 1, 1) + (0,) * 5)
+        self.ae(s.cpu_cells(0)[0]['text'], FSI + '中')
 
     def test_region_column_0_wide_cluster_intact(self):
         # A control kept for column 0 must not split the cluster of a wide first char
@@ -5419,7 +5427,8 @@ class TestBidiReorder(BaseTest):
         with self.subTest('b: ZWJ sequence'):
             s = self.alt(10)
             parse_bytes(s, (RLI + '👨‍👩').encode())
-            self.ae(s.cpu_cells(0)[0]['text'], '👨‍👩')
+            # the control is stored before the cluster, which stays whole
+            self.ae(s.cpu_cells(0)[0]['text'], RLI + '👨‍👩')
 
     def test_region_osc66_trigger(self):
         # Controls inside OSC 66 cells form a region as plain writes do; b is L at level 2 in the RTL region
@@ -5434,8 +5443,8 @@ class TestBidiReorder(BaseTest):
         # a stamped row drops a control written with BDSM off after an empty cell instead of keeping it as a region's PDI
         self.assertNotIn(PDI, str(s.line(0)))
         parse_bytes(s, ('\x1b[1;1H' + FSI + 'q').encode())
-        # nor does it keep one at column 0 as the next cell's leading control
-        self.ae(s.line(0)[0], 'q')
+        # at column 0 there is no previous cell, so the control is stored in the cell as on any row
+        self.ae(s.line(0)[0], FSI + 'q')
 
     def test_region_memo_survives_record_0(self):
         s = self.alt(5)
