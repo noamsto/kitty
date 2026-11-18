@@ -900,11 +900,27 @@ class TestBidi(BaseTest):
             span = label_span(y)
             return not span or span[1] + extra <= 10
 
-        def write_at_row(write, width=1):
+        def marks_only(y):
+            text = s.cpu_cells(y, 0)['text']
+            return text if text and not text.strip(LEADING_CONTROLS) else ''
+
+        def draw_at_start(y, data, ch):
+            # a char drawn at column 0 of a marks-only cell, the cursor already there, keeps the controls before it
+            run = marks_only(y)
+            pb(s, data)
+            log.append(data)
+            stored = s.cpu_cells(y, 0)['text']
+            if run and not stored.startswith(run + ch[0]):
+                self.fail(f'{where()}: cell (0, {y}) holds {stored!r} after {ch!r} was drawn into a cell holding {run!r}')
+            return done
+
+        def write_at_row(text, width=1, drawn=False):
+            # drawn: text is a char drawn at column 0
             y = rnd.randrange(s.lines)
             if crowded(y) or (irm and not fits(y, width)):
                 return None
-            return CUP(y + 1) + write()
+            data = CUP(y + 1) + text
+            return draw_at_start(y, data, text) if drawn else data
 
         def label_row():
             nonlocal next_label
@@ -916,9 +932,15 @@ class TestBidi(BaseTest):
             assert next_label < 1000, 'labels have three digits'
             return f'{CUP(y + 1)}\x1b[6GL{next_label:03d}'
 
+        def wraps_into(y):
+            if y:
+                return s.linebuf.is_continued(y)
+            return not s.is_using_alternate_linebuf() and s.historybuf.count > 0 and s.historybuf.endswith_wrap()
+
         def control_row():
-            # in insert mode the store may insert a cell, moving the label right
-            rows = [y for y in range(s.lines) if label_span(y) and (not irm or fits(y, 1))]
+            # a row continuing a wrapped line has a previous cell, which may take the controls instead; in insert mode the store
+            # may insert a cell, moving the label right
+            rows = [y for y in range(s.lines) if not wraps_into(y) and (span := label_span(y)) and span[0] > 0 and (not irm or fits(y, 1))]
             if not rows:
                 return label_row()
             y = rnd.choice(rows)
@@ -926,6 +948,7 @@ class TestBidi(BaseTest):
             labels.add(label)
             cw = leading_controls_codeword(label, controls)
             before = s.cpu_cells(y, 0)
+            expected = (marks_only(y) + cw)[:MAX_LEADING_CONTROLS]
             pb(s, CUP(y + 1) + cw)
             log.append(f'controls for {label} at row {y}')
             stored = s.cpu_cells(y, 0)['text']
@@ -934,7 +957,7 @@ class TestBidi(BaseTest):
                 after = s.cpu_cells(y, 0)
                 if after != before or any(ch in LEADING_CONTROLS for ch in stored):
                     self.fail(f'{where()}: cell (0, {y}) under a multiline multicell became {after!r} from {before!r} after {cw!r}')
-            elif not stored.startswith(cw):
+            elif stored != expected:
                 self.fail(f'{where()}: cell (0, {y}) holds {stored!r} right after {cw!r} was written there')
             return done
 
@@ -952,8 +975,7 @@ class TestBidi(BaseTest):
             return done
 
         def resize():
-            # opset A never widens, so no reflow moves a cell
-            lines, cols = rnd.randint(2, 6), rnd.randint(10, 14 if opset == 'B' else s.columns)
+            lines, cols = rnd.randint(2, 6), rnd.randint(10, 14)
             s.resize(lines, cols)
             log.append(f'resize {lines}x{cols}')
             return done
@@ -973,7 +995,7 @@ class TestBidi(BaseTest):
             ch = rnd.choice(('q', '\u4e2d'))
             if not fits(y, 1 + (ch == '\u4e2d')):
                 return None
-            return f'{CUP(y + 1)}\x1b[4h{ch}' + ('' if irm else '\x1b[4l')
+            return draw_at_start(y, f'{CUP(y + 1)}\x1b[4h{ch}' + ('' if irm else '\x1b[4l'), ch)
 
         def ich():
             y = rnd.randrange(s.lines)
@@ -982,7 +1004,7 @@ class TestBidi(BaseTest):
         def dch():
             y = rnd.randrange(s.lines)
             span = label_span(y)
-            return f'{CUP(y + 1)}\x1b[P' if not span or span[0] > 0 else None
+            return f'{CUP(y + 1)}\x1b[P' if not span or span[0] > 2 else None
 
         # (weight, op); an op gives bytes to parse, done when it did its work itself, or None to skip the step
         ops = [
@@ -992,9 +1014,9 @@ class TestBidi(BaseTest):
             (3, lambda: f'\x1b[{rnd.randint(1, 3)}{rnd.choice("STLM")}'),
             (3, lambda: CUP(row()) + rnd.choice(('\x1b[2K', '\x1b[J', '\x1b[1J', '\x1b[2J', f'\x1b[{rnd.randint(1, 12)}X'))),
             (2, overlay),
-            (2, lambda: None if irm else write_at_row(lambda: f'\x1b]66;w=1:s={rnd.randint(1, 2)};x\x07')),
-            (2, lambda: None if irm else write_at_row(lambda: '\x1b[2G\x1b]66;s=2;a\x07')),
-            (3, lambda: write_at_row(lambda: rnd.choice(('q', '\u4e2d', 'e\u0301')), 2)),
+            (2, lambda: None if irm else write_at_row(f'\x1b]66;w=1:s={rnd.randint(1, 2)};x\x07')),
+            (2, lambda: None if irm else write_at_row('\x1b[2G\x1b]66;s=2;a\x07')),
+            (3, lambda: write_at_row(rnd.choice(('q', '\u4e2d', 'e\u0301')), 2, drawn=True)),
             (3, label_row),
             (5, control_row),
             (1, resize),

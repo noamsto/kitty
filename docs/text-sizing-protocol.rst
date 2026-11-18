@@ -411,9 +411,12 @@ For each decoded code point:
    the line's text. Such a code point is stored in the current cell and the cursor
    does not move. If the cell already holds only these controls, the code point
    is added after them, otherwise it replaces what the cell held, as a code
-   point added to the cell would. A code point later added to a cell that
-   holds only these controls, at the start of the line, is added after them.
-   Until then the cell is shown empty.
+   point added to the cell would. A code point later drawn into such a cell
+   at the start of the line, other than by an automatic wrap from the line
+   above (which discards the controls), is added after them. Until then the
+   cell is shown empty. With bidi mode off, an isolate control at the start
+   of a line that was not written in bidi mode is stored in this way even when
+   the line continues a wrapped line.
 
 #. If there is a previous cell, the
    `Grapheme segmentation algorithm UAX29-C1-1 <https://www.unicode.org/reports/tr29/#C1-1>`__
