@@ -713,7 +713,7 @@ class TestBidiReorder(BaseTest):
         # the pre-edit row keeps its map and is uploaded through it, then is as before once the overlay closes
         s = self.screen()
         draw_coloured(s, 'abc' + A)
-        # moved explicitly: left at x 8, past the empty cells; the cursor gap (the empty cells join the RTL run)
+        # moved into the gap at x 8 (draw leaves it at x 6): the empty cells join the RTL run
         s.cursor_position(1, 9)
         gap_v2l = (0, 1, 2, 7, 6, 5, 4, 3, 8, 9)
         logical = [s.cell_style_idx(0, x) for x in range(10)]
@@ -4570,29 +4570,24 @@ class TestBidiReorder(BaseTest):
         return plain, self.uploaded(f, 0)
 
     def test_cache_overlay_row(self):
-        # an overlay line on a Hebrew row, then removed: the row keeps its map and every frame resolves nothing
-        s = self.screen()
-        s.draw(MIXED)
-        s.cursor_position(1, 7)  # not past empty cells: the cursor has no gap
-        self.warm(s)
-        seen = []
-        for overlay, n in (('xy', 3), ('', 1)):
-            s.test_update_overlay_text(overlay)
-            seen += [(self.frame(s)[0], self.v2l(s, 0)) for _ in range(n)]
-        self.ae(seen, [(0, MIXED_V2L)] * 4)
-
-    def test_cache_overlay_row_in_gap(self):
-        s = self.screen()
-        s.draw(MIXED)
-        s.cursor_position(1, 9)
-        self.warm(s)
+        # an overlay line on a Hebrew row, then removed: the row keeps its map and every frame resolves nothing,
+        # except in the gap
         gap_v2l = (0, 1, 2, 7, 6, 5, 4, 3, 8, 9)
-        seen = []
-        for overlay, n in (('xy', 3), ('', 1)):
-            s.test_update_overlay_text(overlay)
-            seen += [(self.frame(s)[0], self.v2l(s, 0)) for _ in range(n)]
         # the overlay frame dirties the row, and while the gap applies the row is unsigned, so a dirty frame resolves
-        self.ae(seen, [(1, gap_v2l), (0, gap_v2l), (0, gap_v2l), (1, gap_v2l)])
+        for x, want in (
+            (7, [(0, MIXED_V2L)] * 4),  # not past empty cells: the cursor has no gap
+            (9, [(1, gap_v2l), (0, gap_v2l), (0, gap_v2l), (1, gap_v2l)]),
+        ):
+            with self.subTest(x=x):
+                s = self.screen()
+                s.draw(MIXED)
+                s.cursor_position(1, x)
+                self.warm(s)
+                seen = []
+                for overlay, n in (('xy', 3), ('', 1)):
+                    s.test_update_overlay_text(overlay)
+                    seen += [(self.frame(s)[0], self.v2l(s, 0)) for _ in range(n)]
+                self.ae(seen, want)
 
     def test_preedit_rtl_paragraph(self):
         # The cursor in the blank at x 7 is left of the text; the pre-edit of n cells ends there and extends left (IME anchor at 3 - n)
