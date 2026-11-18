@@ -7,7 +7,8 @@
 #include "bidi.h"
 
 #define row_of(arr) (b->arr + (size_t)render_row * b->cols)
-// In cell_of_char: an isolate control fed after its cell's first char, in the cell's column
+// In cell_of_char: a char that takes no column, fed in its cell's column: an isolate control after the cell's first
+// char, or a leading mark before it
 #define BIDI_EXTRA_CHAR (1u << 31)
 
 // Stores in buf the isolate controls (LRI RLI FSI PDI) among the chars of a cell after the first, returning how many.
@@ -24,6 +25,18 @@ cell_isolates(const CPUCell *c, const TextCache *tc, char_type buf[MAX_NUM_CODEP
     return n;
 }
 
+// Stores in buf the LRM and RLM that the text of a cell starts with, before its first char (see is_leading_mark()),
+// returning how many. A cell with only marks gives all of them, and feed_row feeds the cell itself as a blank after them.
+static inline unsigned
+cell_leading_marks(const CPUCell *c, const TextCache *tc, char_type buf[MAX_NUM_CODEPOINTS_PER_CELL]) {
+    if (!c->ch_is_idx || (c->is_multicell && (c->x || c->y)) || !is_leading_mark(tc_first_char_at_index(tc, c->ch_or_idx))) return 0;
+    ListOfChars lc = {.chars = buf, .capacity = MAX_NUM_CODEPOINTS_PER_CELL};
+    if (!tc_chars_at_index_without_alloc(tc, c->ch_or_idx, &lc)) return 0;
+    unsigned n = 0;
+    while (n < lc.count && is_leading_mark(lc.chars[n])) n++;
+    return n;
+}
+
 bool
 bidi_cell_has_isolates(const CPUCell *c, const TextCache *tc) {
     char_type buf[MAX_NUM_CODEPOINTS_PER_CELL];
@@ -31,10 +44,10 @@ bidi_cell_has_isolates(const CPUCell *c, const TextCache *tc) {
 }
 
 static bool
-row_has_isolates(const CPUCell *cells, index_type num, const TextCache *tc) {
+row_has_extra_chars(const CPUCell *cells, index_type num, const TextCache *tc) {
     char_type buf[MAX_NUM_CODEPOINTS_PER_CELL];
     for (index_type x = 0; x < num; x++) {
-        if (cell_isolates(cells + x, tc, buf)) return true;
+        if (cell_isolates(cells + x, tc, buf) || cell_leading_marks(cells + x, tc, buf)) return true;
     }
     return false;
 }
@@ -115,6 +128,15 @@ bidi_cells_may_reorder(const CPUCell *cells, index_type num, const TextCache *tc
         if (c->ch_is_idx) {
             if (c->is_multicell && (c->x || c->y)) continue;
             ch = tc_first_char_at_index(tc, ch);
+            // A leading RLM reorders digits and neutrals without an RTL letter, as an RLI does; a leading LRM does not
+            if (ch == 0x200f) return true;
+            if (ch == 0x200e) {
+                // an RLM among the leading marks after it reorders as a leading RLM does
+                for (unsigned i = 1, k = cell_leading_marks(c, tc, buf); i < k; i++) {
+                    if (buf[i] == 0x200f) return true;
+                }
+                ch = tc_base_char_at_index(tc, c->ch_or_idx);
+            }
         }
         if (bidi_codepoint_may_reorder(ch)) return true;
         if (!c->ch_is_idx) continue;
@@ -146,10 +168,11 @@ ensure_scratch(BidiMaps *b, size_t cap) {
     return true;
 }
 
-// Appends to b->text the characters row r of a paragraph feeds FriBidi: per cell a
-// character starts in its first char, a blank as U+0020, then with feed_iso its
-// isolate controls. Returns the new length, or UINT32_MAX for a row with a cell
-// spanning several rows, which cannot be reordered.
+// Appends to b->text the characters row r of a paragraph feeds FriBidi: per cell
+// the leading marks its text starts with, its first char after them, a blank as
+// U+0020, then with feed_iso its isolate controls. Returns the new length, or
+// UINT32_MAX for a row with a cell spanning several rows, which cannot be
+// reordered.
 static inline uint32_t
 feed_row(BidiMaps *b, const CPUCell *cells, const TextCache *tc, uint32_t r, uint32_t n, bool feed_iso) {
     // Locals, as the stores through b->text could otherwise alias b's fields and make every iteration reload them
@@ -163,12 +186,17 @@ feed_row(BidiMaps *b, const CPUCell *cells, const TextCache *tc, uint32_t r, uin
             if (c->scale > 1) return UINT32_MAX;
             if (col && c->x) continue;
         }
+        char_type buf[MAX_NUM_CODEPOINTS_PER_CELL];
+        // Within the scratch: resolve_levels sized it for the marks cell_leading_marks() counted in these same cells
+        for (unsigned i = 0, k = cell_leading_marks(c, tc, buf); i < k; i++) {
+            *text++ = buf[i];
+            *cell_of_char++ = row_bits | col | BIDI_EXTRA_CHAR;
+        }
         const char_type ch = cell_first_char(c, tc);
         *text++ = ch ? ch : ' ';
         *cell_of_char++ = row_bits | col;
         if (!feed_iso || !c->ch_is_idx) continue;
         // Within the scratch: resolve_levels sized it for the controls cell_isolates() counted in these same cells
-        char_type buf[MAX_NUM_CODEPOINTS_PER_CELL];
         for (unsigned i = 0, k = cell_isolates(c, tc, buf); i < k; i++) {
             *text++ = buf[i];
             *cell_of_char++ = row_bits | col | BIDI_EXTRA_CHAR;
@@ -238,12 +266,16 @@ resolve_levels(BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const
     if (!num_rows || num_rows > BIDI_MAX_PARAGRAPH_ROWS) return false;
     // Counted before anything is fed, as the scratch must hold the controls; over the cap none are fed, keeping FriBidi linear
     unsigned isolates = 0;
+    size_t marks = 0;
     char_type buf[MAX_NUM_CODEPOINTS_PER_CELL];
-    for (unsigned r = 0; r < num_rows && isolates <= BIDI_MAX_ISOLATES; r++) {
-        for (index_type x = 0; x < b->cols && isolates <= BIDI_MAX_ISOLATES; x++) isolates += cell_isolates(rows[r] + x, tc, buf);
+    for (unsigned r = 0; r < num_rows; r++) {
+        for (index_type x = 0; x < b->cols; x++) {
+            if (isolates <= BIDI_MAX_ISOLATES) isolates += cell_isolates(rows[r] + x, tc, buf);
+            marks += cell_leading_marks(rows[r] + x, tc, buf);
+        }
     }
     const bool feed_iso = isolates && isolates <= BIDI_MAX_ISOLATES;
-    if (!ensure_scratch(b, (size_t)num_rows * b->cols + (feed_iso ? isolates : 0))) {
+    if (!ensure_scratch(b, (size_t)num_rows * b->cols + (feed_iso ? isolates : 0) + marks)) {
         b->resolve_cacheable = false;
         return false;
     }
@@ -299,8 +331,8 @@ resolve_levels(BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const
     }
     // FriBidi leaves a weak base in place when no strong character decides
     *base = FRIBIDI_IS_RTL(*base) ? FRIBIDI_PAR_RTL : FRIBIDI_PAR_LTR;
-    // A signature has no room for a cell's controls, and over the cap a row losing one changes the layout
-    b->resolve_signed = !budget_fired && !isolates;
+    // A signature has no room for a cell's controls or marks, and over the cap a row losing one changes the layout
+    b->resolve_signed = !budget_fired && !isolates && !marks;
     // Only an LTR result can leave every level at 0, an RTL one has them all at 1 or more
     if (max_level <= 1) return false;
     if (feed_iso && n_trim < n && !b->no_trim) n_trim += keep_typed_blanks(b, rows[num_rows - 1], n_trim, n);
@@ -421,8 +453,8 @@ write_signature(BidiMaps *b, index_type render_row, uint32_t row_first_char, uin
 bool
 bidi_row_signature_matches(BidiMaps *b, const CPUCell *cells, const TextCache *tc, index_type render_row) {
     if (render_row >= b->rows || !b->sig_valid[render_row] || !ensure_scratch(b, b->cols)) return false;
-    // A paragraph holding a control is never signed
-    if (row_has_isolates(cells, b->cols, tc)) return false;
+    // A paragraph holding a control or a mark is never signed
+    if (row_has_extra_chars(cells, b->cols, tc)) return false;
     const uint32_t n = feed_row(b, cells, tc, 0, 0, false);
     if (n == UINT32_MAX) return false;
     fribidi_get_bidi_types(b->text, (FriBidiStrIndex)n, b->types);

@@ -14,6 +14,7 @@ from kitty.fonts.render import setup_for_testing
 from .base import BaseTest, draw_multicell, parse_bytes
 
 A = 'אבג'  # three Hebrew letters, bidi class R
+LRM, RLM = '\u200e', '\u200f'
 ID10 = tuple(range(10))
 MIXED = 'abc' + A
 MIXED_V2L = (0, 1, 2, 5, 4, 3) + ID10[6:]
@@ -3600,3 +3601,127 @@ class TestBidiReorder(BaseTest):
         self.ae((s.test_cursor_render(CURSOR_BEAM), s.test_ime_anchor_x()), ((4, False), 0))
         self.ae(row[:4], preedit_ref[6:10])
         self.ae((row[4:], self.v2l(s, 0)), (row0[4:], ID10[::-1]))
+
+    def marked(self, *seqs, text='', **kw):
+        s = self.dscreen(*seqs, **kw)
+        s.draw(text)
+        self.frame(s)
+        return s
+
+    def test_leading_mark_without_bidi_mode(self):
+        s = self.create_screen(cols=10, options={})
+        s.draw(RLM + 'abc' + A)
+        self.ae((self.refresh(s, 0), self.memo(s, 0), s.test_bidi_counts()), (None, NONE, (0, 0)))
+
+    def test_leading_mark_sets_paragraph_direction(self):
+        # under 2501 a leading mark is the first strong char of the paragraph
+        s, f = self.marked(self.AUTO, text=RLM + 'abc'), self.marked(self.SCP_RTL, text='abc')
+        self.ae((self.vmaps(s), self.lv(s, 0), self.prtl(s, 0)), (self.vmaps(f), self.lv(f, 0), True))
+        self.assertIsNone(self.marked(self.AUTO, text='abc').test_bidi_v2l(1))
+        s = self.marked(self.AUTO, text=LRM + A)
+        self.ae((self.vmaps(s)[0], self.prtl(s, 0)), ((2, 1, 0) + ID10[3:], False))
+        self.assertTrue(self.prtl(self.marked(self.AUTO, text=A), 0))
+
+    def test_leading_mark_under_a_fixed_direction(self):
+        # an RLM alone makes an LTR row reorder: the digits after it stay EN, which N1 treats as R, so the blank between them takes R
+        s = self.marked(text=RLM + '1 2')
+        self.ae((self.vmaps(s)[0], self.lv(s, 0)[:3], self.prtl(s, 0)), ((2, 1, 0) + ID10[3:], (2, 1, 2), False))
+        self.assertIsNone(self.marked(text='1 2').test_bidi_v2l(1))
+        # under a fixed RTL record a row is laid out whatever it holds, so a leading LRM before digits is too: by W7
+        # the digits after it are L, and the row lays out like LTR text in an RTL paragraph
+        s, f = self.marked(self.SCP_RTL, text=LRM + '1 2'), self.marked(self.SCP_RTL, text='abc')
+        self.ae((self.vmaps(s), self.prtl(s, 0)), (self.vmaps(f), True))
+        # an RLM after an LRM among the leading marks counts like a leading RLM
+        s = self.marked(text=LRM + RLM + '1 2')
+        self.ae((self.vmaps(s)[0], self.lv(s, 0)[:3], self.prtl(s, 0)), ((2, 1, 0) + ID10[3:], (2, 1, 2), False))
+        self.assertIsNone(self.marked(text=LRM + '1 2').test_bidi_v2l(1))
+
+    def test_leading_mark_stored_before_bidi_mode(self):
+        s = self.create_screen(cols=10, options={})
+        parse_bytes(s, RLM.encode())
+        parse_bytes(s, b'\x1b[8h' + self.AUTO)
+        s.draw('abc')
+        self.frame(s)
+        self.ae((self.vmaps(s), self.prtl(s, 0)), (self.vmaps(self.marked(self.SCP_RTL, text='abc')), True))
+
+    def test_leading_mark_moved_into_the_row(self):
+        # ICH moves the marked cell to column 1, where the mark is fed before its char
+        s = self.dscreen()
+        s.draw(RLM + '1 2')
+        parse_bytes(s, b'\r\x1b[@x')
+        self.ae(s.cpu_cells(0, 1)['text'], RLM + '1')
+        self.frame(s)
+        self.ae((self.vmaps(s)[0], self.lv(s, 0)[:4]), ((0, 3, 2, 1) + ID10[4:], (0, 2, 1, 2)))
+        # also when the cell holds a wide char, here a fullwidth digit
+        s = self.dscreen()
+        s.draw(RLM + '\uff11 2')
+        parse_bytes(s, b'\r\x1b[@x')
+        self.frame(s)
+        self.ae(self.vmaps(s)[0], (0, 4, 3, 1, 2) + ID10[5:])
+
+    def test_leading_mark_with_force_ltr(self):
+        s = self.marked(self.AUTO, text=RLM + 'abc', force_ltr=True)
+        self.assertIsNone(self.v2l(s, 0))
+
+    def test_leading_mark_removed(self):
+        # the cell keeps its char but loses the mark: the paragraph is resolved again
+        s = self.marked(self.AUTO, text=RLM + 'abc')
+        self.assertTrue(self.prtl(s, 0))
+        parse_bytes(s, b'\ra')
+        self.ae(s.cpu_cells(0, 0)['text'], 'a')
+        self.frame(s)
+        f = self.marked(self.AUTO, text='abc')
+        self.ae((self.v2l(s, 0), self.prtl(s, 0)), (None, self.prtl(f, 0)))
+
+    def test_marks_only_cell_sets_paragraph_direction(self):
+        # a line whose only content is a mark in the first cell: the mark is the first strong char of the paragraph
+        s = self.marked(self.AUTO, text=RLM)
+        self.assertTrue(self.prtl(s, 0))
+        self.assertIsNotNone(self.v2l(s, 0))
+        # as an abandoned mark over an erased line does
+        s = self.dscreen(self.AUTO, b'abc\r' + RLM.encode())
+        self.ae(s.cpu_cells(0, 0)['text'], RLM)
+        self.frame(s)
+        self.assertTrue(self.prtl(s, 0))
+        self.assertFalse(self.prtl(self.marked(self.AUTO, text=LRM), 0))
+
+    def test_marks_only_cell_without_a_reordering_mark(self):
+        # an LRM alone does not make an LTR row reorder, an RLM alone does
+        self.assertIsNone(self.v2l(self.marked(text=LRM), 0))
+        self.assertIsNotNone(self.v2l(self.marked(text=RLM), 0))
+        # and a marks-only cell in the row with digits after it
+        for lead in (RLM, LRM + RLM):
+            with self.subTest(lead=lead):
+                s = self.marked(text=lead + '\x1b[C1 2')
+                f = self.marked(text=RLM + '\x1b[C1 2')
+                self.ae(self.vmaps(s), self.vmaps(f))
+                self.assertIsNotNone(self.vmaps(s)[0])
+
+    def test_marks_only_cell_moved_into_the_row(self):
+        # ICH moves the marks-only cell to column 1, where its marks are fed before a blank, as for a cell with an
+        # RLM and a space
+        s = self.dscreen()
+        s.draw(RLM)
+        parse_bytes(s, b'\r\x1b[@\x1b[3G1 2')
+        self.ae([s.cpu_cells(0, x)['text'] for x in range(5)], ['', RLM, '1', ' ', '2'])
+        self.frame(s)
+        f = self.dscreen()
+        f.draw(RLM + ' 1 2')
+        parse_bytes(f, b'\r\x1b[@')
+        self.ae([f.cpu_cells(0, x)['text'] for x in range(5)], ['', RLM + ' ', '1', ' ', '2'])
+        self.frame(f)
+        self.ae((self.vmaps(s), self.lv(s, 0)), (self.vmaps(f), self.lv(f, 0)))
+        self.assertIsNotNone(self.vmaps(s)[0])
+
+    def test_leading_mark_restored_after_pre_edit(self):
+        # the frame draws the pre-edit over the marks-only cell and restores the line, mark included, after
+        for preedit in ('xy', RLM + 'xy'):
+            with self.subTest(preedit=preedit):
+                s = self.dscreen()
+                s.draw(RLM)
+                s.test_update_overlay_text(preedit)
+                self.frame(s)
+                self.ae(s.cpu_cells(0, 0)['text'], RLM)
+                s.test_update_overlay_text('')
+                s.draw('a')
+                self.ae(s.cpu_cells(0, 0)['text'], RLM + 'a')

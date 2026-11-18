@@ -34,7 +34,7 @@ from kitty.fonts.common import FontSpec, all_fonts_map, face_from_descriptor, ge
 from kitty.fonts.render import coalesce_symbol_maps, create_face, render_string, setup_for_testing, shape_string
 from kitty.options.types import Options
 
-from .base import BaseTest, draw_multicell
+from .base import BaseTest, draw_multicell, parse_bytes
 
 
 def parse_font_spec(spec):
@@ -1211,6 +1211,26 @@ class BidiRendering(FontBaseTest):
         for n in (3, 5):
             with self.assertRaises(ValueError):
                 test_render_line_levels(s.line(0), bytes(n))
+
+    def test_leading_mark_not_rendered(self):
+        # an LRM or RLM kept first in the text of a line's first cell renders nothing
+        for text in ('abc', '\u05d0\u05d1\u05d2', '\u4f60x', '\u2588'):
+            for mark in '\u200e\u200f':
+                with self.subTest(text=text, mark=mark):
+                    cols = len(text) + 2
+                    self.ae(self.render_text(mark + text, cols=cols), self.render_text(text, cols=cols))
+
+    def test_marks_only_cell_renders_as_an_empty_cell(self):
+        # a cell holding only marks, a single one included, draws as the blank cell it stands for
+        def rendered(tail):
+            s = self.create_screen(cols=5, lines=1, scrollback=0)
+            parse_bytes(s, ('x\u2588\u05d0\r' + tail).encode())
+            return self.render_cells(s.line(0))
+
+        blank = rendered('\x1b[X')
+        for marks in ('\u200e', '\u200f', '\u200e\u200f', '\u200f' * 3):
+            with self.subTest(marks=marks):
+                self.ae(rendered(marks), blank)
 
 
 def test_chars(chars: str = '╌', sz: int = 128) -> None:

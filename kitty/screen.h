@@ -267,6 +267,12 @@ typedef struct {
         struct { bool mBDSM, mBIDI_AUTODETECT, rtl; } main_stash; // main's controls while alt is active
     } bidi;
     struct BidiMaps *bidi_maps; // allocated by the first upload of a stamped buffer
+    // Re-entry guard of draw_at_leading_marks(), set only while it runs, so it never outlives one draw call
+    struct {
+        bool active;
+        const uint32_t *resume;
+        size_t resume_count;
+    } leading_marks_draw;
 } Screen;
 
 #define live_pixel_scroll_enabled(screen) (OPT(pixel_scroll) && (screen)->linebuf == (screen)->main_linebuf)

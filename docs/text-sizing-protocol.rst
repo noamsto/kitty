@@ -403,7 +403,15 @@ For each decoded code point:
    the Unicode standard.
 
 #. If there is no previous cell and the code point's width is zero,
-   the code point is discarded and its processing is finished.
+   the code point is discarded and its processing is finished. The
+   exceptions are :code:`U+200E LEFT-TO-RIGHT MARK` and :code:`U+200F
+   RIGHT-TO-LEFT MARK`, which set the direction of the line's text. Such
+   a code point is stored in the current cell and the cursor does not
+   move. If the cell already holds only these marks, the code point is
+   added after them, otherwise it replaces what the cell held, as a code
+   point added to the cell would. A code point later added to a cell that
+   holds only these marks, while there is still no previous cell, is
+   added after them. Until then the cell is shown empty.
 
 #. If there is a previous cell, the
    `Grapheme segmentation algorithm UAX29-C1-1 <https://www.unicode.org/reports/tr29/#C1-1>`__

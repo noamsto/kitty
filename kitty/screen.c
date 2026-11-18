@@ -1156,7 +1156,7 @@ stamp_line_for_bidi(Screen *self, index_type y, uint8_t record) {
     // A line without a record has all its record bits clear, so the record
     // is one OR.
     LineAttrs *a = self->linebuf->line_attrs + y;
-    if (a->bidi_stamp) return;
+    if (a->bidi_stamp || !record) return;
     a->val |= record;
     self->linebuf->bidi_stamped = true;
 }
@@ -1484,12 +1484,34 @@ screen_garbage_collect_style_table(Screen *self) {
     }
 }
 
+static bool __attribute__((noinline, cold))
+cell_text_is_only_leading_marks(const CPUCell *c, const TextCache *tc) {
+    char_type buf[MAX_NUM_CODEPOINTS_PER_CELL];
+    ListOfChars lc = {.chars = buf, .capacity = arraysz(buf)};
+    if (!tc_chars_at_index_without_alloc(tc, c->ch_or_idx, &lc) || !lc.count) return false;
+    for (size_t i = 0; i < lc.count; i++)
+        if (!is_leading_mark(buf[i])) return false;
+    return true;
+}
+
+// An LRM or RLM drawn with no previous cell is stored in the cell under the
+// cursor, as a one cell multicell char whose text is only such marks, see
+// draw_at_leading_marks(). A multicell, because every writer already tests
+// is_multicell before it overwrites a cell, so the next char drawn there reaches
+// the existing multicell code, at no cost to text drawn into other cells.
+// The text is always in the text cache, even for a single mark.
+static inline bool
+cell_holds_only_leading_marks(const CPUCell *c, const TextCache *tc) {
+    return c->is_multicell && c->ch_is_idx && c->natural_width && c->width == 1 && c->scale == 1 && cell_text_is_only_leading_marks(c, tc);
+}
+
 static bool
 add_combining_chars(Screen *self, const char_type *chars, size_t num_chars, index_type x, index_type y) {
     // Adds num_chars combining chars to the cell at x, y with a single lookup in the text cache
     CPUCell *cpu_cells = linebuf_cpu_cells_for_line(self->linebuf, y);
     CPUCell *cell = cpu_cells + x;
-    if (!cell_has_text(cell) || (cell->is_multicell && cell->y)) return false; // don't allow adding combining chars to a null cell
+    // don't allow adding combining chars to a null cell, a cell holding only leading marks is shown as one
+    if (!cell_has_text(cell) || (cell->is_multicell && (cell->y || cell_holds_only_leading_marks(cell, self->text_cache)))) return false;
     text_in_cell(cell, self->text_cache, self->lc);
     if (self->lc->count >= MAX_NUM_CODEPOINTS_PER_CELL) return false; // don't allow too many combining chars to prevent DoS attacks
     // must be computed before the char is changed
@@ -1952,6 +1974,8 @@ draw_non_ascii_run(Screen *self, text_loop_state *s, const uint32_t *chars, size
     return i;
 }
 
+static void draw_at_leading_marks(Screen *self, const uint32_t *chars, size_t num_chars);
+
 static inline __attribute__((always_inline)) void
 draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_state *s, const bool implicit, const uint8_t record) {
     init_text_loop_line(self, s);
@@ -2058,6 +2082,9 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
                         const bool was_multicell = pc->is_multicell;
                         draw_combining_char(self, s, ch);
                         if (implicit) record_combining_write(self, pc, py, before, was_multicell, record);
+                    } else if (is_leading_mark(ch)) {
+                        draw_at_leading_marks(self, &chars[i], num_chars - i);
+                        return;
                     }
                     continue;
                 }
@@ -2069,6 +2096,9 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
             if (s->cp[self->cursor->x].y) {
                 move_cursor_past_multicell(self, 1);
                 reinit_text_loop_line(self, s);
+            } else if (UNLIKELY(!s->prev.cc && cell_holds_only_leading_marks(s->cp + self->cursor->x, self->text_cache))) {
+                draw_at_leading_marks(self, &chars[i], num_chars - i);
+                return;
             } else nuke_multicell_char_at(self, self->cursor->x, self->cursor->y, s->cp[self->cursor->x].x != 0);
         }
 
@@ -2133,7 +2163,8 @@ draw_text_loop(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_
 
 // Text written in implicit bidi mode records each line a character is written
 // to. That has its own copy of the loop, so the copy that draws all other text
-// has no records to test for.
+// has no records to test for. draw_at_leading_marks() uses this copy too, with
+// bidi mode off its record is zero and records nothing.
 __attribute__((noinline)) static void
 draw_text_loop_implicit(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_state *s) {
     draw_text_loop_(self, chars, num_chars, s, true, current_bidi_record(self).val);
@@ -2153,6 +2184,152 @@ draw_text_loop_implicit(Screen *self, const uint32_t *chars, size_t num_chars, t
     text_loop_state s = {                                                                                             \
         .cc = (CPUCell){.hyperlink_id = self->active_hyperlink_id, .style_idx = draw_style_idx},                      \
     };
+
+// Called with no previous cell, so the cursor is at x 0, see init_prev_cell()
+static void
+store_leading_mark(Screen *self, char_type mark, const CPUCell *pen) {
+    const index_type x = self->cursor->x, y = self->cursor->y;
+    if (x >= self->columns) return;
+    CPUCell *c = linebuf_cpu_cells_for_line(self->linebuf, y) + x;
+    // there is no cell the mark can take without moving the cursor
+    if (c->is_multicell && c->y) return;
+    char_type buf[MAX_NUM_CODEPOINTS_PER_CELL];
+    ListOfChars lc = {.chars = buf, .capacity = arraysz(buf)};
+    if (cell_holds_only_leading_marks(c, self->text_cache)) {
+        if (!tc_chars_at_index_without_alloc(self->text_cache, c->ch_or_idx, &lc)) return;
+        // leave room for the char that is later drawn after the marks
+        if (lc.count >= MAX_NUM_CODEPOINTS_PER_CELL - 1) return;
+    } else {
+        if (c->is_multicell) nuke_multicell_char_at(self, x, y, false);
+        // In insert mode the cell taken by the marks is the one inserted for
+        // the char drawn after them, see draw_after_leading_marks(), after the
+        // multicell char under the cursor is removed, as by the draw loop.
+        if (self->modes.mIRM) insert_characters(self, x, 1, y, true);
+    }
+    buf[lc.count++] = mark;
+    *c = (CPUCell){
+        .hyperlink_id = pen->hyperlink_id,
+        .style_idx = pen->style_idx,
+        .is_multicell = true,
+        .natural_width = true,
+        .width = 1,
+        .scale = 1,
+    };
+    // not cell_set_chars(), which stores a single char in the cell itself
+    c->ch_or_idx = tc_get_or_insert_chars(self->text_cache, &lc);
+    c->ch_is_idx = true;
+    linebuf_mark_line_dirty(self->linebuf, y);
+    record_written_line(self, y, current_bidi_record(self).val);
+}
+
+static void
+prepend_leading_marks(Screen *self, index_type x, index_type y, const char_type *marks, size_t num_marks) {
+    CPUCell *cpu_cells = linebuf_cpu_cells_for_line(self->linebuf, y);
+    CPUCell *cell = cpu_cells + x;
+    text_in_cell(cell, self->text_cache, self->lc);
+    // must be computed before the char is changed
+    const MulticellRows rows = cell->is_multicell ? multicell_char_rows(self, x, y) : (MulticellRows){0};
+    // the marks were capped so that one char fits after them
+    ensure_space_for_chars(self->lc, self->lc->count + num_marks);
+    memmove(self->lc->chars + num_marks, self->lc->chars, self->lc->count * sizeof(self->lc->chars[0]));
+    memcpy(self->lc->chars, marks, num_marks * sizeof(self->lc->chars[0]));
+    self->lc->count += num_marks;
+    cell->ch_or_idx = tc_get_or_insert_chars(self->text_cache, self->lc);
+    cell->ch_is_idx = true;
+    if (cell->is_multicell) {
+        const char_type ch_and_idx = cell->ch_and_idx;
+        const index_type x_limit = MIN(x + mcd_x_limit(cell), self->columns);
+        for (int v = rows.start; v < rows.limit; v++) {
+            cpu_cells = linebuf_cpu_cells_for_line(self->linebuf, v);
+            for (index_type h = x; h < x_limit; h++) cpu_cells[h].ch_and_idx = ch_and_idx;
+            linebuf_mark_line_dirty(self->linebuf, v);
+        }
+    }
+}
+
+// Draws the char at chars[0] into the cell under the cursor, which holds only
+// leading marks, with no previous cell. Returns the number of chars consumed.
+static size_t
+draw_after_leading_marks(Screen *self, const uint32_t *chars, const CPUCell *pen) {
+    const index_type x = self->cursor->x, y = self->cursor->y;
+    if (x >= self->columns) return 0;
+    CPUCell *cp = linebuf_cpu_cells_for_line(self->linebuf, y);
+    // Where the char goes is decided before the cell is touched, as a draw
+    // that scrolls leaves x, y naming another line. At x 0 (no previous cell)
+    // a char no wider than the screen is drawn into this cell, except a wide
+    // char whose second cell is a lower row of a multiline char.
+    const char_type ch = map_char(self, chars[0]);
+    int width = 1;
+    if (ch > DEL) width = MAX(1, wcwidth_std(char_props_for(ch)));
+    if ((unsigned)width > self->columns) {
+        // the draw loop discards a char too wide for the screen
+        self->last_graphic_char = ch;
+        return 1;
+    }
+    // The marks are copied rather than kept as an index, as drawing can
+    // garbage collect the text cache.
+    char_type marks[MAX_NUM_CODEPOINTS_PER_CELL];
+    ListOfChars lc = {.chars = marks, .capacity = arraysz(marks)};
+    if (x + (index_type)width > self->columns || !tc_chars_at_index_without_alloc(self->text_cache, cp[x].ch_or_idx, &lc)) {
+        // dropping the marks keeps the draw loop from stopping here again
+        nuke_in_line(cp, x, x + 1, 0);
+        return 0;
+    }
+    // In insert mode this cell was already inserted for the char when the
+    // first mark was stored, so a wide char needs one more cell. Inserting it
+    // nukes the multiline chars from x + 1 on, as inserting the char without
+    // marks does, so the case below cannot happen in insert mode.
+    if (self->modes.mIRM && width == 2) insert_characters(self, x + 1, 1, y, true);
+    if (width == 2 && cp[x + 1].is_multicell && cp[x + 1].y) {
+        // The char moves past the lower rows of a multiline char, as in the
+        // draw loop, so this cell keeps its marks. The cells it lands in hold
+        // no multicell char, so the draw loop then draws it there.
+        self->cursor->x++;
+        move_cursor_past_multicell(self, 2);
+        return 0;
+    }
+    nuke_in_line(cp, x, x + 1, 0);
+    text_loop_state s = {.cc = *pen};
+    // the cells for the char are already inserted
+    const bool irm = self->modes.mIRM;
+    self->modes.mIRM = false;
+    draw_text_loop_implicit(self, chars, 1, &s);
+    self->modes.mIRM = irm;
+    prepend_leading_marks(self, x, y, marks, lc.count);
+    return 1;
+}
+
+// U+200E LRM and U+200F RLM drawn with no previous cell are not discarded like
+// other zero width chars: they are stored in the cell under the cursor, see
+// cell_holds_only_leading_marks(), and the next char drawn into that cell, with
+// no previous cell, keeps them first in its text. The draw loop stops at either
+// event and calls this, which handles it and draws the rest of the text. That
+// loop calls this again at the next event, which then only records where to
+// resume and returns, so that a draw of many lines with marks does not nest a
+// call per line.
+static void __attribute__((noinline, cold))
+draw_at_leading_marks(Screen *self, const uint32_t *chars, size_t num_chars) {
+    if (self->leading_marks_draw.active) {
+        self->leading_marks_draw.resume = chars;
+        self->leading_marks_draw.resume_count = num_chars;
+        return;
+    }
+    PREPARE_FOR_DRAW_TEXT;
+    self->leading_marks_draw.active = true;
+    while (true) {
+        size_t consumed = 1;
+        // the draw loop stops at a mark only with no previous cell
+        if (is_leading_mark(chars[0])) store_leading_mark(self, chars[0], &s.cc);
+        else consumed = draw_after_leading_marks(self, chars, &s.cc);
+        self->leading_marks_draw.resume = NULL;
+        text_loop_state rest = {.cc = s.cc};
+        draw_text_loop_implicit(self, chars + consumed, num_chars - consumed, &rest);
+        if (!self->leading_marks_draw.resume) break;
+        chars = self->leading_marks_draw.resume;
+        num_chars = self->leading_marks_draw.resume_count;
+    }
+    self->leading_marks_draw.active = false;
+}
 
 static void
 draw_text(Screen *self, const uint32_t *chars, size_t num_chars) {
@@ -4840,7 +5017,7 @@ screen_render_line_graphics(Screen *self, Line *line, int32_t row) {
             const CellStyle *st = style_table_get(self->style_table, cpu_cell->style_idx);
             cur_img_id_lower24bits = color_to_id(st->fg);
             cur_placement_id = color_to_id(st->decoration_fg);
-            text_in_cell(cpu_cell, self->text_cache, self->lc);
+            text_in_cell_without_leading_marks(cpu_cell, self->text_cache, self->lc);
             // If the char has diacritics, use them as row and column indices.
             if (self->lc->count > 1 && self->lc->chars[1]) cur_img_row = diacritic_to_rowcolumn(self->lc->chars[1]);
             if (self->lc->count > 2 && self->lc->chars[2]) cur_img_col = diacritic_to_rowcolumn(self->lc->chars[2]);
@@ -6134,7 +6311,11 @@ current_url_text(Screen *self, PyObject *args UNUSED) {
             } else ans = Py_NewRef(text);
         }
     }
-    return Py_NewRef(ans ? ans : Py_None);
+    if (!ans) Py_RETURN_NONE;
+    // a URL in the first cell of a line comes after the LRM or RLM that cell keeps first
+    Py_ssize_t start = 0, len = PyUnicode_GET_LENGTH(ans);
+    while (start < len && is_leading_mark(PyUnicode_READ_CHAR(ans, start))) start++;
+    return PyUnicode_Substring(ans, start, len);
 }
 
 

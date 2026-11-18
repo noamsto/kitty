@@ -1,13 +1,18 @@
 #!/usr/bin/env python
 # License: GPL v3 Copyright: 2026, Kovid Goyal <kovid at kovidgoyal.net>
 
+import random
+import re
 from itertools import product
+
+from kitty.window import as_text
 
 from .base import BaseTest, draw_multicell, parse_bytes
 
 NONE, LTR, RTL, AUTO = (0, False, False), (1, False, False), (1, True, False), (1, False, True)
 POWER_ON = (False, False, False)
 CUP = '\x1b[{};1H'.format  # 1-based row
+LRM, RLM = '\u200e', '\u200f'
 
 
 class Dump(list):
@@ -18,6 +23,11 @@ class Dump(list):
 
 def pb(s, data):
     parse_bytes(s, data.encode())
+
+
+def leading_marks_codeword(label):
+    # a distinct 7-bit pattern of marks for each label
+    return ''.join((LRM, RLM)[int(label[1:]) >> bit & 1] for bit in range(6, -1, -1))
 
 
 class TestBidi(BaseTest):
@@ -470,3 +480,503 @@ class TestBidi(BaseTest):
             s = self.screen()
             pb(s, '\x1b[8h\x1b[?1049h\x1b[8h\x1b[8l\x1b[?1049l')
             self.assertTrue(stamped(s, '', 1))
+
+    def cell_texts(self, s, y=0, n=4):
+        return [s.cpu_cells(y, x)['text'] for x in range(n)]
+
+    def test_leading_mark_goes_to_the_next_cell(self):
+        # An LRM or RLM drawn with no previous cell is kept first in the text of the next cell drawn there
+        for mark, bdsm in product((LRM, RLM), ('', '\x1b[8h')):
+            for parts in ((mark + 'abc',), (mark, 'abc'), (mark, '\x1b[1m', 'abc'), (mark + '\r', 'abc')):
+                with self.subTest(mark=mark, bdsm=bdsm, parts=parts):
+                    s = self.screen()
+                    pb(s, bdsm)
+                    for p in parts:
+                        pb(s, p)
+                    self.ae(self.cell_texts(s), [mark + 'a', 'b', 'c', ''])
+                    self.ae(s.cursor.x, 3)
+                    self.ae(str(s.line(0)), mark + 'abc')
+                    self.ae(self.records(s, 0), [LTR if bdsm else NONE])
+                    self.ae(s.test_bidi_state()[3], bool(bdsm))
+        # on a line the row above wraps into the mark has a previous cell
+        s = self.screen(cols=3)
+        pb(s, 'abc' + RLM + 'd')
+        self.ae((self.cell_texts(s, 0, 3), self.cell_texts(s, 1, 2)), (['a', 'b', 'c' + RLM], ['d', '']))
+        # a mark after a cell attaches to it as before
+        s = self.screen()
+        pb(s, 'ab' + RLM + 'c')
+        self.ae(self.cell_texts(s), ['a', 'b' + RLM, 'c', ''])
+
+    def test_leading_marks_in_order(self):
+        s = self.screen()
+        pb(s, LRM + RLM + 'a')
+        self.ae(self.cell_texts(s, n=2), [LRM + RLM + 'a', ''])
+        # every mark is kept, in order, across draw calls
+        s = self.screen()
+        pb(s, LRM + RLM + LRM)
+        pb(s, RLM + LRM + 'a')
+        self.ae(self.cell_texts(s, n=2), [LRM + RLM + LRM + RLM + LRM + 'a', ''])
+
+    def test_leading_marks_cap(self):
+        # a marks-only cell holds one fewer than a cell can, so that a char still fits after them
+        cap = 23
+        marks = (LRM + RLM) * 12
+        s = self.screen()
+        pb(s, marks)
+        self.ae(self.cell_texts(s, n=2), [marks[:cap], ''])
+        pb(s, 'a')
+        self.ae(self.cell_texts(s, n=2), [marks[:cap] + 'a', ''])
+        self.ae(str(s.line(0)), marks[:cap] + 'a')
+
+    def test_other_zero_width_chars_at_line_start(self):
+        # still discarded, and they leave a held mark alone
+        for ch in '‍‌؜‪‮⁦⁧⁨⁩':
+            with self.subTest(hex(ord(ch))):
+                s = self.screen()
+                pb(s, ch + 'a')
+                self.ae(self.cell_texts(s, n=2), ['a', ''])
+                s = self.screen()
+                pb(s, LRM + ch + 'a')
+                self.ae(self.cell_texts(s, n=2), [LRM + 'a', ''])
+
+    def test_leading_mark_on_a_wide_char(self):
+        s = self.screen()
+        pb(s, RLM + '中x')
+        self.ae((self.cell_texts(s, n=3), str(s.line(0)), s.cursor.x), ([RLM + '中', '', 'x'], RLM + '中x', 3))
+        # a combining char added later keeps the mark first
+        s = self.screen()
+        pb(s, RLM + 'á')
+        self.ae(self.cell_texts(s, n=2), [RLM + 'á', ''])
+        pb(s, '̂')
+        self.ae(self.cell_texts(s, n=2), [RLM + 'á̂', ''])
+
+    def test_leading_mark_lifetime(self):
+        # the mark lives in its cell's text
+        for seq, row in (
+            ('\rx', ['x', 'b', 'c', '']),
+            ('\r\x1b[@', ['', RLM + 'a', 'b', 'c']),
+            ('\r\x1b[P', ['b', 'c', '', '']),
+            ('\x1b[2K', ['', '', '', '']),
+            ('\r\x1b[X', ['', 'b', 'c', '']),
+        ):
+            with self.subTest(seq=seq):
+                s = self.screen()
+                pb(s, RLM + 'abc')
+                pb(s, seq)
+                self.ae(self.cell_texts(s), row)
+        # scrolling and history keep it
+        s = self.create_screen(cols=10, lines=2, scrollback=10)
+        pb(s, RLM + 'abc\n\n')
+        self.ae(str(s.historybuf.line(0)), RLM + 'abc')
+
+    def test_leading_mark_kept_with_its_cell(self):
+        # The mark lives in its cell, so it is kept or dropped as the cell and its line are
+        def kept(*parts, lines=5, y=0, cols=10):
+            s = self.screen(cols=cols, lines=lines)
+            for p in parts:
+                if callable(p):
+                    p(s)
+                else:
+                    pb(s, p)
+            t = s.cpu_cells(y, 0)['text']
+            self.assertIn(t, (RLM + 'a', 'a'), parts)
+            return t == RLM + 'a'
+
+        # the same position, after the cursor went away and back, or a CR
+        self.assertTrue(kept(RLM, '\x1b[3;4H', '\x1b[1;1H', 'a'))
+        self.assertTrue(kept(RLM, '\r\x07a'))
+        self.assertTrue(kept(RLM + '\r', 'a'))
+        # control chars back to it before the text
+        self.assertTrue(kept(RLM, '\x1b[3G', '\ra'))
+        self.assertTrue(kept(RLM, '\t\ra'))
+        self.assertTrue(kept(RLM, '\x1b[2G', '\ba'))
+        # text written elsewhere first does not touch it
+        self.assertTrue(kept(RLM, '\x1b[1;3Hb\ra'))
+        self.assertTrue(kept(RLM, '\tb\ra'))
+        # a line feed leaves it on its line; a line feed on a one line screen clears the line in place
+        self.assertFalse(kept(RLM + '\na', y=1))
+        self.assertTrue(kept(RLM, '\n\x1bMa'))
+        self.assertFalse(kept(RLM + '\na', lines=1))
+        self.assertFalse(kept(RLM, '\na', lines=1))
+        # a line moved off its row takes it along, however often the region's storage comes round to the same place
+        for seq in ('\x1bD\x1bD', '\x1bE\x1bE', '\x1b[S\x1b[S', '\x1b[2S', '\x1b[T\x1b[T', '\x1b[2T', '\x1b[+T\x1b[+T', '\x1b[L\x1b[L', '\x1b[M\x1b[M'):
+            with self.subTest(seq=seq):
+                self.assertFalse(kept('\x1b[1;2r' + CUP(2) + RLM, seq, CUP(2) + 'a', y=1))
+        self.assertFalse(kept('\x1b[1;2r' + RLM, '\x1bM\x1bM', CUP(1) + 'a'))
+        self.assertFalse(kept(CUP(5) + RLM, '\x1bD\ra', y=4))
+        # scrolling the cursor line to the top moves the line, with its mark, to row 0
+        self.assertTrue(kept(CUP(3) + RLM, lambda s: s.scroll_until_cursor_prompt(), '\x1b[1;1Ha'))
+        for y in range(5):
+            with self.subTest(y=y):
+                self.assertFalse(kept('\r\n'.join('x' * 5), CUP(y + 1) + RLM, '\x1b[22J', CUP(y + 1) + 'a', y=y))
+        # an OSC 66 cell written over it replaces it
+        self.assertFalse(kept(RLM, '\x1b]66;s=1;x\x07', '\ra'))
+        # on the lower row of a multiline char there is no cell to take it, and a char moved on along its row past them
+        self.assertFalse(kept(CUP(1) + '\x1b]66;s=2;a\x07', CUP(2) + RLM + 'x', CUP(1) + '\x1b[2K' + CUP(2) + 'a', cols=4, lines=2, y=1))
+        # reset drops it, the other screen and resizing keep it
+        self.assertFalse(kept(RLM, '\x1bc', 'a'))
+        self.assertTrue(kept(RLM, '\x1b[?1049h', '\x1b[?1049l', '\x1b[1;1Ha'))
+        self.assertTrue(kept(RLM, '\x1b[?1049h', 'a', '\x1b[?1049l', lambda s: self.ae(s.cpu_cells(0, 0)['text'], RLM), '\x1b[1;1Ha'))
+        self.assertTrue(kept(RLM, lambda s: s.resize(5, 12), '\x1b[1;1Ha'))
+        self.assertTrue(kept(RLM, lambda s: s.resize(3, 6), '\x1b[1;1Ha'))
+        # stored with bidi mode off, written into with it on
+        self.assertTrue(kept(RLM, '\x1b[8h', 'a'))
+
+    def test_leading_mark_never_leaves_its_line(self):
+        # Each of these once carried a mark to another line: row storage that comes back to the same place after
+        # OSC 66 cells or pre-edit text scroll the screen. The mark stays on the line it was written on, which
+        # is gone by the time the 'a' is written
+        def cell_after(*parts, y, cols=4, lines=2):
+            s = self.create_screen(cols=cols, lines=lines)
+            for p in parts:
+                if callable(p):
+                    p(s)
+                else:
+                    pb(s, p)
+            return s.cpu_cells(y, 0)['text']
+
+        osc = CUP(1) + '\x1b[2K\x1b]66;s=2;ab\x07', CUP(2) + '\x1b]66;s=1;y\x07'
+        with self.subTest('osc 66 cells scroll the line round'):
+            self.ae(cell_after(CUP(2) + 'ORIG\r' + RLM, *osc, *osc, CUP(1) + '\x1b[2K' + CUP(2) + 'a', y=1), 'a')
+        with self.subTest('osc 66 cell over the lower rows of a multiline char'):
+            self.ae(cell_after(CUP(1) + '\x1b]66;s=2;ab\x07', CUP(2) + RLM + 'x', CUP(1) + '\x1b[2Ka', y=0), 'a')
+        with self.subTest('pre-edit text scrolls the screen'):
+            self.ae(cell_after('A\r\nB', CUP(1), RLM, lambda s: s.test_draw_overlay_line('\n\nz', 0, 1), CUP(1) + 'a', y=0), 'a')
+
+    def test_leading_mark_in_its_cell_across_pre_edit(self):
+        for preedit in ('xy', RLM + 'xy'):
+            with self.subTest(preedit=preedit):
+                s = self.screen()
+                pb(s, RLM)
+                s.test_draw_overlay_line(preedit, 0, 0)
+                # the mark stays in the cell the pre-edit's first char is drawn into
+                self.ae(s.cpu_cells(0, 0)['text'], RLM + preedit[:-1])
+        # pre-edit text drawn over the lower rows of a multiline char scrolls the screen
+        for held_row, after, y in ((1, CUP(1) + '\x1b[2K' + CUP(2) + 'a', 1), (2, CUP(1) + '\x1b[2Ka', 0)):
+            with self.subTest(held_row=held_row):
+                s = self.screen(cols=4, lines=2)
+                pb(s, CUP(1) + '\x1b]66;s=2;ab\x07' + CUP(held_row) + RLM)
+                s.test_draw_overlay_line('z', 0, 1)
+                pb(s, after)
+                self.ae(s.cpu_cells(y, 0)['text'], 'a')
+
+    def test_leading_mark_over_existing_text(self):
+        # the mark takes the cell, as writing a char there would, and the cursor does not move
+        s = self.screen()
+        pb(s, 'abc\r' + RLM)
+        self.ae((self.cell_texts(s), s.cursor.x, str(s.line(0))), ([RLM, 'b', 'c', ''], 0, RLM + ' bc'))
+        # over a wide char, both its cells go
+        s = self.screen()
+        pb(s, '中x\r' + RLM)
+        self.ae((self.cell_texts(s, n=3), s.cursor.x, str(s.line(0))), ([RLM, '', 'x'], 0, RLM + '  x'))
+        # and over a multiline OSC 66 cell, which goes from the rows below it too
+        s = self.screen(cols=4, lines=3)
+        pb(s, '\x1b]66;s=2;a\x07' + CUP(1) + RLM)
+        self.ae((self.cell_texts(s, 0, 3), self.cell_texts(s, 1, 3), s.cursor.x), ([RLM, '', ''], ['', '', ''], 0))
+        # the lower row of a multiline char has no cell it can take: the mark is discarded
+        s = self.screen(cols=4, lines=3)
+        pb(s, '\x1b]66;s=2;a\x07' + CUP(2) + RLM)
+        self.ae((self.cell_texts(s, 0, 3), self.cell_texts(s, 1, 3)), (['a', '', ''], ['', '', '']))
+        # a char written there moves on past the lower rows
+        pb(s, 'q')
+        self.ae(self.cell_texts(s, 1, 3), ['', '', 'q'])
+
+    def test_leading_mark_cell_is_replaced_by_what_is_written_into_it_later(self):
+        # a char written into the cell with a previous cell, or after ICH moved it off column 0, replaces it
+        s = self.screen(cols=3)
+        pb(s, CUP(2) + RLM + CUP(1) + 'abcd')
+        self.ae((self.cell_texts(s, 0, 3), self.cell_texts(s, 1, 3)), (['a', 'b', 'c'], ['d', '', '']))
+        s = self.screen()
+        pb(s, RLM + '\r\x1b[@x')
+        self.ae(self.cell_texts(s, n=3), ['x', RLM, ''])
+        pb(s, 'y')
+        self.ae(self.cell_texts(s, n=3), ['x', 'y', ''])
+        # DCH removes it with the cell
+        s = self.screen()
+        pb(s, 'abc\r' + RLM + '\x1b[P')
+        self.ae(self.cell_texts(s), ['b', 'c', '', ''])
+        # a char written at column 0 into a cell it did not move from is plain
+        s = self.screen()
+        pb(s, RLM + '\r\x1b[@' + 'x')
+        self.ae(s.cpu_cells(0, 0)['text'], 'x')
+
+    def test_leading_mark_with_insert_mode(self):
+        # a mark and the char after it behave as that char would, marks first in its cell
+        def drawn(text, n=6):
+            s = self.screen(cols=8)
+            pb(s, 'xbc\r\x1b[4h' + text)
+            return self.cell_texts(s, n=n)
+
+        plain = drawn('a')
+        self.ae(plain, ['a', 'x', 'b', 'c', '', ''])
+        self.ae(drawn(RLM + 'a'), [RLM + 'a'] + plain[1:])
+        self.ae(drawn(RLM + LRM + 'a'), [RLM + LRM + 'a'] + plain[1:])
+        plain = drawn('\u4e2d')
+        self.ae(drawn(RLM + '\u4e2d'), [RLM + plain[0]] + plain[1:])
+
+    def test_leading_mark_cell_takes_no_combining_chars(self):
+        # as an empty cell takes none
+        s = self.screen()
+        pb(s, RLM + '\x1b[C\u0301\x1b[Da')
+        self.ae(self.cell_texts(s, n=2), [RLM + 'a', ''])
+        # a second mark after the cell is discarded as after an empty cell
+        s = self.screen()
+        pb(s, RLM + '\x1b[C' + RLM)
+        self.ae(self.cell_texts(s, n=2), [RLM, ''])
+        pb(s, '\x1b[Da')
+        self.ae(self.cell_texts(s, n=2), [RLM + 'a', ''])
+
+    def test_leading_mark_does_not_change_repeat(self):
+        # REP repeats the char before the mark
+        s = self.screen()
+        pb(s, 'x\r' + RLM + '\x1b[2b')
+        self.ae(self.cell_texts(s, n=3), [RLM + 'x', 'x', ''])
+
+    def test_leading_mark_on_a_one_column_screen(self):
+        # a wide char does not fit there, so the cell keeps its mark
+        s = self.create_screen(cols=1, lines=2, options={})
+        pb(s, RLM + '中')
+        self.ae(self.cell_texts(s, n=1), [RLM])
+        pb(s, 'a')
+        self.ae(self.cell_texts(s, n=1), [RLM + 'a'])
+
+    def test_leading_mark_with_a_wide_char_past_a_multiline_char(self):
+        # The wide char cannot take the cell, as its second cell is a lower row of a multiline char, so it moves on
+        # to the next line. The mark stays on its own line and the char's line has none
+        s = self.create_screen(cols=3, lines=2, scrollback=5)
+        pb(s, '\x1b[1;2H\x1b]66;s=2;a\x07' + CUP(2) + RLM + '中')
+        self.ae((self.cell_texts(s, 0, 3), self.cell_texts(s, 1, 3)), ([RLM, '', ''], ['中', '', '']))
+        for i in range(s.historybuf.count):
+            self.assertNotIn(RLM, str(s.historybuf.line(i)))
+        # with room below it does not scroll
+        s = self.create_screen(cols=3, lines=3, scrollback=5)
+        pb(s, '\x1b[1;2H\x1b]66;s=2;a\x07' + CUP(2) + RLM + '中')
+        self.ae([self.cell_texts(s, y, 3) for y in range(3)], [['', 'a', ''], [RLM, '', ''], ['中', '', '']])
+        self.ae(s.historybuf.count, 0)
+
+    def test_leading_mark_with_a_wide_char_over_a_multiline_char_without_wrapping(self):
+        # with DECAWM off the mark is still on its own line, as with wrapping, when it took a cell
+        s = self.create_screen(cols=3, lines=2, scrollback=5)
+        pb(s, '\x1b[?7l\x1b[1;2H\x1b]66;s=2;a\x07' + CUP(2) + RLM + '中')
+        self.ae((self.cell_texts(s, 0, 3), self.cell_texts(s, 1, 3)), ([RLM, '', ''], ['中', '', '']))
+        self.ae(s.historybuf.count, 1)
+        for i in range(s.historybuf.count):
+            self.assertNotIn(RLM, str(s.historybuf.line(i)))
+        # on two columns the RLM written at the lower row of the s=2 char is dropped on arrival, as that row has no cell
+        # it can take, and the wide char moves past that row onto a new line, scrolling the upper row into history
+        s = self.create_screen(cols=2, lines=2, scrollback=5)
+        pb(s, '\x1b[?7l\x1b[1;1H\x1b]66;s=2;a\x07' + CUP(2) + RLM + '中')
+        self.ae([self.cell_texts(s, y, 2) for y in range(2)], [['', ''], ['中', '']])
+        self.ae(s.historybuf.count, 1)
+        for i in range(s.historybuf.count):
+            self.assertNotIn(RLM, str(s.historybuf.line(i)))
+
+    def test_marks_only_cell_in_copied_text(self):
+        # an abandoned mark leaves a cell that exports as an empty one does, so the columns after it are kept
+        s = self.screen()
+        pb(s, RLM + '\x1b[3Gx')
+        self.ae(str(s.line(0)), RLM + '  x')
+        self.ae(s.line(0).as_ansi(), RLM + '  x')
+        self.ae(as_text(s).split('\n')[0], RLM + '  x')
+        # with nothing after it there is no space
+        s = self.screen()
+        pb(s, RLM)
+        self.ae(str(s.line(0)), RLM)
+        s = self.screen()
+        pb(s, RLM + LRM + '\x1b[Cx')
+        self.ae(str(s.line(0)), RLM + LRM + ' x')
+
+    def test_marks_only_cell_marker_highlighting(self):
+        from kitty.marks import marker_from_regex
+        # the highlight stays on the matched text when copied text has the extra space of a marks-only cell
+        s = self.screen()
+        pb(s, RLM + '\x1b[1;4Hfoo')
+        s.set_marker(marker_from_regex('foo', 3))
+        self.ae(s.marked_cells(), [(3, 0, 3), (4, 0, 3), (5, 0, 3)])
+
+    def test_marks_only_cell_edge_colors(self):
+        # a marks-only cell is a blank one: it does not make a full block the first char of the line
+        def edges(text):
+            s = self.create_screen()
+            pb(s, '\x1b[31;42m' + text)
+            return s.line_edge_colors()
+
+        self.assertNotEqual(edges('\u2588'), edges('\u2588\r\x1b[X'))
+        self.ae(edges('\u2588\r' + RLM), edges('\u2588\r\x1b[X'))
+
+    def test_marks_only_cell_url_detection(self):
+        s = self.screen(cols=30)
+        pb(s, RLM + '\x1b[3Ghttp://moo.com x')
+        s.detect_url(6, 0)
+        self.ae(''.join(s.text_for_marked_url()), 'http://moo.com')
+        self.ae(s.current_url_text(), 'http://moo.com')
+
+    def test_leading_marks_on_many_lines_in_one_draw(self):
+        s = self.create_screen(cols=10, lines=5, scrollback=20)
+        s.draw((RLM + 'x\r\n') * 10000)
+        self.ae([str(s.line(y)) for y in range(5)], [RLM + 'x'] * 4 + [''])
+        self.ae(s.historybuf.count, 20)
+        self.ae({str(s.historybuf.line(i)) for i in range(20)}, {RLM + 'x'})
+
+    def check_marks_on_their_lines(self, s, labels, opset, where):
+        # The invariant: a cell with an LRM or RLM is on a line that had marks written at column 0 of it, found by the
+        # label the line carries. Each label has its own codeword, so the marks of a line are a stretch of what was
+        # written for its label, and at column 0 unless ICH or DCH moved it with the line's cells
+        marks = LRM + RLM
+        lines = [(f'row {y}', str(s.line(y))) for y in range(s.lines)]
+        lines += [(f'history {i}', str(s.historybuf.line(i))) for i in range(s.historybuf.count)]
+        for name, text in lines:
+            if not any(m in text for m in marks):
+                continue
+            label = re.search(r'L\d{3}', text)
+            if not label or label.group() not in labels:
+                self.fail(f'{where}: {name} {text!r} holds a mark but its label was never marked')
+            if opset == 1 and any(m in text.lstrip(marks) for m in marks):
+                self.fail(f'{where}: {name} {text!r} holds a mark away from column 0')
+            runs = re.findall(f'[{marks}]+', text)
+            cw = leading_marks_codeword(label.group())
+            for run in runs[:1] if opset == 1 else runs:
+                if not (cw * 4).startswith(run) if opset == 1 else run not in cw * 4:
+                    self.fail(f'{where}: {name} {text!r} holds marks that were not written for its label')
+        if opset != 1:
+            return
+        for y in range(s.lines):
+            for x in range(1, s.columns):
+                if any(m in s.cpu_cells(y, x)['text'] for m in marks):
+                    self.fail(f'{where}: row {y} column {x} holds a mark')
+
+    def run_leading_marks_seed(self, opset, seed, steps=300):
+        rnd = random.Random(f'{opset}:{seed}')
+        s = self.create_screen(cols=rnd.randint(10, 14), lines=rnd.randint(2, 6), scrollback=20)
+        labels = set()
+        log = []
+        next_label = 0
+
+        def label_span(y):
+            texts = [s.cpu_cells(y, x)['text'] for x in range(s.columns)]
+            for x in range(s.columns - 3):
+                if re.fullmatch(r'L\d{3}', ''.join(texts[x : x + 4])):
+                    return x, x + 4
+            return None
+
+        def text_of(y):
+            return str(s.line(y))
+
+        def crowded(y):
+            # a multiline or wide cell near the start of a row moves a write or overlay right, onto the label, and DCH can
+            # bring the label itself within reach of the write
+            for yy in (y, y + 1):
+                if yy >= s.lines:
+                    continue
+                span = label_span(yy)
+                if span and span[0] < 3:
+                    return True
+                for x in range(5):
+                    cell = s.cpu_cells(yy, x)
+                    mcd = cell['mcd']
+                    if cell['text'] == '\u4e2d' or (mcd and (mcd['scale'] > 1 or mcd['width'] > 1)):
+                        return True
+            return False
+
+        def write_at_row(write):
+            y = rnd.randrange(s.lines)
+            return None if crowded(y) else CUP(y + 1) + write()
+
+        def fits(y, extra):
+            # the content of the row, label included, stays within the narrowest width after being moved right
+            span = label_span(y)
+            return not span or span[1] + extra <= 10
+
+        def label_row():
+            nonlocal next_label
+            free = [y for y in range(s.lines) if not re.search(r'L\d{3}|[\u200e\u200f]', text_of(y))]
+            if not free:
+                return None
+            y = rnd.choice(free)
+            next_label += 1
+            assert next_label < 128, 'labels would alias in the 7-bit codeword'
+            return f'{CUP(y + 1)}\x1b[6GL{next_label:03d}'
+
+        def mark_row():
+            rows = [y for y in range(s.lines) if label_span(y)]
+            if not rows:
+                return label_row()
+            y = rnd.choice(rows)
+            label = re.search(r'L\d{3}', text_of(y)).group()
+            labels.add(label)
+            return CUP(y + 1) + leading_marks_codeword(label)
+
+        def row():
+            return rnd.randint(1, s.lines)
+
+        def overlay():
+            if any(crowded(y) for y in range(s.lines)):
+                return None
+            y = rnd.randrange(s.lines)
+            text = rnd.choice(('z', '\nz', '\n\nz', 'z\nz', 'xy\n', '\n\n\n\nz'))
+            s.test_draw_overlay_line(text, 0, y)
+            s.test_update_overlay_text('')
+            return f'overlay {text!r} at row {y}'
+
+        def resize():
+            lines, cols = rnd.randint(2, 6), rnd.randint(10, 14)
+            s.resize(lines, cols)
+            return f'resize {lines}x{cols}'
+
+        def insert_char():
+            y = rnd.randrange(s.lines)
+            ch = rnd.choice(('q', '\u4e2d'))
+            if not fits(y, 1 + (ch == '\u4e2d')):
+                return None
+            return f'{CUP(y + 1)}\x1b[4h{ch}\x1b[4l'
+
+        def ich():
+            y = rnd.randrange(s.lines)
+            return f'{CUP(y + 1)}\x1b[@' if fits(y, 1) else None
+
+        def dch():
+            y = rnd.randrange(s.lines)
+            span = label_span(y)
+            return f'{CUP(y + 1)}\x1b[P' if not span or span[0] > 0 else None
+
+        # (weight, op); an op gives bytes to parse, a description of what it did itself, or None to skip the step
+        ops = [
+            (2, lambda: f'\x1b[{row()};{rnd.randint(1, s.columns)}H'),
+            (3, lambda: rnd.choice(('\n', '\x1bD', '\x1bM', '\x1bE'))),
+            (2, lambda: rnd.choice(('\x1b[r', f'\x1b[{rnd.randint(1, 2)};{rnd.randint(3, 6)}r'))),
+            (3, lambda: f'\x1b[{rnd.randint(1, 3)}{rnd.choice("STLM")}'),
+            (3, lambda: CUP(row()) + rnd.choice(('\x1b[2K', '\x1b[J', '\x1b[1J', '\x1b[2J', f'\x1b[{rnd.randint(1, 12)}X'))),
+            (2, overlay),
+            (2, lambda: write_at_row(lambda: f'\x1b]66;w=1:s={rnd.randint(1, 2)};x\x07')),
+            (2, lambda: write_at_row(lambda: '\x1b[2G\x1b]66;s=2;a\x07')),
+            (3, lambda: write_at_row(lambda: rnd.choice(('q', '\u4e2d', 'e\u0301')))),
+            (3, label_row),
+            (5, mark_row),
+            (1, resize),
+        ]
+        if opset == 2:
+            ops += [(2, ich), (2, dch), (3, insert_char)]
+        weights = [w for w, _ in ops]
+        for y in range(s.lines):
+            pb(s, f'{CUP(y + 1)}\x1b[6GL{y + 1:03d}')
+        next_label = s.lines
+        for step in range(steps):
+            op = rnd.choices(ops, weights)[0][1]
+            result = op()
+            if result is None:
+                continue
+            if result.startswith(('overlay', 'resize')):
+                log.append(result)
+            else:
+                log.append(result)
+                pb(s, result)
+            self.check_marks_on_their_lines(s, labels, opset, f'seed {seed} set {opset} step {step}, ops (latest last): {log!r}')
+
+    def test_leading_marks_randomized(self):
+        # Marks are written only at column 0 of a line that carries a label, and ops that move, erase, scroll,
+        # resize and overdraw lines run between them: a mark never ends up on a line without its label. The first
+        # set keeps marks at column 0 and the second adds ICH, DCH and insert mode, which move the cells of a line
+        for opset in (1, 2):
+            for seed in range(1, 101):
+                with self.subTest(opset=opset, seed=seed):
+                    self.run_leading_marks_seed(opset, seed)
