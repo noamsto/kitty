@@ -345,8 +345,15 @@ consume_esc(PS *self) {
             IS_ESCAPED_CHAR:
                 return false;
             case ESC_RIS: CALL_ED(screen_reset); break;
-            case ESC_IND: CALL_ED(screen_index); break;
-            case ESC_NEL: CALL_ED(screen_nel); break;
+            // The held marks are dropped here rather than in screen_index(), which every line feed in drawn text reaches
+            case ESC_IND:
+                if (UNLIKELY(self->screen->leading_marks.count)) screen_clear_leading_marks(self->screen);
+                CALL_ED(screen_index);
+                break;
+            case ESC_NEL:
+                if (UNLIKELY(self->screen->leading_marks.count)) screen_clear_leading_marks(self->screen);
+                CALL_ED(screen_nel);
+                break;
             case ESC_RI: CALL_ED(screen_reverse_index); break;
             case ESC_HTS: CALL_ED(screen_set_tab_stop); break;
             case ESC_DECSC: CALL_ED(screen_save_cursor); break;

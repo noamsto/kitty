@@ -235,7 +235,7 @@ find_colon_slash(Line *self, index_type x, index_type limit, ListOfChars *lc, in
 #undef next_char_is
 
     do {
-        text_in_cell(c, self->text_cache, lc);
+        text_in_cell_without_leading_marks(c, self->text_cache, lc);
         if (!is_hostname_lc(lc)) return false;
         switch (state) {
             case ANY:
@@ -255,12 +255,27 @@ find_colon_slash(Line *self, index_type x, index_type limit, ListOfChars *lc, in
     return 0;
 }
 
+// cell_is_char() that also matches a cell whose text is ch after leading marks, so that a URL at the start of a line
+// after a mark is found
+static bool
+cell_is_char_after_leading_marks(const CPUCell *c, const TextCache *tc, char_type ch) {
+    if (!c->ch_is_idx) return cell_is_char(c, ch);
+    char_type buf[MAX_NUM_CODEPOINTS_PER_CELL];
+    ListOfChars lc = {.chars = buf, .capacity = arraysz(buf)};
+    if (!text_in_cell_without_alloc(c, tc, &lc)) return false;
+    size_t n = 0;
+    while (n + 1 < lc.count && is_leading_mark(lc.chars[n])) n++;
+    return n && n + 1 == lc.count && lc.chars[n] == ch;
+}
+
 static bool
 prefix_matches(Line *self, index_type at, const char_type *prefix, index_type prefix_len, index_type scale) {
     if (prefix_len > at) return false;
     while (prefix_len--) {
         at = prev_char_pos(self, at, 1);
-        if (at >= self->xnum || cell_scale(self->cpu_cells + at) != scale || !cell_is_char(self->cpu_cells + at, prefix[prefix_len])) return false;
+        if (at >= self->xnum || cell_scale(self->cpu_cells + at) != scale ||
+            !cell_is_char_after_leading_marks(self->cpu_cells + at, self->text_cache, prefix[prefix_len]))
+            return false;
     }
     return true;
 }
@@ -287,7 +302,7 @@ has_url_beyond_colon_slash(Line *self, const index_type x, ListOfChars *lc, cons
     while ((pos = next_char_pos(self, pos, 1)) < self->xnum && num_chars++ < MIN_URL_LEN + 2) {
         const CPUCell *c = self->cpu_cells + pos;
         if (cell_scale(c) != scale) return false;
-        text_in_cell(c, self->text_cache, lc);
+        text_in_cell_without_leading_marks(c, self->text_cache, lc);
         if (num_of_slashes < 3) {
             if (!is_hostname_lc(lc)) return false;
             if (lc->count == 1 && lc->chars[0] == '/') num_of_slashes++;
@@ -320,7 +335,7 @@ line_url_start_at(Line *self, index_type x, ListOfChars *lc) {
 static bool
 is_pos_ok_for_url(Line *self, index_type x, bool in_hostname, index_type last_hostname_char_pos, ListOfChars *lc) {
     if (x >= self->xnum) return false;
-    text_in_cell(self->cpu_cells + x, self->text_cache, lc);
+    text_in_cell_without_leading_marks(self->cpu_cells + x, self->text_cache, lc);
     if (in_hostname && x <= last_hostname_char_pos) return is_hostname_lc(lc);
     return is_url_lc(lc);
 }
@@ -356,7 +371,7 @@ line_url_end_at(
 
 bool
 line_startswith_url_chars(Line *self, bool in_hostname, ListOfChars *lc) {
-    text_in_cell(self->cpu_cells, self->text_cache, lc);
+    text_in_cell_without_leading_marks(self->cpu_cells, self->text_cache, lc);
     if (in_hostname) return is_hostname_lc(lc);
     return is_url_lc(lc);
 }
@@ -878,12 +893,7 @@ colors_for_cell(Line *self, const ColorProfile *cp, index_type *x, color_type *f
 
 char_type
 line_get_char(Line *self, index_type at) {
-    if (self->cpu_cells[at].ch_is_idx) {
-        RAII_ListOfChars(lc);
-        text_in_cell(self->cpu_cells + at, self->text_cache, &lc);
-        if (self->cpu_cells[at].is_multicell && (self->cpu_cells[at].x || self->cpu_cells[at].y)) return 0;
-        return lc.chars[0];
-    } else return self->cpu_cells[at].ch_or_idx;
+    return cell_first_char(self->cpu_cells + at, self->text_cache);
 }
 
 

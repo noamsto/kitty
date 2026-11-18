@@ -1212,6 +1212,14 @@ class BidiRendering(FontBaseTest):
             with self.assertRaises(ValueError):
                 test_render_line_levels(s.line(0), bytes(n))
 
+    def test_leading_mark_not_rendered(self):
+        # an LRM or RLM kept first in the text of a line's first cell renders nothing
+        for text in ('abc', '\u05d0\u05d1\u05d2', '\u4f60x', '\u2588'):
+            for mark in '\u200e\u200f':
+                with self.subTest(text=text, mark=mark):
+                    cols = len(text) + 2
+                    self.ae(self.render_text(mark + text, cols=cols), self.render_text(text, cols=cols))
+
 
 def test_chars(chars: str = '╌', sz: int = 128) -> None:
     # kitty +runpy "from kitty.fonts.box_drawing import test_chars; test_chars('XXX')"

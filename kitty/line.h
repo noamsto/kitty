@@ -213,6 +213,23 @@ text_in_cell(const CPUCell *c, const TextCache *tc, ListOfChars *ans) {
     }
 }
 
+// U+200E LRM and U+200F RLM, which are kept first in the text of a cell at the start of a line, see draw_after_leading_mark()
+static inline bool
+is_leading_mark(char_type ch) {
+    return (ch | 1) == 0x200f;
+}
+
+// The text of a cell without the marks it starts with, for code that reads the char a cell shows
+static inline void
+text_in_cell_without_leading_marks(const CPUCell *c, const TextCache *tc, ListOfChars *ans) {
+    text_in_cell(c, tc, ans);
+    if (!c->ch_is_idx || ans->count < 2 || !is_leading_mark(ans->chars[0])) return;
+    size_t n = 1;
+    while (n + 1 < ans->count && is_leading_mark(ans->chars[n])) n++;
+    ans->count -= n;
+    memmove(ans->chars, ans->chars + n, ans->count * sizeof(ans->chars[0]));
+}
+
 static inline bool
 text_in_cell_without_alloc(const CPUCell *c, const TextCache *tc, ListOfChars *ans) {
     if (c->ch_is_idx) {
@@ -238,7 +255,7 @@ static inline char_type
 cell_first_char(const CPUCell *c, const TextCache *tc) {
     if (c->ch_is_idx) {
         if (c->is_multicell && (c->x || c->y)) return 0;
-        return tc_first_char_at_index(tc, c->ch_or_idx);
+        return tc_base_char_at_index(tc, c->ch_or_idx);
     }
     return c->ch_or_idx;
 }

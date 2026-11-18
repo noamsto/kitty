@@ -50,6 +50,18 @@
 
 static const ScreenModes empty_modes = {0, .mDECAWM = true, .mDECTCEM = true, .mDECARM = true};
 
+// Must be called after every change of modes.mBDSM or leading_marks.count, so that draw_text() tests one byte for both
+static inline void
+update_draw_dispatch(Screen *self) {
+    self->draw_slow = self->modes.mBDSM || self->leading_marks.count;
+}
+
+void
+screen_clear_leading_marks(Screen *self) {
+    self->leading_marks.count = 0;
+    update_draw_dispatch(self);
+}
+
 #define CSI_REP_MAX_REPETITIONS 65535u
 
 // Constructor/destructor {{{
@@ -160,6 +172,7 @@ new_screen_object(PyTypeObject *type, PyObject *args, PyObject UNUSED *kwds) {
         self->window_id = window_id;
         self->modes = empty_modes;
         self->saved_modes = empty_modes;
+        update_draw_dispatch(self);
         self->is_dirty = true;
         self->scroll_changed = false;
         self->margin_top = 0;
@@ -271,6 +284,7 @@ do_screen_reset(Screen *self, bool is_hard_reset) {
     }
     self->modes = empty_modes;
     self->saved_modes = empty_modes;
+    screen_clear_leading_marks(self);
     zero_at_ptr(&self->bidi);
     rederive_blank_bidi_records(self->main_linebuf, (LineAttrs){0});
     rederive_blank_bidi_records(self->alt_linebuf, (LineAttrs){0});
@@ -855,6 +869,7 @@ remove_blank_output_line_reservation_marker(Cursor *cursor, LineBuf *linebuf) {
 static bool
 screen_resize(Screen *self, unsigned int lines, unsigned int columns) {
     screen_pause_rendering(self, false, 0);
+    if (UNLIKELY(self->leading_marks.count)) screen_clear_leading_marks(self);
     if (self->bidi_maps) bidi_cache_invalidate(self->bidi_maps);
     lines = MAX(1u, lines);
     columns = MAX(1u, columns);
@@ -1156,7 +1171,7 @@ stamp_line_for_bidi(Screen *self, index_type y, uint8_t record) {
     // A line without a record has all its record bits clear, so the record
     // is one OR.
     LineAttrs *a = self->linebuf->line_attrs + y;
-    if (a->bidi_stamp) return;
+    if (a->bidi_stamp || !record) return;
     a->val |= record;
     self->linebuf->bidi_stamped = true;
 }
@@ -1952,6 +1967,8 @@ draw_non_ascii_run(Screen *self, text_loop_state *s, const uint32_t *chars, size
     return i;
 }
 
+static void draw_after_leading_mark(Screen *self, const uint32_t *at, size_t remaining);
+
 static inline __attribute__((always_inline)) void
 draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_state *s, const bool implicit, const uint8_t record) {
     init_text_loop_line(self, s);
@@ -2058,6 +2075,9 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
                         const bool was_multicell = pc->is_multicell;
                         draw_combining_char(self, s, ch);
                         if (implicit) record_combining_write(self, pc, py, before, was_multicell, record);
+                    } else if (is_leading_mark(ch)) {
+                        draw_after_leading_mark(self, &chars[i], num_chars - i);
+                        return;
                     }
                     continue;
                 }
@@ -2133,7 +2153,8 @@ draw_text_loop(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_
 
 // Text written in implicit bidi mode records each line a character is written
 // to. That has its own copy of the loop, so the copy that draws all other text
-// has no records to test for.
+// has no records to test for. Text drawn while leading marks are held uses this
+// copy too, with bidi mode off its record is zero and records nothing.
 __attribute__((noinline)) static void
 draw_text_loop_implicit(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_state *s) {
     draw_text_loop_(self, chars, num_chars, s, true, current_bidi_record(self).val);
@@ -2155,10 +2176,107 @@ draw_text_loop_implicit(Screen *self, const uint32_t *chars, size_t num_chars, t
     };
 
 static void
+prepend_leading_marks(Screen *self, index_type y) {
+    // Like add_combining_chars() for the cell at x 0, putting the marks before its text
+    CPUCell *cpu_cells = linebuf_cpu_cells_for_line(self->linebuf, y);
+    CPUCell *cell = cpu_cells;
+    if (!cell_has_text(cell) || (cell->is_multicell && cell->y)) return;
+    text_in_cell(cell, self->text_cache, self->lc);
+    if (self->lc->count >= MAX_NUM_CODEPOINTS_PER_CELL) return;
+    // must be computed before the char is changed
+    const MulticellRows rows = cell->is_multicell ? multicell_char_rows(self, 0, y) : (MulticellRows){0};
+    const size_t n = MIN((size_t)self->leading_marks.count, MAX_NUM_CODEPOINTS_PER_CELL - self->lc->count);
+    ensure_space_for_chars(self->lc, self->lc->count + n);
+    memmove(self->lc->chars + n, self->lc->chars, self->lc->count * sizeof(self->lc->chars[0]));
+    memcpy(self->lc->chars, self->leading_marks.chars, n * sizeof(self->lc->chars[0]));
+    self->lc->count += n;
+    cell->ch_or_idx = tc_get_or_insert_chars(self->text_cache, self->lc);
+    cell->ch_is_idx = true;
+    if (cell->is_multicell) {
+        const char_type ch_and_idx = cell->ch_and_idx;
+        const index_type x_limit = MIN(mcd_x_limit(cell), self->columns);
+        for (int v = rows.start; v < rows.limit; v++) {
+            cpu_cells = linebuf_cpu_cells_for_line(self->linebuf, v);
+            for (index_type h = 0; h < x_limit; h++) cpu_cells[h].ch_and_idx = ch_and_idx;
+            linebuf_mark_line_dirty(self->linebuf, v);
+        }
+    }
+}
+
+static bool
+leading_marks_at_cursor(const Screen *self) {
+    const LeadingMarks *lm = &self->leading_marks;
+    if (self->cursor->x || lm->linebuf != self->linebuf || lm->row_start != linebuf_cpu_cell_at(self->linebuf, 0, self->cursor->y)) return false;
+    // no previous cell, as in init_prev_cell()
+    return !self->cursor->y || !linebuf_cpu_cell_at(self->linebuf, self->columns - 1, self->cursor->y - 1)->next_char_was_wrapped;
+}
+
+// Draws text in bidi mode or while marks are held. While they are held the
+// text is drawn one char at a time, so that they go to the first cell written
+// at their position, or are dropped once the cursor leaves it.
+static void __attribute__((noinline))
+draw_text_slow(Screen *self, const uint32_t *chars, size_t num_chars) {
+    PREPARE_FOR_DRAW_TEXT;
+    self->is_dirty = true;
+    LeadingMarks *lm = &self->leading_marks;
+    lm->drawing = true;
+    while (num_chars) {
+        size_t n = num_chars;
+        if (lm->count) {
+            const uint32_t ch = chars[0];
+            // A line feed on a one line screen clears the line in place, keeping its storage
+            if (ch == LF || ch == VT || ch == FF) screen_clear_leading_marks(self);
+            // Other control chars run first, so that a CR or BS back to the held position keeps the marks
+            else if (ch < ' ' || leading_marks_at_cursor(self)) n = 1;
+            else screen_clear_leading_marks(self);
+        }
+        lm->resume = NULL;
+        draw_text_loop_implicit(self, chars, n, &s);
+        if (lm->resume) {
+            // the loop stopped at a mark and held it
+            num_chars = lm->resume_count + num_chars - n;
+            chars = lm->resume;
+            continue;
+        }
+        // A control char can leave the previous cell at the held one without writing it: a tab to a tab stop at column 1
+        if (lm->count && chars[0] >= ' ' && s.prev.cc == lm->row_start) {
+            prepend_leading_marks(self, s.prev.y);
+            screen_clear_leading_marks(self);
+        }
+        chars += n;
+        num_chars -= n;
+    }
+    lm->drawing = false;
+    update_draw_dispatch(self);
+}
+
+// U+200E LRM and U+200F RLM drawn with no previous cell are not discarded like
+// other zero width chars: they are held, and put first in the text of the next
+// cell drawn at their position, the first cell of their line. The draw loop
+// stops at the mark, so that the rest of its text goes through
+// draw_text_slow(), which gives the marks to that cell.
+static void __attribute__((noinline, cold))
+draw_after_leading_mark(Screen *self, const uint32_t *at, size_t remaining) {
+    LeadingMarks *lm = &self->leading_marks;
+    const CPUCell *row_start = linebuf_cpu_cell_at(self->linebuf, 0, self->cursor->y);
+    if (lm->linebuf != self->linebuf || lm->row_start != row_start) {
+        lm->count = 0;
+        lm->linebuf = self->linebuf;
+        lm->row_start = row_start;
+    }
+    if (lm->count < arraysz(lm->chars)) lm->chars[lm->count++] = at[0];
+    update_draw_dispatch(self);
+    if (lm->drawing) {
+        lm->resume = at + 1;
+        lm->resume_count = remaining - 1;
+    } else draw_text_slow(self, at + 1, remaining - 1);
+}
+
+static void
 draw_text(Screen *self, const uint32_t *chars, size_t num_chars) {
     PREPARE_FOR_DRAW_TEXT;
     self->is_dirty = true;
-    if (UNLIKELY(self->modes.mBDSM)) draw_text_loop_implicit(self, chars, num_chars, &s);
+    if (UNLIKELY(self->draw_slow)) draw_text_slow(self, chars, num_chars);
     else draw_text_loop(self, chars, num_chars, &s);
 }
 
@@ -2594,6 +2712,7 @@ void
 screen_toggle_screen_buffer(Screen *self, bool save_cursor, bool clear_alt_screen) {
     bool to_alt = self->linebuf == self->main_linebuf;
     self->active_hyperlink_id = 0;
+    self->leading_marks.count = 0;
     reset_pixel_scroll(self, 0);
     if (to_alt) {
         if (clear_alt_screen) {
@@ -2623,6 +2742,7 @@ screen_toggle_screen_buffer(Screen *self, bool save_cursor, bool clear_alt_scree
         if (save_cursor) screen_restore_cursor(self);
         self->grman = self->main_grman;
     }
+    update_draw_dispatch(self);
     bidi_controls_changed(self);
     screen_history_scroll(self, SCROLL_FULL, false);
     self->is_dirty = true;
@@ -2675,6 +2795,7 @@ set_mode_from_const(Screen *self, unsigned int mode, bool val) {
         case BDSM:
             if (self->modes.mBDSM != val) {
                 self->modes.mBDSM = val;
+                update_draw_dispatch(self);
                 bidi_controls_changed(self);
             }
             break;
@@ -3219,6 +3340,7 @@ void
 screen_scroll(Screen *self, unsigned int count) {
     // Scroll the screen up by count lines, not moving the cursor
     unsigned int top = self->margin_top, bottom = self->margin_bottom;
+    if (UNLIKELY(self->leading_marks.count)) screen_clear_leading_marks(self);
     const bool add_to_history = self->linebuf == self->main_linebuf && self->margin_top == 0;
     // Scrolling up by more than the number of lines on screen blanks the
     // entire scrolling region, so clamp to avoid a multi-billion iteration
@@ -3235,6 +3357,7 @@ void
 screen_reverse_index(Screen *self) {
     // Move cursor up one line, scrolling screen if needed
     unsigned int top = self->margin_top, bottom = self->margin_bottom;
+    if (UNLIKELY(self->leading_marks.count)) screen_clear_leading_marks(self);
     if (self->cursor->y == top) {
         nuke_multiline_chars_torn_by_scroll(self, top, bottom, false, false);
         INDEX_DOWN(false);
@@ -3245,6 +3368,7 @@ static void
 _reverse_scroll(Screen *self, unsigned int count, bool fill_from_scrollback) {
     // Scroll the screen down by count lines, not moving the cursor
     unsigned int top = self->margin_top, bottom = self->margin_bottom;
+    if (UNLIKELY(self->leading_marks.count)) screen_clear_leading_marks(self);
     // The scrollback only adjoins the scroll region when the region starts at
     // the top of the screen, otherwise the lines must come in blank, as with SD
     fill_from_scrollback = fill_from_scrollback && self->linebuf == self->main_linebuf && top == 0;
@@ -3616,6 +3740,7 @@ screen_clear_scrollback(Screen *self) {
 static void
 screen_move_into_scrollback(Screen *self) {
     if (self->linebuf != self->main_linebuf || self->margin_top != 0 || self->margin_bottom != self->lines - 1) return;
+    if (UNLIKELY(self->leading_marks.count)) screen_clear_leading_marks(self);
     unsigned int num_of_lines_to_move = self->lines;
     while (num_of_lines_to_move) {
         // the lines of the screen, not the visual lines, which are lines from
@@ -3718,6 +3843,7 @@ screen_erase_in_display(Screen *self, unsigned int how, bool private) {
 void
 screen_insert_lines(Screen *self, unsigned int count) {
     unsigned int top = self->margin_top, bottom = self->margin_bottom;
+    if (UNLIKELY(self->leading_marks.count)) screen_clear_leading_marks(self);
     if (count == 0) count = 1;
     if (top <= self->cursor->y && self->cursor->y <= bottom) {
         // remove split multiline chars at top edge
@@ -3747,6 +3873,7 @@ screen_insert_lines(Screen *self, unsigned int count) {
 
 static void
 screen_scroll_until_cursor_prompt(Screen *self, bool add_to_scrollback) {
+    if (UNLIKELY(self->leading_marks.count)) screen_clear_leading_marks(self);
     bool in_margins = cursor_within_margins(self);
     int q = screen_cursor_at_a_shell_prompt(self);
     unsigned int y = q > -1 ? (unsigned int)q : self->cursor->y;
@@ -3780,6 +3907,7 @@ screen_delete_lines_impl(Screen *self, index_type start, index_type count, index
 void
 screen_delete_lines(Screen *self, unsigned int count) {
     unsigned int top = self->margin_top, bottom = self->margin_bottom;
+    if (UNLIKELY(self->leading_marks.count)) screen_clear_leading_marks(self);
     if (count == 0) count = 1;
     if (top <= self->cursor->y && self->cursor->y <= bottom) {
         screen_delete_lines_impl(self, self->cursor->y, count, top, bottom);
@@ -4840,7 +4968,7 @@ screen_render_line_graphics(Screen *self, Line *line, int32_t row) {
             const CellStyle *st = style_table_get(self->style_table, cpu_cell->style_idx);
             cur_img_id_lower24bits = color_to_id(st->fg);
             cur_placement_id = color_to_id(st->decoration_fg);
-            text_in_cell(cpu_cell, self->text_cache, self->lc);
+            text_in_cell_without_leading_marks(cpu_cell, self->text_cache, self->lc);
             // If the char has diacritics, use them as row and column indices.
             if (self->lc->count > 1 && self->lc->chars[1]) cur_img_row = diacritic_to_rowcolumn(self->lc->chars[1]);
             if (self->lc->count > 2 && self->lc->chars[2]) cur_img_col = diacritic_to_rowcolumn(self->lc->chars[2]);
@@ -6134,7 +6262,11 @@ current_url_text(Screen *self, PyObject *args UNUSED) {
             } else ans = Py_NewRef(text);
         }
     }
-    return Py_NewRef(ans ? ans : Py_None);
+    if (!ans) Py_RETURN_NONE;
+    // a URL in the first cell of a line comes after the LRM or RLM that cell keeps first
+    Py_ssize_t start = 0, len = PyUnicode_GET_LENGTH(ans);
+    while (start < len && is_leading_mark(PyUnicode_READ_CHAR(ans, start))) start++;
+    return PyUnicode_Substring(ans, start, len);
 }
 
 
@@ -6548,10 +6680,13 @@ screen_draw_overlay_line(Screen *self) {
     bool orig_cursor_enable_mode = self->modes.mDECTCEM;
     bool orig_insert_replace_mode = self->modes.mIRM;
     bool orig_bidi_support_mode = self->modes.mBDSM;
+    const LeadingMarks orig_leading_marks = self->leading_marks;
     self->modes.mDECAWM = false;
     self->modes.mDECTCEM = false;
     self->modes.mIRM = false;
     self->modes.mBDSM = false;
+    self->leading_marks.count = 0;
+    update_draw_dispatch(self);
     Cursor *orig_cursor = self->cursor;
     self->cursor = &(self->overlay_line.original_line.cursor);
     // Mark the pre-edit text as distinct from committed text: italic, with a
@@ -6629,6 +6764,8 @@ screen_draw_overlay_line(Screen *self) {
     self->modes.mDECTCEM = orig_cursor_enable_mode;
     self->modes.mIRM = orig_insert_replace_mode;
     self->modes.mBDSM = orig_bidi_support_mode;
+    self->leading_marks = orig_leading_marks;
+    update_draw_dispatch(self);
 }
 
 static void
@@ -6945,6 +7082,7 @@ remove_multicell_fragments_cut_off_above_screen(Screen *self, index_type num_lin
 static PyObject *
 erase_last_command(Screen *self, PyObject *args UNUSED) {
     if (self->linebuf != self->main_linebuf) Py_RETURN_FALSE;
+    if (UNLIKELY(self->leading_marks.count)) screen_clear_leading_marks(self);
     Line *line;
     // Erase the most recent command: the prompt block immediately above the
     // current (live) prompt, regardless of whether that command produced any

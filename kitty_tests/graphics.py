@@ -1253,6 +1253,21 @@ class TestGraphics(BaseTest):
         self.ae(refs[0]['src_rect'], {'left': 0.0, 'top': 0.0, 'right': 0.5, 'bottom': 0.5})
         self.ae(refs[1]['src_rect'], {'left': 0.0, 'top': 0.0, 'right': 1.0, 'bottom': 1.0})
 
+    def test_unicode_placeholder_after_leading_mark(self):
+        # a placeholder cell whose text starts with an RLM decodes the same image, row and column
+        def refs(prefix):
+            s, dx, dy, put_image, put_ref, layers, rect_eq = put_helpers(self, 10, 20)
+            put_image(s, 20, 20, num_cols=4, num_lines=2, unicode_placeholder=1, id=42)
+            s.apply_sgr('38;5;42')
+            s.draw(prefix + '\U0010eeee\u030d\u030e\U0010eeee')
+            s.cursor_move(2)
+            s.update_only_line_graphics_data()
+            return layers(s)
+
+        without = refs('')
+        self.ae([r['src_rect'] for r in without], [{'left': 0.5, 'top': 0.5, 'right': 1.0, 'bottom': 1.0}])
+        self.ae(refs('\u200f'), without)
+
     def test_unicode_placeholders_multiple_placements(self):
         # Here we test placement specification via underline color.
         cw, ch = 10, 20

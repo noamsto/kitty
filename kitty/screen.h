@@ -75,6 +75,17 @@ typedef struct {
 
 #define SAVEPOINTS_SZ 256
 
+// The LRM and RLM drawn with no previous cell, held for the first cell of their line, see draw_after_leading_mark()
+typedef struct LeadingMarks {
+    char_type chars[4];
+    uint8_t count;
+    bool drawing; // draw_text_slow() is running
+    const LineBuf *linebuf;
+    const CPUCell *row_start;
+    const uint32_t *resume;
+    size_t resume_count;
+} LeadingMarks;
+
 typedef struct CharsetState {
     uint32_t *zero, *one, *current, current_num;
 } CharsetState;
@@ -164,6 +175,7 @@ typedef struct {
     HistoryBuf *historybuf;
     bool *tabstops, *main_tabstops, *alt_tabstops;
     ScreenModes modes, saved_modes;
+    bool draw_slow; // modes.mBDSM || leading_marks.count, see update_draw_dispatch()
     ColorProfile *color_profile;
     monotonic_t start_visual_bell_at;
     // Shell integration (OSC 133) command state and alternate screen
@@ -267,6 +279,7 @@ typedef struct {
         struct { bool mBDSM, mBIDI_AUTODETECT, rtl; } main_stash; // main's controls while alt is active
     } bidi;
     struct BidiMaps *bidi_maps; // allocated by the first upload of a stamped buffer
+    LeadingMarks leading_marks;
 } Screen;
 
 #define live_pixel_scroll_enabled(screen) (OPT(pixel_scroll) && (screen)->linebuf == (screen)->main_linebuf)
@@ -316,6 +329,7 @@ void screen_scroll(Screen *self, unsigned int count);
 void screen_reverse_scroll(Screen *self, unsigned int count);
 void screen_reverse_scroll_and_fill_from_scrollback(Screen *self, unsigned int count);
 void screen_reset(Screen *self);
+void screen_clear_leading_marks(Screen *self);
 void screen_soft_reset(Screen *self);
 void screen_set_tab_stop(Screen *self);
 void screen_tab(Screen *self);
