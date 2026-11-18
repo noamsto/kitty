@@ -5831,21 +5831,22 @@ static bool cell_is_blank(const CPUCell *c);
 // that is where the next character goes. At an odd level that is the column
 // visually left of it, at an even one the column right of it, clamped to the
 // last column (a beam then sits at the clamped cell's right edge). When it sits
-// past the text after a gap of blanks that the layout put at a level k other than
-// the paragraph's (the cursor gap rule, or the blanks #52 keeps), it anchors on
-// the last gap cell at k's side in the same way; otherwise the rules below apply. Typed spaces
-// that joined the run (at its level) end it, as the next letter goes beside
-// them. Otherwise they are skipped, and only after a strong letter, whose
-// direction carries across them to the next letter of the run; after a number
-// or neutral the next character's place depends on its class, so the rules
-// below apply. A cell holding an isolate control leaves that to the rules below
-// as well. Otherwise, after a right-to-left character a beam goes to the column
-// visually left of it, as the next right-to-left character goes there, and a
-// block, underline or hollow cursor does too when on a blank cell or the
-// pending wrap column. A beam on a right-to-left cell is drawn at the right
-// edge of the cell, flagged by mirrored. On a row mapped by its isolate regions
-// these rules apply within the cursor cell's region, at the region's base level;
-// a cursor outside every region stays at its column.
+// past the text after a gap of blanks that the layout put at a level k other
+// than the paragraph's (the cursor gap, or typed blanks kept after a letter in
+// an unclosed isolate), it anchors on the last gap cell at k's side in the same
+// way; otherwise the rules below apply. Typed spaces that joined the run (at
+// its level) end it, as the next letter goes beside them. Otherwise they are
+// skipped, and only after a strong letter, whose direction carries across them
+// to the next letter of the run; after a number or neutral the next character's
+// place depends on its class, so the rules below apply. A cell holding an
+// isolate control leaves that to the rules below as well. Otherwise, after a
+// right-to-left character a beam goes to the column visually left of it, as the
+// next right-to-left character goes there, and a block, underline or hollow
+// cursor does too when on a blank cell or the pending wrap column. A beam on a
+// right-to-left cell is drawn at the right edge of the cell, flagged by
+// mirrored. On a row mapped by its isolate regions these rules apply within the
+// cursor cell's region, at the region's base level; a cursor outside every
+// region stays at its column.
 static index_type
 cursor_visual_in_row(Screen *self, index_type x, index_type y, CursorShape shape, bool *mirrored) {
     *mirrored = false;

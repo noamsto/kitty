@@ -356,7 +356,10 @@ show_typed_gap(BidiMaps *b, uint32_t row_first, uint32_t gap_x, FriBidiLevel par
     const FriBidiLevel max_level = fribidi_get_par_embedding_levels_ex(b->types, b->brackets, (FriBidiStrIndex)(len + 1), &dir, b->probe_levels);
     memmove(b->types + P, b->types + P + 1, (n - P) * sizeof(b->types[0]));
     memmove(b->brackets + P, b->brackets + P + 1, (n - P) * sizeof(b->brackets[0]));
-    if (!max_level) return n_trim;
+    if (!max_level) {
+        b->resolve_cacheable = false;
+        return n_trim;
+    }
     for (uint32_t i = 0; i <= p; i++) {
         if (b->probe_levels[i] != b->para_levels[i]) return n_trim;
     }
