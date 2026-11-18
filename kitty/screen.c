@@ -2088,6 +2088,8 @@ region_control_stored(Screen *self) {
     self->linebuf->bidi_regions = self->linebuf->bidi_stamped = true;
 }
 
+static void draw_text_loop_implicit(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_state *s);
+
 static inline __attribute__((always_inline)) void
 draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_state *s, const bool implicit, const uint8_t record) {
     init_text_loop_line(self, s);
@@ -2191,21 +2193,35 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
                     // Preserve zero width chars as combining chars even though
                     // they were not added to the prev cell by grapheme segmentation.
                     // Zero width chars can only be represented as combining chars.
+                    const bool isolate = ch - 0x2066u <= 0x2069u - 0x2066u;
+                    const bool region_control = isolate && !self->modes.mBDSM;
+                    if (UNLIKELY(region_control) && !self->cursor->x) {
+                        // Regions are per row, so the control is kept for the cell written next even when a soft wrap gives
+                        // this row a previous cell
+                        record_leading_isolate(self, ch);
+                        region_control_stored(self);
+                        if (implicit) continue;
+                        // Only the implicit copy attaches kept controls; with bidi mode off its record is 0
+                        draw_text_loop_implicit(self, chars + i + 1, num_chars - i - 1, s);
+                        return;
+                    }
                     if (s->prev.cc) {
-                        const CPUCell *pc = s->prev.cc;
+                        CPUCell *pc = s->prev.cc;
                         const index_type py = s->prev.y;
-                        const char_type before = pc->ch_and_idx;
                         const bool was_multicell = pc->is_multicell;
                         // A cell with leading controls holds only leading ones: a control after it has nowhere to go
-                        if (implicit && ch - 0x2066u <= 0x2069u - 0x2066u && cell_has_leading_controls(pc)) {
+                        if (isolate && cell_has_leading_controls(pc)) {
                             close_leading_control(self, linebuf_cpu_cell_at(self->linebuf, s->prev.x, py), ch);
                             continue;
                         }
+                        // An empty cell takes no combining chars, so it becomes a blank to keep a control that may close a region
+                        if (region_control && !cell_has_text(pc) && !pc->is_multicell) cell_set_char(pc, ' ');
+                        const char_type before = pc->ch_and_idx;
                         draw_combining_char(self, s, ch);
                         if (implicit) record_combining_write(self, pc, py, before, was_multicell, record);
-                        if (ch - 0x2066u <= 0x2069u - 0x2066u && pc->ch_and_idx != before && !self->modes.mBDSM) region_control_stored(self);
-                    } else if (implicit && (ch == 0x200e || ch == 0x200f || ch == 0x61c || ch - 0x2066u <= 0x2069u - 0x2066u)) {
-                        // LRM, RLM, ALM, or LRI, RLI, FSI, PDI
+                        if (region_control && pc->ch_and_idx != before) region_control_stored(self);
+                    } else if (implicit && self->modes.mBDSM && (ch == 0x200e || ch == 0x200f || ch == 0x61c || isolate)) {
+                        // LRM, RLM, ALM, or LRI, RLI, FSI, PDI; with bidi mode off a mark here is dropped, as the other copy drops it
                         leading_zero_width(self, ch, record);
                     }
                     continue;
@@ -2313,7 +2329,8 @@ static void
 draw_text(Screen *self, const uint32_t *chars, size_t num_chars) {
     PREPARE_FOR_DRAW_TEXT;
     self->is_dirty = true;
-    if (UNLIKELY(self->modes.mBDSM)) draw_text_loop_implicit(self, chars, num_chars, &s);
+    // Controls kept for column 0 are attached only by the implicit copy
+    if (UNLIKELY(self->modes.mBDSM || self->bidi.lead.n)) draw_text_loop_implicit(self, chars, num_chars, &s);
     else draw_text_loop(self, chars, num_chars, &s);
 }
 
