@@ -5061,7 +5061,7 @@ screen_render_line_graphics(Screen *self, Line *line, int32_t row) {
             const CellStyle *st = style_table_get(self->style_table, cpu_cell->style_idx);
             cur_img_id_lower24bits = color_to_id(st->fg);
             cur_placement_id = color_to_id(st->decoration_fg);
-            text_in_cell(cpu_cell, self->text_cache, self->lc);
+            text_in_cell_without_leading_controls(cpu_cell, self->text_cache, self->lc);
             // If the char has diacritics, use them as row and column indices.
             if (self->lc->count > 1 && self->lc->chars[1]) cur_img_row = diacritic_to_rowcolumn(self->lc->chars[1]);
             if (self->lc->count > 2 && self->lc->chars[2]) cur_img_col = diacritic_to_rowcolumn(self->lc->chars[2]);
@@ -6608,7 +6608,11 @@ current_url_text(Screen *self, PyObject *args UNUSED) {
             } else ans = Py_NewRef(text);
         }
     }
-    return Py_NewRef(ans ? ans : Py_None);
+    if (!ans) Py_RETURN_NONE;
+    // a URL in the first cell of a line comes after the leading controls that cell keeps first
+    Py_ssize_t start = 0, len = PyUnicode_GET_LENGTH(ans);
+    while (start < len && is_leading_control(PyUnicode_READ_CHAR(ans, start))) start++;
+    return PyUnicode_Substring(ans, start, len);
 }
 
 

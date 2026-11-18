@@ -235,6 +235,32 @@ text_in_cell(const CPUCell *c, const TextCache *tc, ListOfChars *ans) {
     }
 }
 
+// A cell whose text is only leading controls reads as an empty cell that starts with controls
+static inline bool
+chars_are_leading_controls(const char_type *chars, size_t count) {
+    if (!count) return false;
+    for (size_t i = 0; i < count; i++) {
+        if (!is_leading_control(chars[i])) return false;
+    }
+    return true;
+}
+
+// The text of a cell without the leading controls it starts with, for code that reads the char a cell shows
+static inline void
+text_in_cell_without_leading_controls(const CPUCell *c, const TextCache *tc, ListOfChars *ans) {
+    text_in_cell(c, tc, ans);
+    if (!c->ch_is_idx || ans->count < 1 || !is_leading_control(ans->chars[0])) return;
+    size_t n = 1;
+    while (n < ans->count && is_leading_control(ans->chars[n])) n++;
+    if (n == ans->count) {
+        ans->chars[0] = 0;
+        ans->count = 1;
+        return;
+    }
+    ans->count -= n;
+    memmove(ans->chars, ans->chars + n, ans->count * sizeof(ans->chars[0]));
+}
+
 static inline bool
 text_in_cell_without_alloc(const CPUCell *c, const TextCache *tc, ListOfChars *ans) {
     if (c->ch_is_idx) {
@@ -260,7 +286,7 @@ static inline char_type
 cell_first_char(const CPUCell *c, const TextCache *tc) {
     if (c->ch_is_idx) {
         if (c->is_multicell && (c->x || c->y)) return 0;
-        return tc_first_char_at_index(tc, c->ch_or_idx);
+        return tc_base_char_at_index(tc, c->ch_or_idx);
     }
     return c->ch_or_idx;
 }
