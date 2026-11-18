@@ -24,7 +24,7 @@ from .base import BaseTest, draw_multicell, parse_bytes
 
 A = 'אבג'  # three Hebrew letters, bidi class R
 ID10 = tuple(range(10))
-LRM, RLM, ALM = '\u200e', '\u200f', '\u061c'
+LRM, RLM = '\u200e', '\u200f'
 RTL_PLAIN = (9, 8, 7) + ID10[:7]
 MIXED = 'abc' + A
 MIXED_V2L = (0, 1, 2, 5, 4, 3) + ID10[6:]
@@ -2598,7 +2598,7 @@ class TestBidiReorder(BaseTest):
         if kind == 'el':
             return 'el', csi(rng.choice((b'\x1b[K', b'\x1b[1K', b'\x1b[2K')))
         if kind in ('mark', 'markw'):
-            mark = rng.choice((LRM, RLM, ALM))
+            mark = rng.choice((LRM, RLM))
             text = ''.join(rng.choices(self.DIFF_POOL, k=rng.randrange(0, C)))
             if kind == 'mark':
                 return kind, lambda s: (s.cursor_position(y + 1, 1), s.draw(mark + text))
@@ -2652,9 +2652,10 @@ class TestBidiReorder(BaseTest):
             return 'ich', lambda s: (s.cursor_position(y + 1, x + 1), s.insert_characters(n))
         return 'crlf', lambda s: (s.cursor_position(y + 1, x + 1), parse_bytes(s, b'\r\n'))
 
-    def differential(self, seed, count, mix=None, follows=None, rtl_bases=None, conversions=None):
+    def differential(self, seed, count, mix=None, follows=None, rtl_bases=None, rlm_rtl=None):
         # follows (a list) gets a 1 for each frame that followed a scroll; rtl_bases gets a 1 for each live frame in which a paragraph
-        # starting on screen has a row with an RTL direction although none of its rows holds a Hebrew letter, a direction that only a control can have given it
+        # starting on screen has a row with an RTL direction although none of its rows holds a Hebrew letter, a direction that only a control can have given it;
+        # rlm_rtl gets, for each live frame after a mark op, the number of auto rows starting a paragraph with a leading RLM and no Hebrew letter that are RTL
         rng = random.Random(seed)
 
         def new():
@@ -2664,10 +2665,7 @@ class TestBidiReorder(BaseTest):
         for i in range(count):
             name, op = self.diff_op(rng, s, paused, first=i < 3, mix=mix)
             scrolled = s.scrolled_by
-            before = [tuple(s.test_bidi_line_record(r)) for r in range(s.lines)] if conversions is not None and name in ('mark', 'markw') else None
             op(s)
-            if before is not None:
-                conversions.append(sum(1 for r, (_, _, auto) in enumerate(before) if auto and (rec := tuple(s.test_bidi_line_record(r)))[0] and not rec[2]))
             if name in ('pause', 'unpause'):
                 paused = name == 'pause'
                 frozen = len(applied)
@@ -2681,6 +2679,14 @@ class TestBidiReorder(BaseTest):
             resolves = self.frame(s)[0]
             if follows is not None:
                 follows.append(int(s.test_bidi_shifts() > shifted))
+            if rlm_rtl is not None and name in ('mark', 'markw') and not paused and not s.scrolled_by:
+                rlm_rtl.append(sum(
+                    1 for y in range(s.lines)
+                    if not (s.linebuf.is_continued(y) if y else s.historybuf.count and s.historybuf.endswith_wrap())
+                    and s.test_bidi_line_record(y)[0] and s.test_bidi_line_record(y)[2]
+                    and s.cpu_cells(y, 0)['text'].startswith(RLM)
+                    and not any('\u0590' <= c <= '\u05ff' for c in str(s.linebuf.line(y)))
+                    and self.prtl(s, y)))
             # a dirty row inside a paragraph with maps that nothing resolved again: the shortcut kept them
             if not resolves and any(self.vmaps(s)[y] is not None for y in dirty):
                 shortcuts += 1
@@ -2771,161 +2777,232 @@ class TestBidiReorder(BaseTest):
         # leading marks among the direction (and streaming) ops: the maps, levels and paragraph directions equal a fresh replay's after every frame
         seeds = int(os.environ.get('KITTY_BIDI_DIFF_SEEDS', 3))
         count = int(os.environ.get('KITTY_BIDI_DIFF_OPS', 150))
-        rtl_bases, conversions = [], []
+        rtl_bases, rlm_rtl = [], []
         for base in (self.DIRECTION_MIX, tuple(a + b for a, b in zip(self.DIRECTION_MIX, self.STREAM_MIX))):
             mix = tuple(a + b for a, b in zip(base, self.MARK_MIX))
             for seed in range(seeds):
-                self.differential(seed, count, mix=mix, rtl_bases=rtl_bases, conversions=conversions)
-        # summed so that the test cannot pass without a mark converting an auto row or an RTL base
-        self.assertGreater(sum(conversions), 0, conversions)
+                self.differential(seed, count, mix=mix, rtl_bases=rtl_bases, rlm_rtl=rlm_rtl)
+        # summed so that the test cannot pass without a leading RLM making an auto row RTL or an RTL base
+        self.assertGreater(sum(rlm_rtl), 0, rlm_rtl)
         self.assertGreater(sum(rtl_bases), 0, rtl_bases)
 
-    def marked(self, mark=RLM, text='abc def', split=False, **kw):
-        s = self.dscreen(self.AUTO, **kw)
-        if split:
-            s.draw(mark)
-            s.draw(text)
-        else:
-            s.draw(mark + text)
+    def marked(self, *seqs, text='', **kw):
+        s = self.dscreen(*seqs, **kw)
+        s.draw(text)
+        self.frame(s)
         return s
+
+    def test_leading_mark_without_bidi_mode(self):
+        s = self.create_screen(cols=10, options={})
+        s.draw(RLM + 'abc' + A)
+        self.ae((self.refresh(s, 0), self.memo(s, 0), s.test_bidi_counts()), (None, NONE, (0, 0)))
+
+    def test_leading_mark_sets_paragraph_direction(self):
+        # under 2501 a leading mark is the first strong char of the paragraph
+        s, f = self.marked(self.AUTO, text=RLM + 'abc'), self.marked(self.SCP_RTL, text='abc')
+        self.ae((self.vmaps(s), self.lv(s, 0), self.prtl(s, 0)), (self.vmaps(f), self.lv(f, 0), True))
+        self.assertIsNone(self.marked(self.AUTO, text='abc').test_bidi_v2l(1))
+        s = self.marked(self.AUTO, text=LRM + A)
+        self.ae((self.vmaps(s)[0], self.prtl(s, 0)), ((2, 1, 0) + ID10[3:], False))
+        self.assertTrue(self.prtl(self.marked(self.AUTO, text=A), 0))
+
+    def test_leading_mark_under_a_fixed_direction(self):
+        # an RLM alone makes an LTR row reorder: the digits after it stay EN, which N1 treats as R, so the blank between them takes R
+        s = self.marked(text=RLM + '1 2')
+        self.ae((self.vmaps(s)[0], self.lv(s, 0)[:3], self.prtl(s, 0)), ((2, 1, 0) + ID10[3:], (2, 1, 2), False))
+        self.assertIsNone(self.marked(text='1 2').test_bidi_v2l(1))
+        # under a fixed RTL record a row is laid out whatever it holds, so a leading LRM before digits is too: by W7
+        # the digits after it are L, and the row lays out like LTR text in an RTL paragraph
+        s, f = self.marked(self.SCP_RTL, text=LRM + '1 2'), self.marked(self.SCP_RTL, text='abc')
+        self.ae((self.vmaps(s), self.prtl(s, 0)), (self.vmaps(f), True))
+        # an RLM after an LRM among the leading marks counts like a leading RLM
+        s = self.marked(text=LRM + RLM + '1 2')
+        self.ae((self.vmaps(s)[0], self.lv(s, 0)[:3], self.prtl(s, 0)), ((2, 1, 0) + ID10[3:], (2, 1, 2), False))
+        self.assertIsNone(self.marked(text=LRM + '1 2').test_bidi_v2l(1))
+
+    def test_leading_mark_stored_before_bidi_mode(self):
+        s = self.create_screen(cols=10, options={})
+        parse_bytes(s, RLM.encode())
+        parse_bytes(s, b'\x1b[8h' + self.AUTO)
+        s.draw('abc')
+        self.frame(s)
+        self.ae((self.vmaps(s), self.prtl(s, 0)), (self.vmaps(self.marked(self.SCP_RTL, text='abc')), True))
+
+    def test_leading_mark_moved_into_the_row(self):
+        # ICH moves the marked cell to column 1, where the mark is fed before its char
+        s = self.dscreen()
+        s.draw(RLM + '1 2')
+        parse_bytes(s, b'\r\x1b[@x')
+        self.ae(s.cpu_cells(0, 1)['text'], RLM + '1')
+        self.frame(s)
+        self.ae((self.vmaps(s)[0], self.lv(s, 0)[:4]), ((0, 3, 2, 1) + ID10[4:], (0, 2, 1, 2)))
+        # also when the cell holds a wide char, here a fullwidth digit
+        s = self.dscreen()
+        s.draw(RLM + '\uff11 2')
+        parse_bytes(s, b'\r\x1b[@x')
+        self.frame(s)
+        self.ae(self.vmaps(s)[0], (0, 4, 3, 1, 2) + ID10[5:])
+
+    def test_leading_mark_with_force_ltr(self):
+        s = self.marked(self.AUTO, text=RLM + 'abc', force_ltr=True)
+        self.assertIsNone(self.v2l(s, 0))
+
+    def test_leading_mark_removed(self):
+        # the cell keeps its char but loses the mark: the paragraph is resolved again
+        s = self.marked(self.AUTO, text=RLM + 'abc')
+        self.assertTrue(self.prtl(s, 0))
+        parse_bytes(s, b'\ra')
+        self.ae(s.cpu_cells(0, 0)['text'], 'a')
+        self.frame(s)
+        f = self.marked(self.AUTO, text='abc')
+        self.ae((self.v2l(s, 0), self.prtl(s, 0)), (None, self.prtl(f, 0)))
+
+    def test_marks_only_cell_sets_paragraph_direction(self):
+        # a line whose only content is a mark in the first cell: the mark is the first strong char of the paragraph
+        s = self.marked(self.AUTO, text=RLM)
+        self.assertTrue(self.prtl(s, 0))
+        self.assertIsNotNone(self.v2l(s, 0))
+        # as an abandoned mark over an erased line does
+        s = self.dscreen(self.AUTO, b'abc\r' + RLM.encode())
+        self.ae(s.cpu_cells(0, 0)['text'], RLM)
+        self.frame(s)
+        self.assertTrue(self.prtl(s, 0))
+        self.assertFalse(self.prtl(self.marked(self.AUTO, text=LRM), 0))
+
+    def test_marks_only_cell_without_a_reordering_mark(self):
+        # an LRM alone does not make an LTR row reorder, an RLM alone does
+        self.assertIsNone(self.v2l(self.marked(text=LRM), 0))
+        self.assertIsNotNone(self.v2l(self.marked(text=RLM), 0))
+        # and a marks-only cell in the row with digits after it
+        for lead in (RLM, LRM + RLM):
+            with self.subTest(lead=lead):
+                s = self.marked(text=lead + '\x1b[C1 2')
+                f = self.marked(text=RLM + '\x1b[C1 2')
+                self.ae(self.vmaps(s), self.vmaps(f))
+                self.assertIsNotNone(self.vmaps(s)[0])
+
+    def test_marks_only_cell_moved_into_the_row(self):
+        # ICH moves the marks-only cell to column 1, where its marks are fed before a blank, as for a cell with an
+        # RLM and a space
+        s = self.dscreen()
+        s.draw(RLM)
+        parse_bytes(s, b'\r\x1b[@\x1b[3G1 2')
+        self.ae([s.cpu_cells(0, x)['text'] for x in range(5)], ['', RLM, '1', ' ', '2'])
+        self.frame(s)
+        f = self.dscreen()
+        f.draw(RLM + ' 1 2')
+        parse_bytes(f, b'\r\x1b[@')
+        self.ae([f.cpu_cells(0, x)['text'] for x in range(5)], ['', RLM + ' ', '1', ' ', '2'])
+        self.frame(f)
+        self.ae((self.vmaps(s), self.lv(s, 0)), (self.vmaps(f), self.lv(f, 0)))
+        self.assertIsNotNone(self.vmaps(s)[0])
+
+    def test_leading_mark_restored_after_pre_edit(self):
+        # the frame draws the pre-edit over the marks-only cell and restores the line, mark included, after
+        for preedit in ('xy', RLM + 'xy'):
+            with self.subTest(preedit=preedit):
+                s = self.dscreen()
+                s.draw(RLM)
+                s.test_update_overlay_text(preedit)
+                self.frame(s)
+                self.ae(s.cpu_cells(0, 0)['text'], RLM)
+                s.test_update_overlay_text('')
+                s.draw('a')
+                self.ae(s.cpu_cells(0, 0)['text'], RLM + 'a')
 
     def rec(self, s, y):
         return tuple(s.test_bidi_line_record(y))
 
-    def test_leading_mark_paragraph(self):
-        for split in (False, True):
-            with self.subTest(split=split):
-                s = self.marked(RLM, 'abc def', split)
-                self.ae((self.refresh(s, 0), self.prtl(s, 0), self.rec(s, 0)[1:]), (RTL_PLAIN, True, (True, False)))
-                s = self.marked(LRM, A + ' x', split)
-                self.ae((self.refresh(s, 0), self.prtl(s, 0)), ((2, 1, 0) + ID10[3:], False))
-                s = self.marked('', A + ' x', split)
-                self.ae((self.refresh(s, 0), self.prtl(s, 0), self.rec(s, 0)[2]), (ID10[::-1], True, True))
-                s = self.marked(ALM, '12 34', split)
-                f = self.dscreen(self.SCP_RTL)
-                f.draw('12 34')
-                self.frame(s)
-                self.frame(f)
-                self.ae((self.prtl(s, 0), self.state(s)), (True, self.state(f)))
+    def test_leading_mark_sets_paragraph_direction_first_wins(self):
+        # under 2501 the first of the leading marks decides, as the first strong char does
+        self.assertTrue(self.prtl(self.marked(self.AUTO, text=RLM + LRM + 'abc'), 0))
+        self.assertFalse(self.prtl(self.marked(self.AUTO, text=LRM + RLM + A), 0))
 
-    def test_leading_mark_erase_in_line(self):
+    def test_leading_mark_history_and_reflow(self):
+        # the mark moves with its cell into history and through reflow, and keeps the paragraph RTL there
+        s = self.marked(self.AUTO, text=RLM + 'abc def', cols=10, lines=3)
+        s.cursor_position(3, 1)
+        s.index()
+        self.ae(s.historybuf.count, 1)
+        s.scroll(1, True)
+        self.ae((self.refresh(s, 0), self.prtl(s, 0)), (RTL_PLAIN, True))
+        s = self.marked(self.AUTO, text=RLM + 'abc def', cols=10, lines=3)
+        s.resize(3, 5)
+        self.frame(s)
+        f = self.marked(self.AUTO, text=RLM + 'abc def', cols=5, lines=3)
+        self.ae((self.prtl(s, 0), self.prtl(s, 1), self.state(s)), (True, True, self.state(f)))
+        s.resize(3, 10)
+        self.ae((self.refresh(s, 0), self.prtl(s, 0)), (RTL_PLAIN, True))
+
+    def test_leading_mark_only_change_reresolves(self):
+        # a row cleared and drawn again with the same text, with and without the mark: only the mark changes, and the
+        # paragraph is resolved again each time
+        marked_f, plain_f = self.marked(self.AUTO, text=RLM + 'abc def'), self.marked(self.AUTO, text='abc def')
+        marked_state, plain_state = self.state(marked_f), self.state(plain_f)
+        self.assertNotEqual(marked_state, plain_state)
         for split in (False, True):
-            for el in ('0K', '1K', '2K'):
-                with self.subTest(split=split, el=el):
-                    s = self.marked(split=split)
-                    self.ae(self.refresh(s, 0), RTL_PLAIN)
-                    s.cursor_position(1, 1)
-                    parse_bytes(s, f'\x1b[{el}'.encode())
-                    self.ae(self.rec(s, 0)[1:], (True, False))
-                    s.cursor_position(1, 1)
-                    s.draw('abc def')
-                    self.ae((self.refresh(s, 0), self.prtl(s, 0)), (RTL_PLAIN, True))
             for clear in ('\x1b[2J', '\x1b[L'):
-                with self.subTest(split=split, clear=clear):
-                    s = self.marked(split=split)
-                    self.ae(self.refresh(s, 0), RTL_PLAIN)
+                def redraw(s, mark):
                     s.cursor_position(1, 1)
                     parse_bytes(s, clear.encode())
                     s.cursor_position(1, 1)
-                    s.draw('abc def')
-                    v2l = self.refresh(s, 0)
-                    self.ae((self.prtl(s, 0), v2l, self.rec(s, 0)[2]), (False, None, True))
+                    if split:
+                        s.draw(mark)
+                        s.draw('abc def')
+                    else:
+                        s.draw(mark + 'abc def')
 
-    def test_leading_mark_history_and_reflow(self):
-        for split in (False, True):
-            with self.subTest(split=split):
-                s = self.marked(split=split, cols=10, lines=3)
-                s.cursor_position(3, 1)
-                s.index()
-                self.ae(s.historybuf.count, 1)
-                s.scroll(1, True)
-                self.ae((self.refresh(s, 0), self.prtl(s, 0)), (RTL_PLAIN, True))
-                s = self.marked(split=split, cols=10, lines=3)
-                s.resize(3, 5)
-                self.frame(s)
-                f = self.marked(split=split, cols=5, lines=3)
-                self.frame(f)
-                self.ae(
-                    (self.rec(s, 0)[1:], self.prtl(s, 0), self.prtl(s, 1), self.state(s)),
-                    ((True, False), True, True, self.state(f)),
-                )
-                s.resize(3, 10)
-                self.ae((self.refresh(s, 0), self.prtl(s, 0)), (RTL_PLAIN, True))
-
-    def test_leading_mark_only_change_reresolves(self):
-        for split in (False, True):
-            with self.subTest(split=split):
-                marked_f, plain_f = self.marked(split=split), self.marked('', split=split)
-                self.frame(marked_f)
-                self.frame(plain_f)
-                marked_state, plain_state = self.state(marked_f), self.state(plain_f)
-                self.assertNotEqual(marked_state, plain_state)
-                for clear in ('\x1b[2J', '\x1b[L'):
-                    s = self.marked(split=split)
+                s = self.marked(self.AUTO, text=RLM + 'abc def')
+                self.warm(s)
+                ops = []
+                for mark in ('', RLM, ''):
+                    redraw(s, mark)
+                    ops.append(mark)
+                    resolves = self.frame(s)[0]
+                    f = self.marked(self.AUTO, text=RLM + 'abc def')
+                    for m in ops:
+                        redraw(f, m)
+                    self.frame(f)
+                    with self.subTest(split=split, clear=clear, mark=mark, step=len(ops)):
+                        self.ae(self.state(s), self.state(f))
+                        if clear == '\x1b[2J':
+                            self.ae(self.state(s), marked_state if mark else plain_state)
+                        if mark:
+                            self.assertGreater(resolves, 0)
                     self.warm(s)
-                    ops = []
-                    for mark in ('', RLM, ''):
-                        s.cursor_position(1, 1)
-                        parse_bytes(s, clear.encode())
-                        s.cursor_position(1, 1)
-                        if split:
-                            s.draw(mark)
-                            s.draw('abc def')
-                        else:
-                            s.draw(mark + 'abc def')
-                        ops.append(mark)
-                        resolves = self.frame(s)[0]
-                        f = self.marked(split=split)
-                        for m in ops:
-                            f.cursor_position(1, 1)
-                            parse_bytes(f, clear.encode())
-                            f.cursor_position(1, 1)
-                            if split:
-                                f.draw(m)
-                                f.draw('abc def')
-                            else:
-                                f.draw(m + 'abc def')
-                        self.frame(f)
-                        with self.subTest(clear=clear, mark=mark, step=len(ops)):
-                            self.ae(self.state(s), self.state(f))
-                            if clear == '\x1b[2J':
-                                self.ae(self.state(s), marked_state if mark else plain_state)
-                            if mark:
-                                self.assertGreater(resolves, 0)
-                        self.warm(s)
 
-    def test_leading_mark_converts_clean_row(self):
-        for split in (False, True):
-            with self.subTest(split=split):
-                s = self.dscreen(self.AUTO)
-                s.draw('abc def')
-                self.warm(s)
-                self.ae(self.refresh(s, 0), None)
-                s.cursor_position(1, 1)
-                s.draw(RLM)
-                resolves = self.frame(s)[0]
-                f = self.marked(split=split)
-                self.frame(f)
-                self.assertGreaterEqual(resolves, 1)
-                self.ae(self.state(s), self.state(f))
-                s = self.dscreen(self.AUTO)
-                s.draw(NSI)
-                self.warm(s)
-                self.ae(s.test_bidi_line_record(0)[0], RTL)
-                s.cursor_position(1, 1)
-                s.draw(LRM)
-                self.ae(self.rec(s, 0), (RTL, False, False))
-                resolves = self.frame(s)[0]
-                f = self.marked(LRM, NSI, split)
-                self.frame(f)
-                self.assertGreaterEqual(resolves, 1)
-                self.ae((self.prtl(s, 0), self.state(s)), (False, self.state(f)))
+    def test_leading_mark_written_into_a_clean_row(self):
+        # a mark and the row's first char written again into a row whose layout is warm: the paragraph is resolved again
+        s = self.dscreen(self.AUTO)
+        s.draw('abc def')
+        self.warm(s)
+        self.ae(self.refresh(s, 0), None)
+        s.cursor_position(1, 1)
+        s.draw(RLM + 'a')
+        resolves = self.frame(s)[0]
+        f = self.marked(self.AUTO, text=RLM + 'abc def')
+        self.assertGreaterEqual(resolves, 1)
+        self.ae(self.state(s), self.state(f))
+        s = self.dscreen(self.AUTO)
+        s.draw(NSI)
+        self.warm(s)
+        self.assertTrue(self.prtl(s, 0))
+        s.cursor_position(1, 1)
+        s.draw(LRM + NSI[0])
+        resolves = self.frame(s)[0]
+        f = self.marked(self.AUTO, text=LRM + NSI)
+        self.assertGreaterEqual(resolves, 1)
+        self.ae((self.prtl(s, 0), self.state(s)), (False, self.state(f)))
 
     def test_leading_mark_continuation_rows(self):
+        # on a row that continues the paragraph of the row above, the mark is a strong char inside that paragraph, which keeps
+        # the direction its first strong char gives it
         s = self.dscreen(self.AUTO, cols=5)
         s.draw('abcdefg')
         s.cursor_position(2, 1)
         s.draw(RLM)
+        # the row above wraps into it, so the mark attaches to that row's last cell
+        self.ae((s.cpu_cells(0, 4)['text'], s.cpu_cells(1, 0)['text']), ('e' + RLM, 'f'))
         self.frame(s)
         self.ae(([self.rec(s, y)[2] for y in (0, 1)], [self.prtl(s, y) for y in (0, 1)]), ([True, True], [False, False]))
 
@@ -2942,25 +3019,22 @@ class TestBidiReorder(BaseTest):
             return s
 
         s, f = build(True), build(False)
-        self.ae((self.rec(s, 0)[1:], self.rec(s, 1)[2]), ((True, False), True))
+        self.ae((self.rec(s, 0)[2], self.rec(s, 1)[2]), (True, True))
         self.frame(s)
         self.frame(f)
         self.ae(([self.prtl(s, y) for y in (0, 1)], self.state(s)), ([False, False], self.state(f)))
 
     def test_leading_mark_overlay(self):
-        s = self.dscreen(self.AUTO)
-        s.draw('abc def')
+        # pre-edit text starting with a mark, drawn over a laid out row, takes the row's layout and leaves it as it was
+        f = self.marked(self.AUTO, text='abc def')
+        s = self.marked(self.AUTO, text='abc def')
+        s.cursor_position(1, 1)
+        s.test_update_overlay_text(RLM + 'xy')
         self.frame(s)
-        s.test_draw_overlay_line(RLM + 'xy', 0, 0)
+        self.ae((s.cpu_cells(0, 0)['text'], self.prtl(s, 0), self.state(s)), ('a', False, self.state(f)))
+        s.test_update_overlay_text('')
         self.frame(s)
-        f = self.dscreen(self.AUTO)
-        f.draw('abc def')
-        self.frame(f)
-        self.ae((s.test_bidi_line_record(0)[2], self.state(s)), (True, self.state(f)))
-
-    def test_leading_mark_force_ltr(self):
-        s = self.marked(force_ltr=True)
-        self.ae((self.rec(s, 0)[1:], self.refresh(s, 0)), ((True, False), None))
+        self.ae((s.cpu_cells(0, 0)['text'], self.prtl(s, 0), self.state(s)), ('a', False, self.state(f)))
 
     # Following a full-height index: the cache keeps the paragraphs of the lines that moved
     FOLLOW_ROWS = ['דהו', 'zxc', 'זחט', 'lkj']  # screen rows 0..3 of a 10x5 screen, the bottom row blank
@@ -4994,7 +5068,7 @@ class TestBidiReorder(BaseTest):
             ('a PDI after the cell closes the opener before it', R + '1' + PDI + '2 34', 'RLI1PDI', (ID(0, n), (2,) + (0,) * (n - 1))),
             ('a PDI after a matched pair is kept after the char', '\u2066\u2069' + '1' + PDI + '2 34', 'LRIPDI1PDI', None),
             ('an opener after the cell is kept after the char', R + '1' + '\u2066' + '2 34', 'RLI1LRI', None),
-            ('lrm at column 0 keeps the g8 handling', LRM + N, '1', None),
+            ('lrm at column 0 is stored as the isolates are', LRM + N, LRM + '1', None),
             ('an embedding stays inert', '\u202b' + N, '1', None),
         )
         for name, text, chars, same in cases:
