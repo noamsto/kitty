@@ -399,6 +399,8 @@ bool screen_overlay_visual_start(Screen *self, index_type *start);
 index_type screen_ime_anchor_x(Screen *self);
 // Replaces x, the visual column of a click on screen row y, by its logical column
 void screen_bidi_logical_click(Screen *self, index_type *x, index_type y, bool *in_left_half);
+// Whether a cursor-only move must re-upload cell data
+bool screen_bidi_cursor_gap_changed(Screen *self);
 bool screen_is_cursor_visible(const Screen *self);
 unsigned screen_multi_cursor_count(const Screen *self);
 bool screen_selection_range_for_line(Screen *self, index_type y, index_type *start, index_type *end);
