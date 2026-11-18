@@ -52,6 +52,11 @@
 
 static const ScreenModes empty_modes = {0, .mDECAWM = true, .mDECTCEM = true, .mDECARM = true};
 
+static inline void
+bidi_update_draw_dispatch(Screen *self) {
+    self->bidi.draw_implicit = self->modes.mBDSM || self->bidi.lead.n;
+}
+
 #define CSI_REP_MAX_REPETITIONS 65535u
 
 // Constructor/destructor {{{
@@ -162,6 +167,7 @@ new_screen_object(PyTypeObject *type, PyObject *args, PyObject UNUSED *kwds) {
         self->window_id = window_id;
         self->modes = empty_modes;
         self->saved_modes = empty_modes;
+        bidi_update_draw_dispatch(self);
         self->is_dirty = true;
         self->scroll_changed = false;
         self->margin_top = 0;
@@ -275,6 +281,7 @@ do_screen_reset(Screen *self, bool is_hard_reset) {
     self->modes = empty_modes;
     self->saved_modes = empty_modes;
     zero_at_ptr(&self->bidi);
+    bidi_update_draw_dispatch(self);
     rederive_blank_bidi_records(self->main_linebuf, (LineAttrs){0});
     rederive_blank_bidi_records(self->alt_linebuf, (LineAttrs){0});
     self->active_hyperlink_id = 0;
@@ -1164,7 +1171,12 @@ set_bidi_record(LineAttrs *a, LineAttrs r) {
 
 static void __attribute__((noinline, cold))
 stamp_line_for_bidi(Screen *self, index_type y, uint8_t record) {
-    // An unstamped line's bidi_auto may be a region memo, so the record replaces the bits rather than ORing into them.
+    // An unstamped line's bidi_auto may be a region memo, so the record replaces the bits rather than ORing into them, and no
+    // record leaves them as they are.
+    if (!record) {
+        self->linebuf->bidi_stamped = true;
+        return;
+    }
     LineAttrs *a = self->linebuf->line_attrs + y;
     if (a->bidi_stamp) return;
     set_bidi_record(a, (LineAttrs){.val = record});
@@ -1255,15 +1267,28 @@ close_leading_control(Screen *self, CPUCell *c, char_type ch) {
     cell_set_chars(c, self->text_cache, lc);
 }
 
+static void __attribute__((noinline, cold))
+region_control_stored(Screen *self) {
+    // The walker runs only for a stamped buffer, and scans unstamped rows for isolate regions only for one that stored a control
+    self->linebuf->bidi_regions = self->linebuf->bidi_stamped = true;
+}
+
+static bool add_combining_chars(Screen *self, const char_type *chars, size_t num_chars, index_type x, index_type y);
+
 // Stores the kept controls after the first chars of cell (0, y), just written, and marks them leading. A cell that is a multicell
-// (a wide char) takes none.
+// (a wide char) takes none, except that with bidi mode off it takes them as trailing controls, so the region starts after it.
 static void __attribute__((noinline, cold))
 attach_leading_controls(Screen *self) {
     BidiLead *p = &self->bidi.lead;
     const unsigned n = p->n;
     p->n = 0;
     CPUCell *c = linebuf_cpu_cell_at(p->lb, 0, p->y);
-    if (c->is_multicell || !c->ch_and_idx) return;
+    if (c->is_multicell) {
+        // The lead stands, so self->linebuf is p->lb
+        if (!self->modes.mBDSM && !c->x && !c->y && add_combining_chars(self, p->chars, n, 0, p->y)) region_control_stored(self);
+        return;
+    }
+    if (!c->ch_and_idx) return;
     text_in_cell(c, self->text_cache, self->lc);
     if (self->lc->count + n > MAX_NUM_CODEPOINTS_PER_CELL) return;
     ensure_space_for_chars(self->lc, self->lc->count + n);
@@ -2082,13 +2107,40 @@ draw_non_ascii_run(Screen *self, text_loop_state *s, const uint32_t *chars, size
     return i;
 }
 
-static void __attribute__((noinline, cold))
-region_control_stored(Screen *self) {
-    // The walker runs only for a stamped buffer, and scans unstamped rows for isolate regions only for one that stored a control
-    self->linebuf->bidi_regions = self->linebuf->bidi_stamped = true;
-}
-
 static void draw_text_loop_implicit(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_state *s);
+
+// An isolate control written with bidi mode off, kept for the region it opens or closes. Rows stamped with bidi mode on keep
+// their own handling of it. Returns true when it handed the rest of the draw to the implicit copy.
+static bool __attribute__((noinline, cold))
+draw_region_control(Screen *self, text_loop_state *s, char_type ch, const uint32_t *rest, size_t num_rest, bool hand_off) {
+    if (!self->cursor->x && !self->linebuf->line_attrs[self->cursor->y].bidi_stamp) {
+        // Regions are per row, so the control is kept for the cell written next even when a soft wrap gives this row a
+        // previous cell
+        record_leading_isolate(self, ch);
+        region_control_stored(self);
+        bidi_update_draw_dispatch(self);
+        if (!hand_off) return false;
+        // Only the implicit copy attaches kept controls; with bidi mode off its record is 0
+        draw_text_loop_implicit(self, rest, num_rest, s);
+        return true;
+    }
+    CPUCell *pc = s->prev.cc;
+    if (!pc) return false;
+    const index_type py = s->prev.y;
+    // A cell with leading controls holds only leading ones: a control after it has nowhere to go
+    if (cell_has_leading_controls(pc)) {
+        close_leading_control(self, linebuf_cpu_cell_at(self->linebuf, s->prev.x, py), ch);
+        return false;
+    }
+    // An empty cell takes no combining chars, so it becomes a blank to keep a control that may close a region
+    if (!self->linebuf->line_attrs[py].bidi_stamp && !cell_has_text(pc) && !pc->is_multicell) cell_set_char(pc, ' ');
+    const char_type before = pc->ch_and_idx;
+    const bool was_multicell = pc->is_multicell;
+    draw_combining_char(self, s, ch);
+    if (!hand_off) record_combining_write(self, pc, py, before, was_multicell, current_bidi_record(self).val);
+    if (pc->ch_and_idx != before) region_control_stored(self);
+    return false;
+}
 
 static inline __attribute__((always_inline)) void
 draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_state *s, const bool implicit, const uint8_t record) {
@@ -2193,34 +2245,23 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
                     // Preserve zero width chars as combining chars even though
                     // they were not added to the prev cell by grapheme segmentation.
                     // Zero width chars can only be represented as combining chars.
-                    const bool isolate = ch - 0x2066u <= 0x2069u - 0x2066u;
-                    const bool region_control = isolate && !self->modes.mBDSM;
-                    if (UNLIKELY(region_control) && !self->cursor->x) {
-                        // Regions are per row, so the control is kept for the cell written next even when a soft wrap gives
-                        // this row a previous cell
-                        record_leading_isolate(self, ch);
-                        region_control_stored(self);
-                        if (implicit) continue;
-                        // Only the implicit copy attaches kept controls; with bidi mode off its record is 0
-                        draw_text_loop_implicit(self, chars + i + 1, num_chars - i - 1, s);
-                        return;
+                    if (UNLIKELY(ch - 0x2066u <= 0x2069u - 0x2066u) && !self->modes.mBDSM) {
+                        if (draw_region_control(self, s, ch, chars + i + 1, num_chars - i - 1, !implicit)) return;
+                        continue;
                     }
                     if (s->prev.cc) {
-                        CPUCell *pc = s->prev.cc;
+                        const CPUCell *pc = s->prev.cc;
                         const index_type py = s->prev.y;
+                        const char_type before = pc->ch_and_idx;
                         const bool was_multicell = pc->is_multicell;
                         // A cell with leading controls holds only leading ones: a control after it has nowhere to go
-                        if (isolate && cell_has_leading_controls(pc)) {
+                        if (implicit && ch - 0x2066u <= 0x2069u - 0x2066u && cell_has_leading_controls(pc)) {
                             close_leading_control(self, linebuf_cpu_cell_at(self->linebuf, s->prev.x, py), ch);
                             continue;
                         }
-                        // An empty cell takes no combining chars, so it becomes a blank to keep a control that may close a region
-                        if (region_control && !cell_has_text(pc) && !pc->is_multicell) cell_set_char(pc, ' ');
-                        const char_type before = pc->ch_and_idx;
                         draw_combining_char(self, s, ch);
                         if (implicit) record_combining_write(self, pc, py, before, was_multicell, record);
-                        if (region_control && pc->ch_and_idx != before) region_control_stored(self);
-                    } else if (implicit && self->modes.mBDSM && (ch == 0x200e || ch == 0x200f || ch == 0x61c || isolate)) {
+                    } else if (implicit && self->modes.mBDSM && (ch == 0x200e || ch == 0x200f || ch == 0x61c || ch - 0x2066u <= 0x2069u - 0x2066u)) {
                         // LRM, RLM, ALM, or LRI, RLI, FSI, PDI; with bidi mode off a mark here is dropped, as the other copy drops it
                         leading_zero_width(self, ch, record);
                     }
@@ -2308,6 +2349,7 @@ draw_text_loop(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_
 __attribute__((noinline)) static void
 draw_text_loop_implicit(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_state *s) {
     draw_text_loop_(self, chars, num_chars, s, true, current_bidi_record(self).val);
+    bidi_update_draw_dispatch(self);
 }
 
 #define PREPARE_FOR_DRAW_TEXT                                                                                         \
@@ -2330,7 +2372,7 @@ draw_text(Screen *self, const uint32_t *chars, size_t num_chars) {
     PREPARE_FOR_DRAW_TEXT;
     self->is_dirty = true;
     // Controls kept for column 0 are attached only by the implicit copy
-    if (UNLIKELY(self->modes.mBDSM || self->bidi.lead.n)) draw_text_loop_implicit(self, chars, num_chars, &s);
+    if (UNLIKELY(self->bidi.draw_implicit)) draw_text_loop_implicit(self, chars, num_chars, &s);
     else draw_text_loop(self, chars, num_chars, &s);
 }
 
@@ -2388,6 +2430,9 @@ handle_fixed_width_multicell_command(Screen *self, CPUCell mcd, ListOfChars *lc)
     mcd.hyperlink_id = s.cc.hyperlink_id;
     mcd.style_idx = s.cc.style_idx;
     cell_set_chars(&mcd, self->text_cache, lc);
+    // Tested before the writes below, which may reuse lc
+    bool region_control = false;
+    if (!self->modes.mBDSM) for (size_t i = 1; i < lc->count; i++) region_control |= lc->chars[i] - 0x2066u <= 0x2069u - 0x2066u;
     move_cursor_past_multicell(self, width);
     if (height > 1) {
         if (self->cursor->y <= self->margin_bottom) {
@@ -2421,6 +2466,7 @@ handle_fixed_width_multicell_command(Screen *self, CPUCell mcd, ListOfChars *lc)
             s.cp[x] = mcd;
         }
     }
+    if (region_control) region_control_stored(self);
     self->cursor->x += width;
     self->is_dirty = true;
 }
@@ -2777,6 +2823,7 @@ screen_toggle_screen_buffer(Screen *self, bool save_cursor, bool clear_alt_scree
         self->bidi.main_stash.mBIDI_AUTODETECT = self->modes.mBIDI_AUTODETECT;
         self->bidi.main_stash.rtl = self->bidi.rtl;
         self->modes.mBDSM = self->modes.mBIDI_AUTODETECT = self->bidi.rtl = false;
+        bidi_update_draw_dispatch(self);
         self->linebuf = self->alt_linebuf;
         self->tabstops = self->alt_tabstops;
         self->key_encoding_flags = self->alt_key_encoding_flags;
@@ -2787,6 +2834,7 @@ screen_toggle_screen_buffer(Screen *self, bool save_cursor, bool clear_alt_scree
     } else {
         self->alternate_screen.exited_at = monotonic();
         self->modes.mBDSM = self->bidi.main_stash.mBDSM;
+        bidi_update_draw_dispatch(self);
         self->modes.mBIDI_AUTODETECT = self->bidi.main_stash.mBIDI_AUTODETECT;
         self->bidi.rtl = self->bidi.main_stash.rtl;
         self->linebuf = self->main_linebuf;
@@ -2848,6 +2896,7 @@ set_mode_from_const(Screen *self, unsigned int mode, bool val) {
             if (self->modes.mBDSM != val) {
                 self->modes.mBDSM = val;
                 bidi_controls_changed(self);
+                bidi_update_draw_dispatch(self);
             }
             break;
         case BIDI_AUTODETECT:
@@ -6921,6 +6970,10 @@ screen_draw_overlay_line(Screen *self) {
     self->modes.mDECTCEM = false;
     self->modes.mIRM = false;
     self->modes.mBDSM = false;
+    // The pre-edit neither takes the program's controls kept for column 0 nor leaves its own
+    const BidiLead saved_lead = self->bidi.lead;
+    self->bidi.lead.n = 0;
+    bidi_update_draw_dispatch(self);
     Cursor *orig_cursor = self->cursor;
     self->cursor = &(self->overlay_line.original_line.cursor);
     // Mark the pre-edit text as distinct from committed text: italic, with a
@@ -6998,6 +7051,8 @@ screen_draw_overlay_line(Screen *self) {
     self->modes.mDECTCEM = orig_cursor_enable_mode;
     self->modes.mIRM = orig_insert_replace_mode;
     self->modes.mBDSM = orig_bidi_support_mode;
+    self->bidi.lead = saved_lead;
+    bidi_update_draw_dispatch(self);
 }
 
 static void
