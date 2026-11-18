@@ -69,6 +69,19 @@ def osc66_controls(text, control_as=None):
     return ''.join(f'\x1b]66;w=1;{control_as or ch}\x07' if ch in BIDI_CONTROLS else ch for ch in text).encode()
 
 
+# Isolate regions
+FSI, LRI, RLI, PDI = '⁨', '⁦', '⁧', '⁩'
+REGION_GUTTER = ('   12 ' + FSI + 'שלום world' + PDI).encode()
+REGION_GUTTER_V2L = tuple(range(6)) + (11, 12, 13, 14, 15, 10, 9, 8, 7, 6) + tuple(range(16, 20))
+REGION_GUTTER_LEVELS = (0,) * 6 + (1,) * 5 + (2,) * 5 + (0,) * 4
+CLAUDE_NO_PDI = ('❯ ' + FSI + 'הסדר לא טוב' + '\x1b[C' + '\x1b[1;20H│' + '\x1b[1;15H').encode()
+CLAUDE_FIELD_END = ('❯ ' + FSI + 'הסדר לא טוב' + '\x1b[C' + '\x1b[1;20H' + PDI + '│' + '\x1b[1;15H').encode()
+
+
+def ID(a, b):
+    return tuple(range(a, b))
+
+
 class TestBidiReorder(BaseTest):
     def setUp(self):
         self.enterContext(setup_for_testing())
@@ -4455,10 +4468,11 @@ class TestBidiReorder(BaseTest):
             s = self.screen(cols=n, lines=3)
             parse_bytes(s, R.encode() + b'\x1b[?1049h' + N.encode())
             self.ae(self.lead_cell(s), '1')
-        with self.subTest('bidi mode off: nothing kept'):
+        with self.subTest('bidi mode off: kept for isolate regions'):
+            # With bidi mode off the row's isolate regions still lay out, so the control is kept for them
             s = self.create_screen(cols=n, lines=3, options={})
             parse_bytes(s, (R + N).encode())
-            self.ae(self.lead_cell(s), '1')
+            self.ae(self.lead_cell(s), '1RLI')
         with self.subTest('soft wrapped continuation keeps the control with the cell before'):
             s = self.screen(cols=4, lines=3)
             parse_bytes(s, ('אבגד' + R + 'ה').encode())
@@ -4503,3 +4517,379 @@ class TestBidiReorder(BaseTest):
             s = self.screen(cols=12, lines=2)
             parse_bytes(s, ('⁦' * (BIDI_MAX_LEAD + 3) + 'a').encode())
             self.ae(len(s.cpu_cells(0)[0]['text']), 1 + BIDI_MAX_LEAD)
+
+    # Isolate regions
+
+    def alt(self, cols, lines=3):
+        # the alternate screen, BDSM never sent
+        s = self.create_screen(cols=cols, lines=lines, scrollback=0, options={})
+        parse_bytes(s, b'\x1b[?1049h\x1b[H')
+        return s
+
+    def region_maps(self, s, y=0):
+        # (v2l, levels) of screen row y after a frame
+        test_screen_update_cell_data(s)
+        v2l = s.test_bidi_v2l(self.rr(s, y))
+        if v2l is not None:
+            self.ae(sorted(v2l), list(range(s.columns)), 'v2l must be a bijection over the columns')
+        return v2l, self.lv(s, y)
+
+    def assert_region(self, s, y, v2l, levels, msg=''):
+        self.ae(self.region_maps(s, y), (v2l, levels), msg)
+
+    def assert_no_region(self, s, y=0, msg=''):
+        self.ae(self.region_maps(s, y), (None, None), msg)
+
+    def cursor_at(self, s, x, shape, y=0):
+        return s.test_cursor_visual(x, y, shape)
+
+    def test_region_vim_gutter(self):
+        s = self.alt(20)
+        parse_bytes(s, ('   12 ' + FSI + 'שלום world' + PDI).encode())
+        self.assert_region(s, 0, REGION_GUTTER_V2L, REGION_GUTTER_LEVELS)
+
+    def test_region_vim_split(self):
+        s = self.alt(20)
+        parse_bytes(s, ('1 ' + FSI + 'אבג d' + PDI + '  │2 ' + FSI + 'שלום' + PDI).encode())
+        self.assert_region(
+            s, 0, (0, 1, 6, 5, 4, 3, 2, 7, 8, 9, 10, 11, 15, 14, 13, 12, 16, 17, 18, 19),
+            (0, 0, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0))
+
+    def test_region_claude_code_no_pdi(self):
+        s = self.alt(20)
+        parse_bytes(s, CLAUDE_NO_PDI)
+        self.assert_no_region(s)
+        self.ae(self.cursor_at(s, 14, CURSOR_BEAM), (14, False))
+        self.assertTrue(s.test_bidi_state()[4], 'the walker ran')
+
+    def test_region_claude_code_field_end(self):
+        s = self.alt(20)
+        parse_bytes(s, CLAUDE_FIELD_END)
+        self.assert_region(s, 0, (0, 1) + tuple(range(18, 1, -1)) + (19,), (0, 0) + (1,) * 17 + (0,))
+        self.ae(self.cursor_at(s, 14, CURSOR_BEAM), (6, True))
+        self.ae(self.cursor_at(s, 14, CURSOR_BLOCK)[0], 6)
+        self.ae(s.line(0)[18], ' ' + PDI)
+
+    def test_region_lazygit_box(self):
+        s = self.alt(12)
+        for y, row in enumerate(('┌' + '─' * 10 + '┐', '│' + FSI + 'שלום ab' + PDI + '   │', '└' + '─' * 10 + '┘')):
+            parse_bytes(s, f'\x1b[{y + 1};1H{row}'.encode())
+        test_screen_update_cell_data(s)
+        self.assert_region(s, 1, (0, 6, 7, 5, 4, 3, 2, 1, 8, 9, 10, 11), (0, 1, 1, 1, 1, 1, 2, 2, 0, 0, 0, 0))
+        self.assert_no_region(s, 0)
+        self.assert_no_region(s, 2)
+
+    def test_region_no_isolates_identity(self):
+        s = self.alt(10)
+        parse_bytes(s, 'שלום world'.encode())
+        self.assert_no_region(s)
+        self.assertFalse(s.test_bidi_state()[4])
+
+    def test_region_nesting(self):
+        s = self.alt(12)
+        parse_bytes(s, ('x ' + FSI + 'אב ' + LRI + 'cd' + PDI + PDI).encode())
+        self.assert_region(s, 0, (0, 1, 5, 6, 4, 3, 2) + ID(7, 12), (0, 0, 1, 1, 1, 2, 2) + (0,) * 5)
+        # the nested RLI is fed: inert, b and ג would share the LRI's level 2 instead of an RTL run at 1 with ג at 2
+        s = self.alt(12)
+        parse_bytes(s, ('x ' + LRI + 'a ' + RLI + 'b ג' + PDI + PDI).encode())
+        self.assert_region(s, 0, (0, 1, 2, 3, 6, 5, 4) + ID(7, 12), (0, 0, 0, 0, 2, 1, 1) + (0,) * 5)
+        # the FSI's first strong skips the nested LRI, so its base is RTL from ש, not LTR from a
+        s = self.alt(12)
+        parse_bytes(s, ('x ' + FSI + LRI + 'ab' + PDI + 'שלום' + PDI).encode())
+        self.assert_region(s, 0, (0, 1, 7, 6, 5, 4, 2, 3) + ID(8, 12), (0, 0, 2, 2, 1, 1, 1, 1) + (0,) * 4)
+        self.ae(self.cursor_at(s, 4, CURSOR_BEAM), (5, True))
+
+    def test_region_unmatched_pdi(self):
+        s = self.alt(10)
+        parse_bytes(s, ('a' + PDI + ' ' + FSI + 'אב' + PDI).encode())
+        self.assert_region(s, 0, (0, 1, 3, 2) + ID(4, 10), (0, 0, 1, 1) + (0,) * 6)
+
+    def test_region_after_unmatched_initiator(self):
+        # A PDI closes the nearest open initiator, so an unmatched one does not swallow the pair after it: גד stays in place
+        s = self.alt(10)
+        parse_bytes(s, ('x' + FSI + 'גד ' + FSI + 'אב' + PDI).encode())
+        self.assert_region(s, 0, (0, 1, 2, 3, 5, 4) + ID(6, 10), (0, 0, 0, 0, 1, 1) + (0,) * 4)
+
+    def test_region_initiator_at_column_0(self):
+        text = 'שלום x'
+        for name, chunks in (
+            ('one write', (FSI + text + PDI,)),
+            ('initiator alone', (FSI, text + PDI)),
+            ('sgr between', (FSI + '\x1b[31m' + text + PDI,)),
+        ):
+            with self.subTest(name):
+                s = self.alt(10)
+                parse_bytes(s, b'\x1b[2;1H')
+                for chunk in chunks:
+                    parse_bytes(s, chunk.encode())
+                self.assert_region(s, 1, (5, 4, 3, 2, 1, 0) + ID(6, 10), (1, 1, 1, 1, 1, 2) + (0,) * 4)
+
+    def test_region_column_0_one_cell_then_region(self):
+        # The closing-PDI rule of leading controls cancels a one-cell isolate written at column 0 (a cell's leading controls hold no PDI), so cell 0
+        # stays at level 0, unlike the same isolate at another column
+        s = self.alt(10)
+        parse_bytes(s, (FSI + 'א' + PDI + ' ' + FSI + 'בג' + PDI).encode())
+        self.assert_region(s, 0, (0, 1, 3, 2) + ID(4, 10), (0, 0, 1, 1) + (0,) * 6)
+        self.ae(s.line(0)[0], 'א')
+
+    def test_region_column_0_continuation_row(self):
+        s = self.alt(5)
+        parse_bytes(s, b'abcdef')
+        parse_bytes(s, ('\r' + FSI + 'אב' + PDI).encode())
+        self.assert_region(s, 1, (1, 0, 2, 3, 4), (1, 1, 0, 0, 0))
+        self.assert_no_region(s, 0)
+        self.ae(s.line(0)[4], 'e')
+
+    def test_region_over_isolate_cap(self):
+        def t(k):
+            return 'x ' + FSI + LRI + 'ab' + PDI + 'ש' + (LRI + PDI) * 8 + 'ל' + (LRI + PDI) * (k - 8) + 'ו' + PDI
+
+        def nested(k):
+            return t(k).count(LRI) + t(k).count(PDI) - 1
+
+        # the region's nested controls (all but its own FSI and PDI): fed at the cap, inert one pair over it
+        self.ae((nested(15), nested(16)), (2 + 2 * 15, 2 + 2 * 16))
+        self.assertTrue(nested(15) <= BIDI_MAX_ISOLATES < nested(16))
+        with self.subTest('at the cap: fed, ab is an LTR isolate at 2 inside the RTL region'):
+            s = self.alt(12)
+            parse_bytes(s, t(15).encode())
+            self.assert_region(s, 0, (0, 1, 6, 5, 4, 2, 3) + ID(7, 12), (0, 0, 2, 2, 1, 1, 1) + (0,) * 5)
+            self.ae(self.cursor_at(s, 2, CURSOR_BEAM), (5, False))
+        with self.subTest('over the cap: inert, ab stays at the paragraph level outside the reordered run'):
+            s = self.alt(12)
+            parse_bytes(s, t(16).encode())
+            self.assert_region(s, 0, (0, 1, 2, 3, 6, 5, 4) + ID(7, 12), (0, 0, 0, 0, 1, 1, 1) + (0,) * 5)
+            self.ae(self.cursor_at(s, 2, CURSOR_BEAM), (2, False))
+
+    def test_region_adjacent_share_cell(self):
+        s = self.alt(10)
+        parse_bytes(s, ('x ' + FSI + 'אב' + PDI + FSI + 'גד' + PDI).encode())
+        self.assert_region(s, 0, (0, 1, 3, 2, 5, 4) + ID(6, 10), (0, 0, 1, 1, 1, 1) + (0,) * 4)
+
+    def test_region_memo_and_redraw(self):
+        def fresh():
+            s = self.alt(20)
+            parse_bytes(s, REGION_GUTTER)
+            self.assert_region(s, 0, REGION_GUTTER_V2L, REGION_GUTTER_LEVELS)
+            return s
+
+        with self.subTest('overwrite a cell inside'):
+            s = fresh()
+            # a Latin z re-resolves the region: z alone at level 2 shows the row was laid out again, not served from the memo
+            parse_bytes(s, b'\x1b[1;9Hz')
+            self.assert_region(s, 0, REGION_GUTTER_V2L, (0,) * 6 + (1, 1, 2, 1, 1, 2, 2, 2, 2, 2) + (0,) * 4)
+        with self.subTest('overwrite the cell holding the PDI'):
+            s = fresh()
+            parse_bytes(s, b'\x1b[1;16He')
+            self.assert_no_region(s)
+        with self.subTest('overwrite the row without controls'):
+            s = fresh()
+            self.ae(s.test_bidi_line_record(0), (0, False, True))
+            parse_bytes(s, ('\x1b[1;1H' + 'abc' + ' ' * 17).encode())
+            self.assert_no_region(s)
+            self.ae(s.test_bidi_line_record(0), (0, False, False))
+        with self.subTest('overwrite the cell holding the initiator'):
+            s = fresh()
+            parse_bytes(s, b'\x1b[1;6H ')
+            self.assert_no_region(s)
+
+    def test_region_bdsm_on_unchanged(self):
+        s = self.alt(20)
+        parse_bytes(s, b'\x1b[8h' + CLAUDE_FIELD_END)
+        self.assert_region(s, 0, (0, 1) + tuple(range(19, 1, -1)), (0, 0) + (1,) * 18)
+
+    def test_region_full_screen_scroll(self):
+        s = self.alt(20)
+        for y, n in enumerate((12, 13, 14)):
+            parse_bytes(s, f'\x1b[{y + 1};1H   {n} '.encode() + (FSI + 'שלום world' + PDI).encode())
+        test_screen_update_cell_data(s)
+        parse_bytes(s, b'\x1b[S')
+        self.ae(self.frame(s)[0], 0)
+        self.assert_region(s, 0, REGION_GUTTER_V2L, REGION_GUTTER_LEVELS)
+        self.assert_region(s, 1, REGION_GUTTER_V2L, REGION_GUTTER_LEVELS)
+        self.assert_no_region(s, 2)
+
+    def test_region_cursor(self):
+        with self.subTest('a: inside and outside a region'):
+            s = self.alt(20)
+            parse_bytes(s, REGION_GUTTER)
+            test_screen_update_cell_data(s)
+            self.ae(self.cursor_at(s, 17, CURSOR_BEAM), (17, False))
+            self.ae(self.cursor_at(s, 16, CURSOR_BEAM), (16, False))
+            self.ae(self.cursor_at(s, 6, CURSOR_BEAM), (15, True))
+            self.ae(self.cursor_at(s, 6, CURSOR_BLOCK)[0], 15)
+        with self.subTest('b: all-rtl region, cursor right after it'):
+            s = self.alt(10)
+            parse_bytes(s, ('x ' + FSI + 'שלום' + PDI).encode())
+            self.assert_region(s, 0, (0, 1, 5, 4, 3, 2) + ID(6, 10), (0, 0) + (1, 1, 1, 1) + (0,) * 4)
+            self.ae(self.cursor_at(s, 6, CURSOR_BEAM), (6, False))
+            self.ae(self.cursor_at(s, 6, CURSOR_BLOCK)[0], 6)
+        with self.subTest('c: region base differs from the row base'):
+            s = self.alt(14)
+            parse_bytes(s, ('x ' + RLI + 'אב cd' + '\x1b[1;13H' + PDI).encode())
+            self.assert_region(
+                s, 0, (0, 1, 11, 10, 9, 8, 7, 5, 6, 4, 3, 2, 12, 13), (0, 0, 1, 1, 1, 2, 2, 1, 1, 1, 1, 1, 0, 0))
+            self.ae(self.cursor_at(s, 7, CURSOR_BEAM), (9, False))
+            self.ae(self.cursor_at(s, 7, CURSOR_BLOCK)[0], 9)
+
+    def test_region_main_screen_bdsm_off(self):
+        s = self.create_screen(cols=20, lines=3, scrollback=0, options={})
+        parse_bytes(s, REGION_GUTTER)
+        self.assert_region(s, 0, REGION_GUTTER_V2L, REGION_GUTTER_LEVELS)
+
+    def test_region_ime_overlay_leaves_no_trace(self):
+        # pre-edit text holding isolate controls is drawn with BDSM off, and must leave the real rows as they were
+        s = self.create_screen(cols=20, lines=3, scrollback=0, options={})
+        parse_bytes(s, b'ab\r\n\r\n')
+        before = [str(s.line(y)) for y in range(3)]
+        for y, x in ((0, 2), (1, 0)):
+            with self.subTest(cursor=(x, y)):
+                s.cursor.x, s.cursor.y = x, y
+                s.test_update_overlay_text(FSI + 'שלום' + PDI)
+                test_screen_update_cell_data(s)
+                s.test_update_overlay_text('')
+                test_screen_update_cell_data(s)
+                self.ae([str(s.line(r)) for r in range(3)], before)
+                s.cursor.x, s.cursor.y = 0, 1
+                parse_bytes(s, b'\x1b[2;1Hz')
+                self.ae(str(s.line(1)).rstrip(), 'z')
+                self.assertNotIn(FSI, str(s.line(1)))
+                parse_bytes(s, b'\x1b[2;1H\x1b[K')
+        self.ae(str(s.line(0)).rstrip(), 'ab')
+
+        def pending_lead(overlay):
+            s = self.create_screen(cols=20, lines=3, scrollback=0, options={})
+            parse_bytes(s, ('\x1b[8h\r' + RLI).encode())
+            if overlay:
+                s.test_update_overlay_text('x')
+                test_screen_update_cell_data(s)
+                s.test_update_overlay_text('')
+                test_screen_update_cell_data(s)
+            parse_bytes(s, ('ab אב' + PDI).encode())
+            return str(s.line(0))
+
+        with self.subTest('a: the overlay keeps the pending lead'):
+            # the RLI written at column 0 still becomes cell 0's leading control after the overlay comes and goes
+            self.ae((pending_lead(True), pending_lead(False)[:2]), (pending_lead(False), RLI + 'a'))
+        with self.subTest('b: a lone FSI pre-edit leaves no control behind'):
+            s = self.create_screen(cols=20, lines=3, scrollback=0, options={})
+            s.cursor.x, s.cursor.y = 0, 1
+            s.test_update_overlay_text(FSI)
+            test_screen_update_cell_data(s)
+            s.test_update_overlay_text('')
+            test_screen_update_cell_data(s)
+            parse_bytes(s, b'\x1b[2;1Hz')
+            self.ae(str(s.line(1)).rstrip(), 'z')
+            self.assertNotIn(FSI, str(s.line(1)))
+
+    def test_region_r7_copy(self):
+        s = self.alt(20)
+        parse_bytes(s, CLAUDE_FIELD_END)
+        # str(line) keeps zero-width chars and prints an empty cell as a space: cells 17, 18 and 19
+        self.ae(str(s.line(0))[-4:], '  ' + PDI + '│')
+
+    def test_region_gained_after_frame(self):
+        with self.subTest('a: a second region row after a frame with one'):
+            s = self.alt(12)
+            parse_bytes(s, ('x ' + FSI + 'אב' + PDI).encode())
+            test_screen_update_cell_data(s)
+            parse_bytes(s, ('\x1b[2;1Hy ' + FSI + 'גד' + PDI).encode())
+            # the row written after the frame is laid out too, not only the rows of the first region frame
+            self.assert_region(s, 1, (0, 1, 3, 2) + ID(4, 12), (0, 0, 1, 1) + (0,) * 8)
+        with self.subTest('b: the first region row after a frame without isolates'):
+            s = self.alt(12)
+            parse_bytes(s, b'plain')
+            test_screen_update_cell_data(s)
+            parse_bytes(s, ('\x1b[2;1Hy ' + FSI + 'גד' + PDI).encode())
+            # a screen whose frames had no isolates starts laying out regions once one is written
+            self.assert_region(s, 1, (0, 1, 3, 2) + ID(4, 12), (0, 0, 1, 1) + (0,) * 8)
+
+    def test_region_cursor_more(self):
+        with self.subTest('a: outside every region, before and between regions'):
+            s = self.alt(20)
+            parse_bytes(s, ('1 ' + FSI + 'אבג d' + PDI + '  │2 ' + FSI + 'שלום' + PDI).encode())
+            test_screen_update_cell_data(s)
+            # cells outside the regions keep their own column and are not mirrored
+            self.ae([self.cursor_at(s, x, CURSOR_BEAM) for x in (0, 1, 8, 9, 11)], [(x, False) for x in (0, 1, 8, 9, 11)])
+        with self.subTest('b: main screen, BDSM never sent, a region on row 1'):
+            s = self.create_screen(cols=12, lines=3, options={})
+            parse_bytes(s, ('\x1b[2;1Hx ' + FSI + 'שלום' + PDI).encode())
+            self.assert_region(s, 1, (0, 1, 5, 4, 3, 2) + ID(6, 12), (0, 0, 1, 1, 1, 1) + (0,) * 6)
+            # the cursor on row 1 uses row 1's region: ש (logical 2) shows at visual 5 under an RTL base
+            self.ae(self.cursor_at(s, 2, CURSOR_BEAM, y=1), (5, True))
+
+    def test_region_flags_survive_resize_pause_reset(self):
+        with self.subTest('a: RIS clears the flags'):
+            s = self.alt(12)
+            parse_bytes(s, ('x ' + FSI + 'שלום' + PDI).encode())
+            self.ae(s.test_bidi_regions(), (False, True))
+            parse_bytes(s, b'\x1bc')
+            # RIS is the only reset of the flag
+            self.ae(s.test_bidi_regions(), (False, False))
+        with self.subTest('b: resize with rewrap keeps the flag'):
+            s = self.create_screen(cols=12, lines=3, options={})
+            parse_bytes(s, ('x ' + FSI + 'שלום' + PDI).encode())
+            test_screen_update_cell_data(s)
+            s.resize(3, 16)
+            # the rewrapped linebuf carries the flag, so its rows are still laid out as regions
+            self.ae(s.test_bidi_regions()[0], True)
+            self.assert_region(s, 0, (0, 1, 5, 4, 3, 2) + ID(6, 16), (0, 0, 1, 1, 1, 1) + (0,) * 10)
+            parse_bytes(s, ('\x1b[2;1Hy ' + FSI + 'גד' + PDI).encode())
+            self.assert_region(s, 1, (0, 1, 3, 2) + ID(4, 16), (0, 0, 1, 1) + (0,) * 12)
+        with self.subTest('c: the paused snapshot carries the flag'):
+            # no live frame runs before the pause, so only the snapshot's own copy of the flag gives the paused frame a region
+            s = self.alt(12)
+            parse_bytes(s, ('x ' + FSI + 'שלום' + PDI).encode())
+            s.pause_rendering(True, 1000)
+            self.assert_region(s, 0, (0, 1, 5, 4, 3, 2) + ID(6, 12), (0, 0, 1, 1, 1, 1) + (0,) * 6)
+            s.pause_rendering(False)
+            self.assert_region(s, 0, (0, 1, 5, 4, 3, 2) + ID(6, 12), (0, 0, 1, 1, 1, 1) + (0,) * 6)
+
+    def test_region_column_0_wide_first_char(self):
+        # Known limitation, not the intended layout: a wide cell cannot hold leading controls, so the FSI is dropped and the
+        # region is lost
+        s = self.alt(12)
+        parse_bytes(s, (FSI + '中 שלום' + PDI).encode())
+        self.assert_no_region(s)
+        self.ae(s.cpu_cells(0)[0]['text'], '中')
+
+    def test_region_column_0_wide_cluster_intact(self):
+        # A control kept for column 0 must not split the cluster of a wide first char
+        def cursor_x(text):
+            s = self.alt(10)
+            parse_bytes(s, text.encode())
+            return s.cursor.x
+
+        with self.subTest('a: VS15 still narrows the emoji'):
+            self.ae(cursor_x(RLI + '😀︎z' + PDI), cursor_x('😀︎z' + PDI))
+        with self.subTest('b: ZWJ sequence'):
+            s = self.alt(10)
+            parse_bytes(s, (RLI + '👨‍👩').encode())
+            self.ae(s.cpu_cells(0)[0]['text'], '👨‍👩')
+
+    def test_region_osc66_trigger(self):
+        # Controls inside OSC 66 cells form a region as plain writes do; b is L at level 2 in the RTL region
+        s = self.alt(10)
+        parse_bytes(s, ('\x1b]66;w=1;a' + FSI + '\x07' + 'שלום' + '\x1b]66;w=1;b' + PDI + '\x07').encode())
+        self.assert_region(s, 0, (0, 5, 4, 3, 2, 1) + ID(6, 10), (0, 1, 1, 1, 1, 2) + (0,) * 4)
+
+    def test_region_rules_skip_stamped_rows(self):
+        s = self.alt(12)
+        parse_bytes(s, ('\x1b[8h' + 'ab' + RLI + 'שלום').encode())
+        parse_bytes(s, ('\x1b[8l\x1b[1;9H' + PDI + 'xyz').encode())
+        # a stamped row drops a control written with BDSM off after an empty cell instead of keeping it as a region's PDI
+        self.assertNotIn(PDI, str(s.line(0)))
+        parse_bytes(s, ('\x1b[1;1H' + FSI + 'q').encode())
+        # nor does it keep one at column 0 as the next cell's leading control
+        self.ae(s.line(0)[0], 'q')
+
+    def test_region_memo_survives_record_0(self):
+        s = self.alt(5)
+        parse_bytes(s, ('x' + FSI + 'אב' + PDI + 'cd').encode())
+        test_screen_update_cell_data(s)
+        parse_bytes(s, b'e')
+        test_screen_update_cell_data(s)
+        parse_bytes(s, ('\b' + RLI + '́').encode())
+        # stamping row 1's first cell for bidi must not wipe row 0's region memo
+        self.assert_region(s, 0, (0, 2, 1, 3, 4), (0, 1, 1, 0, 0))
+        self.ae(s.test_bidi_line_record(0), (0, False, True))

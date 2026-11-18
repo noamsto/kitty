@@ -106,6 +106,18 @@ typedef union LineAttrs {
 // BIDI_STAMP_RTL and BIDI_STAMP_ISOLATES are the upload's memo of an implicit line: one that holds right-to-left text and no
 // isolate control, and one that holds an isolate control after a cell's first char
 enum { BIDI_STAMP_NONE, BIDI_STAMP_IMPLICIT, BIDI_STAMP_RTL, BIDI_STAMP_ISOLATES };
+// An unstamped line's bidi_auto is the upload's memo that it holds an isolate control after a cell's first char, which lays it
+// out by isolate regions. It is not a record, so readers of the record mask it.
+static inline bool
+line_attrs_region_memo(LineAttrs a) {
+    return a.bidi_stamp == BIDI_STAMP_NONE && a.bidi_auto;
+}
+
+static inline LineAttrs
+line_attrs_bidi_record(LineAttrs a) {
+    if (a.bidi_stamp == BIDI_STAMP_NONE) a.bidi_rtl = a.bidi_auto = 0;
+    return a;
+}
 static_assert(sizeof(LineAttrs) == sizeof(uint8_t), "Fix the ordering of LineAttrs");
 
 

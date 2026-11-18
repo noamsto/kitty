@@ -384,6 +384,7 @@ resize_screen_buffers(
     ans.lb = alloc_linebuf(lines, columns, lb->text_cache);
     if (!ans.lb) return ans;
     ans.lb->bidi_stamped = lb->bidi_stamped;
+    ans.lb->bidi_regions = lb->bidi_regions;
     RAII_PyObject(raii_nlb, (PyObject *)ans.lb);
     (void)raii_nlb;
     // sb holds the rows below the first row of multiline chars
@@ -484,6 +485,7 @@ resize_screen_buffer_without_rewrap(LineBuf *lb, index_type lines, index_type co
     ans.lb = alloc_linebuf(lines, columns, lb->text_cache);
     if (!ans.lb) return ans;
     ans.lb->bidi_stamped = lb->bidi_stamped;
+    ans.lb->bidi_regions = lb->bidi_regions;
     Rewrap r = {
         .src = {.lb = lb},
     };

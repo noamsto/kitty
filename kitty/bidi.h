@@ -44,6 +44,7 @@ typedef struct BidiMaps {
     uint8_t *levels; // rows*cols, the embedding level of each logical cell
     bool *active;    // rows: the row has a map
     bool *rtl;       // rows: the paragraph that last wrote or kept the row's entry resolved right-to-left
+    bool *region_row; // rows: the row's map was written by its isolate regions, not as a paragraph
     // The paragraph cache, per render row: the id of the line shown there when its map was last written or kept, and the ids of
     // the first and last rows, and the row count with the first row's base direction (BIDI_KEY_DIR_SHIFT), of the paragraph that
     // wrote it. Screen ids are valid under the context only.
@@ -84,6 +85,7 @@ typedef struct BidiMaps {
     FriBidiLevel *para_levels;
     FriBidiStrIndex *map;
     uint32_t *cell_of_char;
+    uint32_t *match; // per char of a row fed for its isolate regions: an initiator's PDI
     uint32_t row_start[BIDI_MAX_PARAGRAPH_ROWS + 1];
     size_t cap;
     uint8_t *row_scratch; // a row of bidi_permute_row_bytes(), cols*stride bytes
@@ -127,6 +129,15 @@ void bidi_cache_move_rows(BidiMaps *b, index_type d);
 bool bidi_row_starts_with_pdi(const CPUCell *cells, index_type num, const TextCache *tc);
 // Whether the cell holds an isolate control (LRI RLI FSI PDI) after its first char
 bool bidi_cell_has_isolates(const CPUCell *c, const TextCache *tc);
+// Whether some cell of the row holds an isolate control after its first char
+bool bidi_row_has_isolates(const CPUCell *cells, index_type num, const TextCache *tc);
+// Lays out the row's isolate regions, each the chars strictly between a top-level initiator its cells hold as a control and
+// the PDI closing it on the row, as a paragraph of its own with the initiator's base, every other cell in place at level 0.
+// Writes the row's map and sets its region_row, or drops it when no region reorders. Returns whether the row got a map.
+bool bidi_resolve_regions(BidiMaps *b, const CPUCell *cells, const TextCache *tc, index_type render_row);
+// The region bidi_resolve_regions() lays out whose chars include the one starting in or spanning the logical cell x: its
+// cells [*start, *end) and its resolved base. False when x is in no region or the row cannot be fed. Overwrites the scratch.
+bool bidi_region_at(BidiMaps *b, const CPUCell *cells, const TextCache *tc, index_type x, index_type *start, index_type *end, bool *rtl);
 
 // The queries below are the identity, or false, for a row without a map.
 // The visual column of the left edge of the logical cell x spanning span cells

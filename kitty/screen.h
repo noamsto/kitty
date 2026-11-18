@@ -279,6 +279,8 @@ typedef struct {
     } dnd_chunking;
     struct {
         BidiLead lead;
+        // the next draw takes the implicit copy: BDSM is on or controls are kept for column 0; may be stale true, never stale false
+        bool draw_implicit;
         bool rtl; // direction set by SCP for the current buffer
         struct { bool mBDSM, mBIDI_AUTODETECT, rtl; } main_stash; // main's controls while alt is active
     } bidi;
