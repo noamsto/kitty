@@ -5576,7 +5576,7 @@ update_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE fonts_data,
             bidi_set_row_inactive(b, r);
             b->row_id[r] = 0;
             b->sig_valid[r] = false;
-            b->rtl[r] = false;
+            b->rtl[r] = b->region_row[r] = false;
             update_line_data_blank(self->columns, r++, address);
             continue;
         }
@@ -5751,41 +5751,52 @@ static bool cell_is_blank(const CPUCell *c);
 // visually left of it, as the next right-to-left character goes there, and a
 // block, underline or hollow cursor does too when on a blank cell or the
 // pending wrap column. A beam on a right-to-left cell is drawn at the right
-// edge of the cell, flagged by mirrored.
+// edge of the cell, flagged by mirrored. On a row mapped by its isolate regions
+// these rules apply within the cursor cell's region, at the region's base level;
+// a cursor outside every region stays at its column.
 static index_type
 cursor_visual_in_row(Screen *self, index_type x, index_type y, CursorShape shape, bool *mirrored) {
     *mirrored = false;
     if (!screen_bidi_maps_usable(self)) return x;
-    const BidiMaps *b = self->bidi_maps;
+    BidiMaps *b = self->bidi_maps;
     const index_type render_row = y + rendered_scrolled_by(self) + pixel_scroll_enabled(self);
     if (render_row >= b->rows || !b->active[render_row]) return x;
     // The paused snapshot is indexed by render row, as the maps are
     const CPUCell *cells = self->paused_rendering.expires_at ? linebuf_cpu_cells_for_line(self->paused_rendering.linebuf, render_row)
                                                              : linebuf_cpu_cells_for_line(self->linebuf, y);
-    if (x > 0 && x <= self->columns) {
+    const bool region_row = b->region_row[render_row];
+    index_type lo = 0, hi = self->columns;
+    uint8_t base = b->rtl[render_row];
+    if (region_row) {
+        bool rtl;
+        if (x >= self->columns || !bidi_region_at(b, cells, self->text_cache, x, &lo, &hi, &rtl)) return x;
+        base = rtl;
+    }
+    if (x > lo && x <= self->columns) {
         index_type end = x;
-        while (end < self->columns && cell_is_blank(cells + end)) end++;
+        // A region ends in the cell holding its PDI, which is blank when nothing else was typed in it
+        while (end < hi && (cell_is_blank(cells + end) || (region_row && cell_first_char(cells + end, self->text_cache) == ' '))) end++;
         index_type t = x;
-        while (end == self->columns && t && cell_is_char(cells + t - 1, ' ')) t--;
-        if (end == self->columns && t && cell_has_text(cells + t - 1)) {
+        while (end == hi && t > lo && cell_is_char(cells + t - 1, ' ')) t--;
+        if (end == hi && t > lo && cell_has_text(cells + t - 1)) {
             index_type p = t - 1;
             while (p && cells[p].is_multicell && cells[p].x) p--;
             const uint8_t lp = bidi_cell_level(b, render_row, p);
             const bool skipped_after_non_letter = t < x &&
                 !FRIBIDI_IS_LETTER(fribidi_get_bidi_type(cell_first_char(cells + p, self->text_cache)));
-            if (lp != b->rtl[render_row] && !skipped_after_non_letter &&
+            if (lp != base && !skipped_after_non_letter &&
                 !bidi_cell_has_isolates(cells + p, self->text_cache)) {
                 index_type q = p;
                 if (t < x && bidi_cell_level(b, render_row, x - 1) == lp) q = x - 1;
                 const index_type span = cell_span(cells + q);
                 const index_type left = bidi_visual_x(b, render_row, q, span);
                 if (lp & 1) {
-                    *mirrored = shape == CURSOR_BEAM && left > 0;
-                    return left ? left - 1 : 0;
+                    *mirrored = shape == CURSOR_BEAM && left > lo;
+                    return left > lo ? left - 1 : lo;
                 }
-                if (left + span <= self->columns - 1) return left + span;
+                if (left + span <= hi - 1) return left + span;
                 *mirrored = shape == CURSOR_BEAM;
-                return self->columns - 1;
+                return hi - 1;
             }
         }
         index_type p = x - 1;
@@ -5793,10 +5804,10 @@ cursor_visual_in_row(Screen *self, index_type x, index_type y, CursorShape shape
         if (bidi_cell_is_rtl(b, render_row, p)) {
             const index_type left = bidi_visual_x(b, render_row, p, cell_span(cells + p));
             if (shape == CURSOR_BEAM) {
-                *mirrored = left > 0;
-                return left ? left - 1 : 0;
+                *mirrored = left > lo;
+                return left > lo ? left - 1 : lo;
             }
-            if (x == self->columns || cell_is_blank(cells + x)) return left ? left - 1 : 0;
+            if (x == hi || cell_is_blank(cells + x)) return left > lo ? left - 1 : lo;
         }
     }
     if (x >= self->columns) return x;

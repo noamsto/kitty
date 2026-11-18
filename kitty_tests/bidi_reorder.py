@@ -4468,10 +4468,11 @@ class TestBidiReorder(BaseTest):
             s = self.screen(cols=n, lines=3)
             parse_bytes(s, R.encode() + b'\x1b[?1049h' + N.encode())
             self.ae(self.lead_cell(s), '1')
-        with self.subTest('bidi mode off: nothing kept'):
+        with self.subTest('bidi mode off: kept for isolate regions'):
+            # With bidi mode off the row's isolate regions still lay out, so the control is kept for them
             s = self.create_screen(cols=n, lines=3, options={})
             parse_bytes(s, (R + N).encode())
-            self.ae(self.lead_cell(s), '1')
+            self.ae(self.lead_cell(s), '1RLI')
         with self.subTest('soft wrapped continuation keeps the control with the cell before'):
             s = self.screen(cols=4, lines=3)
             parse_bytes(s, ('אבגד' + R + 'ה').encode())
