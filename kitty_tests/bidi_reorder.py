@@ -4711,6 +4711,26 @@ class TestBidiReorder(BaseTest):
         parse_bytes(s, REGION_GUTTER)
         self.assert_region(s, 0, REGION_GUTTER_V2L, REGION_GUTTER_LEVELS)
 
+    def test_region_ime_overlay_leaves_no_trace(self):
+        # pre-edit text holding isolate controls is drawn with BDSM off, and must leave the real rows as they were
+        s = self.create_screen(cols=20, lines=3, scrollback=0, options={})
+        parse_bytes(s, b'ab\r\n\r\n')
+        before = [str(s.line(y)) for y in range(3)]
+        for y, x in ((0, 2), (1, 0)):
+            with self.subTest(cursor=(x, y)):
+                s.cursor.x, s.cursor.y = x, y
+                s.test_update_overlay_text(FSI + 'שלום' + PDI)
+                test_screen_update_cell_data(s)
+                s.test_update_overlay_text('')
+                test_screen_update_cell_data(s)
+                self.ae([str(s.line(r)) for r in range(3)], before)
+                s.cursor.x, s.cursor.y = 0, 1
+                parse_bytes(s, b'\x1b[2;1Hz')
+                self.ae(str(s.line(1)).rstrip(), 'z')
+                self.assertNotIn(FSI, str(s.line(1)))
+                parse_bytes(s, b'\x1b[2;1H\x1b[K')
+        self.ae(str(s.line(0)).rstrip(), 'ab')
+
     def test_region_r7_copy(self):
         s = self.alt(20)
         parse_bytes(s, CLAUDE_FIELD_END)
