@@ -4594,6 +4594,12 @@ class TestBidiReorder(BaseTest):
         parse_bytes(s, ('a' + PDI + ' ' + FSI + 'אב' + PDI).encode())
         self.assert_region(s, 0, (0, 1, 3, 2) + ID(4, 10), (0, 0, 1, 1) + (0,) * 6)
 
+    def test_region_after_unmatched_initiator(self):
+        # A PDI closes the nearest open initiator, so an unmatched one does not swallow the pair after it
+        s = self.alt(10)
+        parse_bytes(s, ('x' + FSI + 'ab ' + FSI + 'אב' + PDI).encode())
+        self.assert_region(s, 0, (0, 1, 2, 3, 5, 4) + ID(6, 10), (0, 0, 0, 0, 1, 1) + (0,) * 4)
+
     def test_region_initiator_at_column_0(self):
         text = 'שלום x'
         for name, chunks in (
