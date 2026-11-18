@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 # License: GPL v3 Copyright: 2026, Kovid Goyal <kovid at kovidgoyal.net>
 
+import random
+import re
 from itertools import product
 
 from .base import BaseTest, draw_multicell, parse_bytes
@@ -11,6 +13,9 @@ LRM, RLM, ALM = '\u200e', '\u200f', '\u061c'
 ISOLATE_CONTROLS = '\u2066\u2067\u2068\u2069'  # LRI RLI FSI PDI
 IA = '\x1b[8h\x1b[?2501h'
 CUP = '\x1b[{};1H'.format  # 1-based row
+LEADING_CONTROLS = LRM + RLM + ISOLATE_CONTROLS
+LEADING_CONTROL_POOLS = {'isolates': ISOLATE_CONTROLS, 'all': LEADING_CONTROLS}
+MAX_LEADING_CONTROLS = 23  # MAX_NUM_CODEPOINTS_PER_CELL - 1: a char still fits after them
 
 
 class Dump(list):
@@ -21,6 +26,34 @@ class Dump(list):
 
 def pb(s, data):
     parse_bytes(s, data.encode())
+
+
+def leading_controls_codeword(label, pool):
+    # a distinct pattern of 7 controls for each label: the multiplier is coprime to len(pool), so labels map one to one
+    n = int(label[1:]) * 2654435761 % len(pool) ** 7
+    return ''.join(pool[n // len(pool) ** i % len(pool)] for i in range(7))
+
+
+def leading_control_faults(rows, labels, pool, strict):
+    # rows: (name, raw text of each cell). A cell holding a leading control holds it first, as the start of what was written
+    # for the label its row carries. strict: only in the row's column 0 cell
+    faults = []
+    for name, cells in rows:
+        label = re.search(r'L\d{3}', ''.join(cells))
+        for x, text in enumerate(cells):
+            if not any(ch in LEADING_CONTROLS for ch in text):
+                continue
+            where = f'{name} column {x} {text!r} of {"".join(cells)!r}'
+            run = text[: len(text) - len(text.lstrip(LEADING_CONTROLS))]
+            if not label or label.group() not in labels:
+                faults.append(f'{where}: holds a control but its row carries no label controls were written for')
+            elif not (leading_controls_codeword(label.group(), pool) * 4)[:MAX_LEADING_CONTROLS].startswith(run):
+                faults.append(f'{where}: holds controls that were not written for its label')
+            if any(ch in LEADING_CONTROLS for ch in text[len(run) :]):
+                faults.append(f'{where}: holds a control after another char')
+            if strict and x:
+                faults.append(f'{where}: holds a control away from column 0')
+    return faults
 
 
 class TestBidi(BaseTest):
@@ -662,3 +695,176 @@ class TestBidi(BaseTest):
                 pb(s, IA)
                 self.draw_marked(s, RLM, 'abc', split)
                 self.ae(self.records(s, 0), [RTL])
+
+    def run_leading_controls_seed(self, pool, opset, seed, steps=200):
+        # Leading controls are written only at column 0 of a row carrying a label, each label with its own codeword, and ops that
+        # move, erase, scroll, resize and overdraw rows, and toggle modes, run between them. Opset 'A' keeps every cell in its
+        # column, so the controls stay in column 0; opset 'B' adds ICH, DCH and insert mode, which move the cells of a row
+        controls = LEADING_CONTROL_POOLS[pool]
+        rnd = random.Random(f'{pool}:{opset}:{seed}')
+        s = self.create_screen(cols=rnd.randint(10, 14), lines=rnd.randint(2, 6), scrollback=20)
+        labels = set()
+        log = []
+        irm = False
+        next_label = 0
+        done = object()  # an op that did its work itself
+
+        def where():
+            return f'pool {pool} set {opset} seed {seed} step {step}, ops (latest last): {log!r}'
+
+        def label_span(y):
+            texts = [c['text'] for c in s.cpu_cells(y)]
+            for x in range(s.columns - 3):
+                if re.fullmatch(r'L\d{3}', ''.join(texts[x : x + 4])):
+                    return x, x + 4
+            return None
+
+        def text_of(y):
+            return ''.join(c['text'] for c in s.cpu_cells(y))
+
+        def crowded(y):
+            # a multiline or wide cell near the start of a row moves a write or overlay right, onto the label, and DCH can
+            # bring the label itself within reach of the write
+            for yy in (y, y + 1):
+                if yy >= s.lines:
+                    continue
+                span = label_span(yy)
+                if span and span[0] < 3:
+                    return True
+                for x in range(5):
+                    cell = s.cpu_cells(yy, x)
+                    mcd = cell['mcd']
+                    if cell['text'] == '\u4e2d' or (mcd and (mcd['scale'] > 1 or mcd['width'] > 1)):
+                        return True
+            return False
+
+        def fits(y, extra):
+            # the content of the row, label included, stays within the narrowest width after being moved right
+            span = label_span(y)
+            return not span or span[1] + extra <= 10
+
+        def write_at_row(write, width=1):
+            y = rnd.randrange(s.lines)
+            if crowded(y) or (irm and not fits(y, width)):
+                return None
+            return CUP(y + 1) + write()
+
+        def label_row():
+            nonlocal next_label
+            free = [y for y in range(s.lines) if not re.search(f'L\\d{{3}}|[{LEADING_CONTROLS}]', text_of(y))]
+            if not free:
+                return None
+            y = rnd.choice(free)
+            next_label += 1
+            assert next_label < 1000, 'labels have three digits'
+            return f'{CUP(y + 1)}\x1b[6GL{next_label:03d}'
+
+        def control_row():
+            # in insert mode the store may insert a cell, moving the label right
+            rows = [y for y in range(s.lines) if label_span(y) and (not irm or fits(y, 1))]
+            if not rows:
+                return label_row()
+            y = rnd.choice(rows)
+            label = re.search(r'L\d{3}', text_of(y)).group()
+            labels.add(label)
+            cw = leading_controls_codeword(label, controls)
+            pb(s, CUP(y + 1) + cw)
+            log.append(f'controls for {label} at row {y}')
+            stored = s.cpu_cells(y, 0)['text']
+            if not stored.startswith(cw):
+                self.fail(f'{where()}: cell (0, {y}) holds {stored!r} right after {cw!r} was written there')
+            return done
+
+        def row():
+            return rnd.randint(1, s.lines)
+
+        def overlay():
+            if irm or any(crowded(y) for y in range(s.lines)):
+                return None
+            y = rnd.randrange(s.lines)
+            text = rnd.choice(('z', '\nz', '\n\nz', 'z\nz', 'xy\n', '\n\n\n\nz'))
+            s.test_draw_overlay_line(text, 0, y)
+            s.test_update_overlay_text('')
+            log.append(f'overlay {text!r} at row {y}')
+            return done
+
+        def resize():
+            # opset A never widens, so no reflow moves a cell
+            lines, cols = rnd.randint(2, 6), rnd.randint(10, 14 if opset == 'B' else s.columns)
+            s.resize(lines, cols)
+            log.append(f'resize {lines}x{cols}')
+            return done
+
+        def toggle():
+            nonlocal irm
+            modes = ['\x1b[8h', '\x1b[8l', '\x1b[?7h', '\x1b[?7l', '\x1b[?1049h', '\x1b[?1049l', '\x1b[?2501h', '\x1b[?2501l']
+            if opset == 'B':
+                modes += ['\x1b[4h', '\x1b[4l']
+            mode = rnd.choice(modes)
+            if mode in ('\x1b[4h', '\x1b[4l'):
+                irm = mode == '\x1b[4h'
+            return mode
+
+        def insert_char():
+            y = rnd.randrange(s.lines)
+            ch = rnd.choice(('q', '\u4e2d'))
+            if not fits(y, 1 + (ch == '\u4e2d')):
+                return None
+            return f'{CUP(y + 1)}\x1b[4h{ch}' + ('' if irm else '\x1b[4l')
+
+        def ich():
+            y = rnd.randrange(s.lines)
+            return f'{CUP(y + 1)}\x1b[@' if fits(y, 1) else None
+
+        def dch():
+            y = rnd.randrange(s.lines)
+            span = label_span(y)
+            return f'{CUP(y + 1)}\x1b[P' if not span or span[0] > 0 else None
+
+        # (weight, op); an op gives bytes to parse, done when it did its work itself, or None to skip the step
+        ops = [
+            (2, lambda: f'\x1b[{row()};{rnd.randint(1, s.columns)}H'),
+            (3, lambda: rnd.choice(('\n', '\x1bD', '\x1bM', '\x1bE'))),
+            (2, lambda: rnd.choice(('\x1b[r', f'\x1b[{rnd.randint(1, 2)};{rnd.randint(3, 6)}r'))),
+            (3, lambda: f'\x1b[{rnd.randint(1, 3)}{rnd.choice("STLM")}'),
+            (3, lambda: CUP(row()) + rnd.choice(('\x1b[2K', '\x1b[J', '\x1b[1J', '\x1b[2J', f'\x1b[{rnd.randint(1, 12)}X'))),
+            (2, overlay),
+            (2, lambda: None if irm else write_at_row(lambda: f'\x1b]66;w=1:s={rnd.randint(1, 2)};x\x07')),
+            (2, lambda: None if irm else write_at_row(lambda: '\x1b[2G\x1b]66;s=2;a\x07')),
+            (3, lambda: write_at_row(lambda: rnd.choice(('q', '\u4e2d', 'e\u0301')), 2)),
+            (3, label_row),
+            (5, control_row),
+            (1, resize),
+            (3, toggle),
+        ]
+        if opset == 'B':
+            ops += [(2, ich), (2, dch), (3, insert_char)]
+        weights = [w for w, _ in ops]
+        for y in range(s.lines):
+            pb(s, f'{CUP(y + 1)}\x1b[6GL{y + 1:03d}')
+        next_label = s.lines
+        for step in range(steps):
+            result = rnd.choices(ops, weights)[0][1]()
+            if result is None:
+                continue
+            if result is not done:
+                log.append(result)
+                pb(s, result)
+            rows = [(f'row {y}', [c['text'] for c in s.cpu_cells(y)]) for y in range(s.lines)]
+            if not s.is_using_alternate_linebuf():
+                rows += [(f'history {i}', [c['text'] for c in s.cpu_cells(-(i + 1))]) for i in range(s.historybuf.count)]
+            faults = leading_control_faults(rows, labels, controls, strict=opset == 'A')
+            if faults:
+                self.fail(f'{where()}: ' + '; '.join(faults))
+
+    def leading_controls_randomized(self, pool):
+        for opset in ('A', 'B'):
+            for seed in range(1, 51):
+                with self.subTest(opset=opset, seed=seed):
+                    self.run_leading_controls_seed(pool, opset, seed)
+
+    def test_leading_controls_randomized_isolates(self):
+        self.leading_controls_randomized('isolates')
+
+    def test_leading_controls_randomized_all(self):
+        self.leading_controls_randomized('all')

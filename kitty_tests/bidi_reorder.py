@@ -5447,3 +5447,69 @@ class TestBidiReorder(BaseTest):
         # stamping row 1's first cell for bidi must not wipe row 0's region memo
         self.assert_region(s, 0, (0, 2, 1, 3, 4), (0, 1, 1, 0, 0))
         self.ae(s.test_bidi_line_record(0), (0, False, True))
+
+    # Bidi controls written at column 0 are stored first in the cell there (#58). A wide first char lays out as two narrow chars
+    # of its bidi class in the same columns, and a narrow first char keeps its column-0 control today, so the narrow rows are
+    # the references
+
+    def test_column_0_control_before_wide_char(self):
+        H = ' שלום'
+        # (wide char, narrow chars of its class, region v2l, region levels): 中 is L, so the FSI opens an LTR isolate and only the
+        # Hebrew is reversed; 😀 is ON, so the FSI finds ש and the whole isolate is RTL
+        cases = (
+            ('中', 'ab', (0, 1, 2, 6, 5, 4, 3) + ID(7, 12), (0, 0, 0, 1, 1, 1, 1) + (0,) * 5),
+            ('😀', '!!', (6, 5, 4, 3, 2, 1, 0) + ID(7, 12), (1,) * 7 + (0,) * 5),
+        )
+        for wide, narrow, v2l, levels in cases:
+            with self.subTest('the narrow reference is laid out as the wide char after an FSI past column 0', wide=wide):
+                got, ref = self.alt(13), self.alt(13)
+                parse_bytes(got, ('x' + FSI + wide + H + PDI).encode())
+                parse_bytes(ref, ('x' + FSI + narrow + H + PDI).encode())
+                self.assertIsNotNone(self.region_maps(ref)[0])
+                self.ae(self.region_maps(got), self.region_maps(ref))
+            with self.subTest('a: region', wide=wide):
+                ref = self.alt(12)
+                parse_bytes(ref, (FSI + narrow + H + PDI).encode())
+                self.assert_region(ref, 0, v2l, levels, 'reference')
+                s = self.alt(12)
+                parse_bytes(s, (FSI + wide + H + PDI).encode())
+                self.ae(s.cpu_cells(0, 0)['text'], FSI + wide)
+                self.assert_region(s, 0, v2l, levels)
+            with self.subTest('b: bidi-on row, fixed RTL paragraph', wide=wide):
+                rows = {}
+                for name, text in (('wide', FSI + wide), ('narrow', FSI + narrow), ('plain', wide)):
+                    s = self.screen(cols=12, lines=2)
+                    parse_bytes(s, self.SCP_RTL + (text + H + PDI).encode())
+                    test_screen_update_cell_data(s)
+                    rows[name] = s.cpu_cells(0, 0)['text'], (self.v2l(s, 0), self.levels(s, 0))
+                self.assertNotEqual(rows['narrow'][1], rows['plain'][1], 'the FSI changes the layout')
+                self.ae(rows['wide'][0], FSI + wide)
+                self.ae(rows['wide'][1], rows['narrow'][1])
+            # the screen's region flag; the row memo itself shows only through a layout, and an unclosed FSI gives no region
+            with self.subTest('c: storing the column-0 FSI of a row without a PDI flags the screen for regions', wide=wide):
+                for text in (FSI + narrow + H, FSI + wide + H):
+                    s = self.alt(12)
+                    parse_bytes(s, text.encode())
+                    self.ae(s.test_bidi_regions(), (False, True), text)
+            with self.subTest('c: a prompt row opened by a column-0 FSI and no PDI folds the next row into its isolate', wide=wide):
+                rows = {}
+                for name, first in (('wide', wide), ('narrow', narrow)):
+                    s = self.screen(cols=20, lines=4)
+                    parse_bytes(s, self.AUTO + (FSI + first + ' hello\r\nשלום').encode())
+                    test_screen_update_cell_data(s)
+                    rows[name] = self.obs(s, 0), self.obs(s, 1)
+                self.ae(rows['narrow'][1][1][:5], (3, 3, 3, 3, 0), 'the reference row joins the isolate')
+                self.ae(rows['wide'], rows['narrow'])
+
+    def test_column_0_rli_then_pdi_after_its_char(self):
+        # R9: a PDI written after a cell that starts with a column-0 RLI is stored after the cell's char, with one result whatever
+        # the mode the PDI is written in
+        got = {}
+        for name, mode in (('bdsm off', b'\x1b[8l'), ('bdsm on', b'')):
+            s = self.create_screen(cols=10, lines=2, options={})
+            parse_bytes(s, b'\x1b[8h' + (RLI + 'aאב').encode() + mode + b'\x1b[1;2H' + PDI.encode())
+            test_screen_update_cell_data(s)
+            got[name] = s.cpu_cells(0, 0)['text'], self.obs(s, 0)
+            with self.subTest(name):
+                self.ae(got[name][0], RLI + 'a' + PDI)
+        self.ae(got['bdsm off'][1], got['bdsm on'][1])
