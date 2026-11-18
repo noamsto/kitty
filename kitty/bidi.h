@@ -11,8 +11,11 @@
 #include <fribidi.h>
 
 #define BIDI_MAX_PARAGRAPH_ROWS 256
-// para_rows holds the row count (at most BIDI_MAX_PARAGRAPH_ROWS) and, from this bit, the first row's bidi_rtl and bidi_auto
+// para_rows holds the row count (at most BIDI_MAX_PARAGRAPH_ROWS), from this bit the first row's bidi_rtl and bidi_auto, and from
+// BIDI_KEY_GAP_SHIFT the cursor gap column
 #define BIDI_KEY_DIR_SHIFT 16
+// Bits 32..47 of para_rows hold the paragraph's cursor gap column, 0 for none
+#define BIDI_KEY_GAP_SHIFT 32
 // Steps per character a paragraph's bracket pairing (N0) may walk back to a letter or digit before it is skipped
 #define BIDI_N0_SCAN_PER_CHAR 16
 // Combined isolate controls a paragraph may feed FriBidi, as before 1.0.17 each FSI can scan to the paragraph end; over it none are fed
@@ -49,7 +52,7 @@ typedef struct BidiMaps {
     // the first and last rows, and the row count with the first row's base direction (BIDI_KEY_DIR_SHIFT), of the paragraph that
     // wrote it. Screen ids are valid under the context only.
     uint64_t *row_id, *para_first, *para_last;
-    uint32_t *para_rows;
+    uint64_t *para_rows;
     // rows*cols like levels: per cell a char starts in, the FriBidi type or bracket the last resolve fed for it and whether it
     // was a blank, 0 in the other cells; meaningful only where sig_valid
     uint32_t *sig;
@@ -63,6 +66,11 @@ typedef struct BidiMaps {
     bool resolve_cacheable;
     // The last resolve ran FriBidi to success without skipping N0, so the signatures it wrote capture all its inputs
     bool resolve_signed;
+    // The cursor the last completed live walk used, and whether a gap could apply there
+    struct {
+        index_type x, y;
+        bool live;
+    } gap_record;
     // For tests: resolve the trailing blanks of a paragraph with FriBidi, the UAX#9 reference, instead of trimming them. This also
     // skips keep_typed_blanks(), so typed blanks after a letter in an unclosed fed isolate get the paragraph level
     bool no_trim;
@@ -83,6 +91,7 @@ typedef struct BidiMaps {
     FriBidiCharType *types;
     FriBidiBracketType *brackets;
     FriBidiLevel *para_levels;
+    FriBidiLevel *probe_levels;
     FriBidiStrIndex *map;
     uint32_t *cell_of_char;
     uint32_t *match; // per char of a row fed for its isolate regions: an initiator's PDI
@@ -113,9 +122,20 @@ bidi_record_base(LineAttrs a) {
 // base direction base. Every row whose render row, first_render_row + row index, is in
 // [min_render_row, b->rows) gets its map written, or
 // dropped when the resolve fails or leaves its cells in logical order. Returns
-// true if any row got a map.
+// true if any row got a map. gap_x is the cursor gap on the paragraph's last row, 0 for none.
 bool bidi_resolve_paragraph(
-    BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const TextCache *tc, FriBidiParType base, int first_render_row, index_type min_render_row);
+    BidiMaps *b,
+    const CPUCell *const *rows,
+    unsigned num_rows,
+    const TextCache *tc,
+    FriBidiParType base,
+    int first_render_row,
+    index_type min_render_row,
+    index_type gap_x);
+// Whether the cell is blank for the cursor gap: no text, a lone space, or a space followed by isolate controls only
+bool bidi_cell_is_gap(const CPUCell *c, const TextCache *tc);
+// x when 0 < x < cols and the cells before and from x to the row's end are all gap cells, else 0
+index_type bidi_cursor_gap(const CPUCell *cells, index_type cols, index_type x, const TextCache *tc);
 void bidi_set_row_inactive(BidiMaps *b, index_type render_row);
 // Whether the row's cells would give the signature stored for render_row; overwrites the scratch
 bool bidi_row_signature_matches(BidiMaps *b, const CPUCell *cells, const TextCache *tc, index_type render_row);

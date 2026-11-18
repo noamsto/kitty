@@ -46,6 +46,26 @@ bidi_row_has_isolates(const CPUCell *cells, index_type num, const TextCache *tc)
     return false;
 }
 
+bool
+bidi_cell_is_gap(const CPUCell *c, const TextCache *tc) {
+    if (c->is_multicell) return false;
+    if (!c->ch_is_idx) return !c->ch_or_idx || c->ch_or_idx == ' ';
+    if (cell_has_leading_controls(c)) return false;
+    char_type buf[MAX_NUM_CODEPOINTS_PER_CELL];
+    ListOfChars lc = {.chars = buf, .capacity = MAX_NUM_CODEPOINTS_PER_CELL};
+    if (!tc_chars_at_index_without_alloc(tc, c->ch_or_idx, &lc) || !lc.count || buf[0] != ' ') return false;
+    return cell_isolates(c, tc, buf) == lc.count - 1;
+}
+
+index_type
+bidi_cursor_gap(const CPUCell *cells, index_type cols, index_type x, const TextCache *tc) {
+    if (!x || x >= cols || !bidi_cell_is_gap(cells + x - 1, tc)) return 0;
+    for (index_type i = x; i < cols; i++) {
+        if (!bidi_cell_is_gap(cells + i, tc)) return 0;
+    }
+    return x;
+}
+
 static void
 free_row_maps(BidiMaps *b) {
     free(b->v2l);
@@ -83,6 +103,7 @@ bidi_maps_free(BidiMaps *b) {
     free(b->types);
     free(b->brackets);
     free(b->para_levels);
+    free(b->probe_levels);
     free(b->map);
     free(b->cell_of_char);
     free(b->match);
@@ -180,6 +201,7 @@ ensure_scratch(BidiMaps *b, size_t cap) {
     grow(types);
     grow(brackets);
     grow(para_levels);
+    grow(probe_levels);
     grow(map);
     grow(cell_of_char);
     grow(match);
@@ -287,14 +309,79 @@ keep_typed_blanks(BidiMaps *b, const CPUCell *last_row, uint32_t n_trim, uint32_
     return k;
 }
 
+static inline bool
+is_strong_or_number(FriBidiCharType t) {
+    return t == FRIBIDI_TYPE_LTR || t == FRIBIDI_TYPE_RTL || t == FRIBIDI_TYPE_AL || t == FRIBIDI_TYPE_EN || t == FRIBIDI_TYPE_AN;
+}
+
+// The cursor gap, in the last row from row_first, when the cells from gap_x on hold only blanks and controls: the blanks
+// between the last strong letter or number p and the cursor, and the neutrals and controls among and before them, take the
+// levels FriBidi gives them when a probe char follows them instead of the paragraph level (L1) and eos (N1/N2). So a space
+// typed after an RTL word shows where the next char of its run will push it. The probe stands for that char: R after an
+// odd-level p, else AN after an AN and EN otherwise. It goes right after the gap's last blank, so controls after that blank
+// stay after it, as tmux moves its closing PDI past the next char typed. It applies only when p is off the paragraph level,
+// as at that level the next char joins the paragraph's run and L1 already shows it, when keep_typed_blanks() left the
+// gap's last blank at the paragraph level, when the probe moves no level up to p, and when the last blank ends off the
+// paragraph level. Retypes the gap's blanks as their level's direction so that fribidi_reorder_line()'s own L1 leaves
+// them. Returns the new n_trim, one past the gap, or n_trim unchanged.
+static uint32_t
+show_typed_gap(BidiMaps *b, uint32_t row_first, uint32_t gap_x, FriBidiLevel par, uint32_t n_trim, uint32_t n) {
+    uint32_t c0 = row_first;
+    while (c0 < n && (b->cell_of_char[c0] & 0xffff) < gap_x) c0++;
+    for (uint32_t i = c0; i < n; i++) {
+        if (b->text[i] != ' ' && !(b->cell_of_char[i] & BIDI_EXTRA_CHAR)) return n_trim;
+    }
+    // A blank kept by keep_typed_blanks() is retyped as its letter, so p may be one, standing for the letter
+    uint32_t p = c0;
+    while (p > row_first && !is_strong_or_number(b->types[p - 1])) p--;
+    if (p == row_first) return n_trim;
+    p--;
+    uint32_t P = 0;
+    for (uint32_t i = c0; i > p + 1 && !P; i--) {
+        if (b->text[i - 1] == ' ' && !(b->cell_of_char[i - 1] & BIDI_EXTRA_CHAR)) P = i;
+    }
+    // Only [0, n_trim) is resolved; a strong char is never trimmed, but a kept blank stands for one
+    if (!P || p >= n_trim) return n_trim;
+    const FriBidiLevel lp = b->para_levels[p];
+    if (lp == par || (P - 1 < n_trim && b->para_levels[P - 1] != par)) return n_trim;
+    // [P, n) holds only blanks and controls, which FriBidi's own L1 puts at the paragraph level
+    const uint32_t len = MAX(n_trim, P);
+    const FriBidiCharType probe = lp & 1 ? FRIBIDI_TYPE_RTL : b->types[p] == FRIBIDI_TYPE_AN ? FRIBIDI_TYPE_AN : FRIBIDI_TYPE_EN;
+    memmove(b->types + P + 1, b->types + P, (n - P) * sizeof(b->types[0]));
+    memmove(b->brackets + P + 1, b->brackets + P, (n - P) * sizeof(b->brackets[0]));
+    b->types[P] = probe;
+    b->brackets[P] = FRIBIDI_NO_BRACKET;
+    // The resolved direction, so that the probe cannot flip an auto paragraph
+    FriBidiParType dir = par ? FRIBIDI_PAR_RTL : FRIBIDI_PAR_LTR;
+    const FriBidiLevel max_level = fribidi_get_par_embedding_levels_ex(b->types, b->brackets, (FriBidiStrIndex)(len + 1), &dir, b->probe_levels);
+    memmove(b->types + P, b->types + P + 1, (n - P) * sizeof(b->types[0]));
+    memmove(b->brackets + P, b->brackets + P + 1, (n - P) * sizeof(b->brackets[0]));
+    if (!max_level) {
+        b->resolve_cacheable = false;
+        return n_trim;
+    }
+    for (uint32_t i = 0; i <= p; i++) {
+        if (b->probe_levels[i] != b->para_levels[i]) return n_trim;
+    }
+    if (b->probe_levels[P - 1] == par) return n_trim;
+    for (uint32_t i = p + 1; i < P; i++) {
+        b->para_levels[i] = b->probe_levels[i];
+        if (b->text[i] == ' ' && !(b->cell_of_char[i] & BIDI_EXTRA_CHAR)) b->types[i] = b->para_levels[i] & 1 ? FRIBIDI_TYPE_RTL : FRIBIDI_TYPE_LTR;
+    }
+    // The retyped blanks must not reach a signature
+    b->resolve_signed = false;
+    return P;
+}
+
 // Resolves the levels of the paragraph's characters into b->para_levels from
 // the base *base. Returns whether any row may be reordered. Then *base is the
 // resolved FRIBIDI_PAR_LTR or FRIBIDI_PAR_RTL, *n_trim_out the count of
-// characters resolved, and the blank tail [*n_trim_out, n) is at the paragraph
-// level. Resolved are the characters FriBidi was given, and the typed blanks
-// kept by keep_typed_blanks().
+// characters resolved, and the tail [*n_trim_out, n) is at the paragraph
+// level. Resolved are the characters FriBidi was given, the typed blanks
+// kept by keep_typed_blanks() and the cursor gap of show_typed_gap(). gap_x is
+// the cursor's column on the last row when the gap may apply, else 0.
 static bool
-resolve_levels(BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const TextCache *tc, FriBidiParType *base, uint32_t *n_trim_out) {
+resolve_levels(BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const TextCache *tc, FriBidiParType *base, uint32_t *n_trim_out, uint32_t gap_x) {
     b->resolve_cacheable = true;
     b->resolve_signed = false;
     if (!num_rows || num_rows > BIDI_MAX_PARAGRAPH_ROWS) return false;
@@ -305,7 +392,8 @@ resolve_levels(BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const
         for (index_type x = 0; x < b->cols && isolates <= BIDI_MAX_ISOLATES; x++) isolates += cell_isolates(rows[r] + x, tc, buf);
     }
     const bool feed_iso = isolates && isolates <= BIDI_MAX_ISOLATES;
-    if (!ensure_scratch(b, (size_t)num_rows * b->cols + (feed_iso ? isolates : 0))) {
+    // One more char for show_typed_gap()'s probe
+    if (!ensure_scratch(b, (size_t)num_rows * b->cols + (feed_iso ? isolates : 0) + 1)) {
         b->resolve_cacheable = false;
         return false;
     }
@@ -323,8 +411,8 @@ resolve_levels(BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const
     // Blanks at the paragraph's end take the paragraph level (L1) whatever
     // precedes them, so they need not be resolved: only inside an explicit
     // embedding could they set the eos of the run before them (X10), and the
-    // retype below leaves none. The exception, a deviation from L1, is
-    // keep_typed_blanks().
+    // retype below leaves none. The exceptions, deviations from L1, are
+    // keep_typed_blanks() and the cursor gap of show_typed_gap().
     uint32_t n_trim = n;
     if (!b->no_trim) {
         while (n_trim > b->row_start[num_rows - 1] && b->text[n_trim - 1] == ' ') n_trim--;
@@ -358,6 +446,7 @@ resolve_levels(BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const
     // Only an LTR result can leave every level at 0, an RTL one has them all at 1 or more
     if (max_level <= 1) return false;
     if (feed_iso && n_trim < n && !b->no_trim) n_trim += keep_typed_blanks(b, rows[num_rows - 1], n_trim, n);
+    if (gap_x && !b->no_trim) n_trim = show_typed_gap(b, b->row_start[num_rows - 1], gap_x, *base == FRIBIDI_PAR_RTL, n_trim, n);
     for (uint32_t i = n_trim; i < n; i++) b->para_levels[i] = *base == FRIBIDI_PAR_RTL;
     *n_trim_out = n_trim;
     return true;
@@ -502,10 +591,17 @@ bidi_row_signature_matches(BidiMaps *b, const CPUCell *cells, const TextCache *t
 
 bool
 bidi_resolve_paragraph(
-    BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const TextCache *tc, FriBidiParType base, int first_render_row, index_type min_render_row) {
+    BidiMaps *b,
+    const CPUCell *const *rows,
+    unsigned num_rows,
+    const TextCache *tc,
+    FriBidiParType base,
+    int first_render_row,
+    index_type min_render_row,
+    index_type gap_x) {
     FriBidiParType dir = base;
     uint32_t n_trim = 0;
-    const bool reorder = resolve_levels(b, rows, num_rows, tc, &dir, &n_trim);
+    const bool reorder = resolve_levels(b, rows, num_rows, tc, &dir, &n_trim, gap_x);
     const bool rtl = reorder && dir == FRIBIDI_PAR_RTL;
     if (reorder) {
         for (uint32_t i = 0; i < b->row_start[num_rows]; i++) b->map[i] = (FriBidiStrIndex)i;

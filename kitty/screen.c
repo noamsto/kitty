@@ -5149,6 +5149,9 @@ typedef struct BidiRows {
     bool paused;
     const uint64_t *paused_ids;
     index_type paused_rows;
+    // The row of the cursor and its gap column on it (see bidi_cursor_gap), 0 for none
+    int gap_y;
+    index_type gap_x;
 } BidiRows;
 
 static uint64_t
@@ -5161,7 +5164,7 @@ bidi_row_id(const BidiRows *src, int y) {
 // Whether every row of the paragraph with this key that scrolled into history from screen row y < k is on record at its old
 // render row, still in history, and fed FriBidi the same as when the paragraph's maps were written
 static bool
-bidi_pushed_rows_verify(Screen *self, BidiMaps *b, const BidiCacheContext *c, uint64_t k, uint64_t first, uint64_t last, uint32_t num_rows) {
+bidi_pushed_rows_verify(Screen *self, BidiMaps *b, const BidiCacheContext *c, uint64_t k, uint64_t first, uint64_t last, uint64_t num_rows) {
     const uint64_t first_y = first & BIDI_ID_SCREEN ? (first & ~BIDI_ID_SCREEN) - 1 : 0;
     for (uint64_t y = first_y; y < k; y++) {
         const uint64_t lnum = k - 1 - y, r = y + (uint64_t)c->view;
@@ -5177,10 +5180,10 @@ bidi_pushed_rows_verify(Screen *self, BidiMaps *b, const BidiCacheContext *c, ui
 static void
 bidi_cache_check_straddlers(Screen *self, BidiMaps *b, const BidiCacheContext *c, uint64_t k, bool can_verify) {
     uint64_t ok_first = 0, ok_last = 0;
-    uint32_t ok_rows = 0;
+    uint64_t ok_rows = 0;
     for (index_type r = 0; r < b->rows; r++) {
         const uint64_t first = b->para_first[r], last = b->para_last[r];
-        const uint32_t num_rows = b->para_rows[r];
+        const uint64_t num_rows = b->para_rows[r];
         if (!b->row_id[r] || !(last & BIDI_ID_SCREEN) || (last & ~BIDI_ID_SCREEN) <= k) continue;
         if ((first & BIDI_ID_SCREEN) && (first & ~BIDI_ID_SCREEN) > k) continue;
         if (first == ok_first && last == ok_last && num_rows == ok_rows) continue;
@@ -5471,8 +5474,10 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued) {
     const uint32_t num_rows = (uint32_t)(last - first + 1);
     // The paragraph takes the record of its first row, without the region memo an unstamped one may hold in it
     const LineAttrs lead_raw = *bidi_row_attrs(src, first), lead = line_attrs_bidi_record(lead_raw);
-    const uint32_t key_rows = num_rows | (uint32_t)(lead.bidi_rtl | lead.bidi_auto << 1) << BIDI_KEY_DIR_SHIFT;
-    // A hit: the same lines with the same text in the same paragraph at the same render rows as when the maps were last written
+    // The cursor gap changes the layout of the paragraph's last row, so it is part of the key
+    const index_type gap = (!*continued && src->gap_y == last && bidi_row_attrs(src, last)->bidi_stamp != BIDI_STAMP_NONE) ? src->gap_x : 0;
+    const uint64_t key_rows = num_rows | (uint64_t)(lead.bidi_rtl | lead.bidi_auto << 1) << BIDI_KEY_DIR_SHIFT | (uint64_t)gap << BIDI_KEY_GAP_SHIFT;
+    // A hit: the same lines with the same text and cursor gap in the same paragraph at the same render rows as when the maps were last written
     // A shortcut: the same as a hit except that dirty rows may have signatures to check, and no row is above the view
     bool hit = cacheable, shortcut = cacheable && first == y0;
     for (int y = first; y <= last && cacheable; y++) {
@@ -5528,7 +5533,7 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued) {
     const bool regions = !resolved && lead_raw.bidi_stamp == BIDI_STAMP_NONE && !placeholders;
     bool regions_cacheable = true;
     if (resolved) {
-        bidi_resolve_paragraph(b, around + (first - y0), last - first + 1, tc, bidi_record_base(lead), first + src->to_render_row, min_render_row);
+        bidi_resolve_paragraph(b, around + (first - y0), last - first + 1, tc, bidi_record_base(lead), first + src->to_render_row, min_render_row, gap);
     } else {
         for (int r = min_render_row; r < end_render_row; r++) {
             const int y = r - src->to_render_row;
@@ -5600,6 +5605,16 @@ bidi_maps_for_upload(Screen *self, const LineBuf *source) {
     return b;
 }
 
+// Whether the walker could apply a gap at the live cursor (x, y): its row is a shown, stamped paragraph row with a typed gap there
+static bool
+bidi_gap_live(Screen *self, index_type x, index_type y) {
+    const BidiMaps *b = self->bidi_maps;
+    if (y >= self->lines) return false;
+    const index_type r = y + self->scrolled_by + pixel_scroll_enabled(self);
+    return r < b->rows && b->active[r] && !b->region_row[r] && self->linebuf->line_attrs[y].bidi_stamp != BIDI_STAMP_NONE &&
+           bidi_cursor_gap(linebuf_cpu_cells_for_line(self->linebuf, y), self->columns, x, self->text_cache) != 0;
+}
+
 // Not inlined, so that screen_update_cell_data() pays one branch for it
 __attribute__((noinline)) static bool
 update_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE fonts_data, bool cursor_has_moved, bool is_overlay_active, bool force_history_render) {
@@ -5611,8 +5626,15 @@ update_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE fonts_data,
     const BidiCacheContext now = {self->linebuf, self->linebuf->bidi_generation, self->linebuf->bidi_scrolls, self->historybuf->num_pushed, to_render_row};
     bidi_cache_use_context(self, b, &now, true);
     const unsigned int render_lines = render_lines_for_screen(self);
+    const index_type cursor_x = self->cursor->x, cursor_y = self->cursor->y;
     const BidiRows src = {
-        .screen = self, .linebuf = self->linebuf, .lowest = -(int)self->historybuf->count, .end = self->lines, .to_render_row = to_render_row};
+        .screen = self,
+        .linebuf = self->linebuf,
+        .lowest = -(int)self->historybuf->count,
+        .end = self->lines,
+        .to_render_row = to_render_row,
+        .gap_y = (int)cursor_y,
+        .gap_x = cursor_y < self->lines ? bidi_cursor_gap(linebuf_cpu_cells_for_line(self->linebuf, cursor_y), self->columns, cursor_x, self->text_cache) : 0};
     const index_type overlay_render_row = is_overlay_active ? self->overlay_line.ynum + src.to_render_row : UINT_MAX;
     Line line = {.text_cache = self->text_cache};
     bool continued = true;
@@ -5653,6 +5675,9 @@ update_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE fonts_data,
             else update_line_data(&line, r, address);
         }
     }
+    b->gap_record.x = cursor_x;
+    b->gap_record.y = cursor_y;
+    b->gap_record.live = bidi_gap_live(self, cursor_x, cursor_y);
     b->valid = true;
     // The cursor info was collected from the maps of the previous frame
     self->cursor_render_info.visual_x = screen_cursor_render_x(
@@ -5675,6 +5700,9 @@ update_paused_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE font
     // Without ids for this snapshot every id is 0, under a context no live frame has
     const bool have_ids = b->paused_ids && b->paused_rows == linebuf->ynum;
     bidi_cache_use_context(self, b, have_ids ? &b->paused_ctx : &(const BidiCacheContext){0}, false);
+    // The snapshot row y shows screen line y - pixel_scroll - scrolled_by (see screen_pause_rendering), so the cursor is on the inverse
+    const index_type cursor_row = self->paused_rendering.cursor.y + self->paused_rendering.scrolled_by + self->paused_rendering.pixel_scroll;
+    const bool cursor_in_snapshot = cursor_row < linebuf->ynum;
     const BidiRows src = {
         .screen = self,
         .linebuf = linebuf,
@@ -5683,7 +5711,11 @@ update_paused_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE font
         .to_render_row = 0,
         .paused = true,
         .paused_ids = have_ids ? b->paused_ids : NULL,
-        .paused_rows = have_ids ? b->paused_rows : 0};
+        .paused_rows = have_ids ? b->paused_rows : 0,
+        .gap_y = cursor_in_snapshot ? (int)cursor_row : -1,
+        .gap_x = cursor_in_snapshot
+                     ? bidi_cursor_gap(linebuf_cpu_cells_for_line(linebuf, cursor_row), self->columns, self->paused_rendering.cursor.x, self->text_cache)
+                     : 0};
     const index_type row_offset = self->paused_rendering.pixel_scroll;
     bool continued = false;
     for (index_type y = 0; y < linebuf->ynum;) {
@@ -5725,6 +5757,17 @@ screen_bidi_maps_usable(const Screen *self) {
 static bool
 screen_bidi_mode_changed(const Screen *self) {
     return self->bidi_maps && self->bidi_maps->force_ltr_seen != OPT(force_ltr);
+}
+
+// Whether a cursor-only move must re-upload cell data: moving into or out of a gap the walker applies changes the cursor row's
+// layout, and no other upload clause fires for it
+bool __attribute__((noinline))
+screen_bidi_cursor_gap_changed(Screen *self) {
+    if (self->paused_rendering.expires_at || !screen_bidi_maps_usable(self)) return false;
+    const BidiMaps *b = self->bidi_maps;
+    const index_type x = self->cursor->x, y = self->cursor->y;
+    if (x == b->gap_record.x && y == b->gap_record.y) return false;
+    return b->gap_record.live || bidi_gap_live(self, x, y);
 }
 
 // Realises a runtime change of force_ltr: the next upload shapes every line of
@@ -5787,19 +5830,23 @@ static bool cell_is_blank(const CPUCell *c);
 // follows the last typed character when its level differs from the paragraph's:
 // that is where the next character goes. At an odd level that is the column
 // visually left of it, at an even one the column right of it, clamped to the
-// last column (a beam then sits at the clamped cell's right edge). Typed spaces
-// that joined the run (at its level) end it, as the next letter goes beside
-// them. Otherwise they are skipped, and only after a strong letter, whose
-// direction carries across them to the next letter of the run; after a number
-// or neutral the next character's place depends on its class, so the rules
-// below apply. A cell holding an isolate control leaves that to the rules below
-// as well. Otherwise, after a right-to-left character a beam goes to the column
-// visually left of it, as the next right-to-left character goes there, and a
-// block, underline or hollow cursor does too when on a blank cell or the
-// pending wrap column. A beam on a right-to-left cell is drawn at the right
-// edge of the cell, flagged by mirrored. On a row mapped by its isolate regions
-// these rules apply within the cursor cell's region, at the region's base level;
-// a cursor outside every region stays at its column.
+// last column (a beam then sits at the clamped cell's right edge). When it sits
+// past the text after a gap of blanks that the layout put at a level k other
+// than the paragraph's (the cursor gap, or typed blanks kept after a letter in
+// an unclosed isolate), it anchors on the last gap cell at k's side in the same
+// way; otherwise the rules below apply. Typed spaces that joined the run (at
+// its level) end it, as the next letter goes beside them. Otherwise they are
+// skipped, and only after a strong letter, whose direction carries across them
+// to the next letter of the run; after a number or neutral the next character's
+// place depends on its class, so the rules below apply. A cell holding an
+// isolate control leaves that to the rules below as well. Otherwise, after a
+// right-to-left character a beam goes to the column visually left of it, as the
+// next right-to-left character goes there, and a block, underline or hollow
+// cursor does too when on a blank cell or the pending wrap column. A beam on a
+// right-to-left cell is drawn at the right edge of the cell, flagged by
+// mirrored. On a row mapped by its isolate regions these rules apply within the
+// cursor cell's region, at the region's base level; a cursor outside every
+// region stays at its column.
 static index_type
 cursor_visual_in_row(Screen *self, index_type x, index_type y, CursorShape shape, bool *mirrored) {
     *mirrored = false;
@@ -5817,6 +5864,20 @@ cursor_visual_in_row(Screen *self, index_type x, index_type y, CursorShape shape
         bool rtl;
         if (x >= self->columns || !bidi_region_at(b, cells, self->text_cache, x, &lo, &hi, &rtl)) return x;
         base = rtl;
+    }
+    if (!region_row && bidi_cursor_gap(cells, self->columns, x, self->text_cache)) {
+        const uint8_t k = bidi_cell_level(b, render_row, x - 1);
+        if (k != base) {
+            const index_type q = x - 1, span = cell_span(cells + q);
+            const index_type left = bidi_visual_x(b, render_row, q, span);
+            if (k & 1) {
+                *mirrored = shape == CURSOR_BEAM && left > lo;
+                return left > lo ? left - 1 : lo;
+            }
+            if (left + span <= hi - 1) return left + span;
+            *mirrored = shape == CURSOR_BEAM;
+            return hi - 1;
+        }
     }
     if (x > lo && x <= self->columns) {
         index_type end = x;
@@ -9522,6 +9583,11 @@ test_bidi_visual_x(Screen *self, PyObject *args) {
 }
 
 static PyObject *
+test_bidi_cursor_gap_changed(Screen *self, PyObject *a UNUSED) {
+    return PyBool_FromLong(screen_bidi_cursor_gap_changed(self));
+}
+
+static PyObject *
 test_bidi_logical_x(Screen *self, PyObject *args) {
     unsigned x, y;
     if (!PyArg_ParseTuple(args, "II", &x, &y)) return NULL;
@@ -9679,6 +9745,7 @@ static PyMethodDef methods[] = {
     METHODB(test_bidi_trim, METH_O),
     METHODB(test_bidi_flag_misses, METH_NOARGS),
     METHODB(test_bidi_visual_x, METH_VARARGS),
+    METHODB(test_bidi_cursor_gap_changed, METH_NOARGS),
     METHODB(test_bidi_logical_x, METH_VARARGS),
     METHODB(test_bidi_logical_click, METH_VARARGS),
     METHODB(test_bidi_is_rtl, METH_VARARGS),
