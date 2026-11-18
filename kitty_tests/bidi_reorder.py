@@ -4846,11 +4846,26 @@ class TestBidiReorder(BaseTest):
             self.assert_region(s, 0, (0, 1, 5, 4, 3, 2) + ID(6, 12), (0, 0, 1, 1, 1, 1) + (0,) * 6)
 
     def test_region_column_0_wide_first_char(self):
-        # A wide first char at column 0 takes the FSI as a trailing control, so the region starts after it: the space between sos
-        # and ש is at level 1 and the region from 2 to 6 is reversed whole
+        # Known limitation, not the intended layout: a wide cell cannot hold leading controls, so the FSI is dropped and the
+        # region is lost
         s = self.alt(12)
         parse_bytes(s, (FSI + '中 שלום' + PDI).encode())
-        self.assert_region(s, 0, (0, 1, 6, 5, 4, 3, 2) + ID(7, 12), (0, 0, 1, 1, 1, 1, 1) + (0,) * 5)
+        self.assert_no_region(s)
+        self.ae(s.cpu_cells(0)[0]['text'], '中')
+
+    def test_region_column_0_wide_cluster_intact(self):
+        # A control kept for column 0 must not split the cluster of a wide first char
+        def cursor_x(text):
+            s = self.alt(10)
+            parse_bytes(s, text.encode())
+            return s.cursor.x
+
+        with self.subTest('a: VS15 still narrows the emoji'):
+            self.ae(cursor_x(RLI + '😀︎z' + PDI), cursor_x('😀︎z' + PDI))
+        with self.subTest('b: ZWJ sequence'):
+            s = self.alt(10)
+            parse_bytes(s, (RLI + '👨‍👩').encode())
+            self.ae(s.cpu_cells(0)[0]['text'], '👨‍👩')
 
     def test_region_osc66_trigger(self):
         # Controls inside OSC 66 cells form a region as plain writes do; b is L at level 2 in the RTL region

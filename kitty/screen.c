@@ -1273,22 +1273,15 @@ region_control_stored(Screen *self) {
     self->linebuf->bidi_regions = self->linebuf->bidi_stamped = true;
 }
 
-static bool add_combining_chars(Screen *self, const char_type *chars, size_t num_chars, index_type x, index_type y);
-
 // Stores the kept controls after the first chars of cell (0, y), just written, and marks them leading. A cell that is a multicell
-// (a wide char) takes none, except that with bidi mode off it takes them as trailing controls, so the region starts after it.
+// (a wide char) takes none.
 static void __attribute__((noinline, cold))
 attach_leading_controls(Screen *self) {
     BidiLead *p = &self->bidi.lead;
     const unsigned n = p->n;
     p->n = 0;
     CPUCell *c = linebuf_cpu_cell_at(p->lb, 0, p->y);
-    if (c->is_multicell) {
-        // The lead stands, so self->linebuf is p->lb
-        if (!self->modes.mBDSM && !c->x && !c->y && add_combining_chars(self, p->chars, n, 0, p->y)) region_control_stored(self);
-        return;
-    }
-    if (!c->ch_and_idx) return;
+    if (c->is_multicell || !c->ch_and_idx) return;
     text_in_cell(c, self->text_cache, self->lc);
     if (self->lc->count + n > MAX_NUM_CODEPOINTS_PER_CELL) return;
     ensure_space_for_chars(self->lc, self->lc->count + n);
