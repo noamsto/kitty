@@ -515,6 +515,7 @@ bidi_resolve_paragraph(
         const int render_row = first_render_row + (int)r;
         if (render_row < (int)min_render_row || render_row >= (int)b->rows) continue;
         b->rtl[render_row] = rtl;
+        b->region_row[render_row] = false;
         // Also when FriBidi left every level at 0 and n_trim is 0
         if (b->resolve_signed) write_signature(b, (index_type)render_row, b->row_start[r], b->row_start[r + 1]);
         if (!reorder) {

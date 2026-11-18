@@ -2082,6 +2082,12 @@ draw_non_ascii_run(Screen *self, text_loop_state *s, const uint32_t *chars, size
     return i;
 }
 
+static void __attribute__((noinline, cold))
+region_control_stored(Screen *self) {
+    // The walker runs only for a stamped buffer, and scans unstamped rows for isolate regions only for one that stored a control
+    self->linebuf->bidi_regions = self->linebuf->bidi_stamped = true;
+}
+
 static inline __attribute__((always_inline)) void
 draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_state *s, const bool implicit, const uint8_t record) {
     init_text_loop_line(self, s);
@@ -2197,6 +2203,7 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
                         }
                         draw_combining_char(self, s, ch);
                         if (implicit) record_combining_write(self, pc, py, before, was_multicell, record);
+                        if (ch - 0x2066u <= 0x2069u - 0x2066u && pc->ch_and_idx != before && !self->modes.mBDSM) region_control_stored(self);
                     } else if (implicit && (ch == 0x200e || ch == 0x200f || ch == 0x61c || ch - 0x2066u <= 0x2069u - 0x2066u)) {
                         // LRM, RLM, ALM, or LRI, RLI, FSI, PDI
                         leading_zero_width(self, ch, record);
@@ -5362,7 +5369,7 @@ bidi_extend_paragraph_up(const BidiRows *src, const CPUCell **around, int y0, in
 }
 
 // Finds the paragraph of row y0, or a window of BIDI_MAX_PARAGRAPH_ROWS rows of it
-// around y0, refreshes the RTL memo of its dirty stamped rows, and writes or drops
+// around y0, refreshes the memo of its dirty rows, and writes or drops
 // the map of each of its rows from y0's render row on. On
 // entry *continued is false if y0 is known not to continue the row above; on return
 // it says whether the last row continues into the next. Returns the last row.
@@ -5399,8 +5406,8 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued) {
     const int min_render_row = y0 + src->to_render_row, end_render_row = MIN(last + src->to_render_row + 1, (int)b->rows);
     const uint64_t first_id = bidi_row_id(src, first), last_id = bidi_row_id(src, last);
     const uint32_t num_rows = (uint32_t)(last - first + 1);
-    // The paragraph takes the record of its first row
-    const LineAttrs lead = *bidi_row_attrs(src, first);
+    // The paragraph takes the record of its first row, without the region memo an unstamped one may hold in it
+    const LineAttrs lead_raw = *bidi_row_attrs(src, first), lead = line_attrs_bidi_record(lead_raw);
     const uint32_t key_rows = num_rows | (uint32_t)(lead.bidi_rtl | lead.bidi_auto << 1) << BIDI_KEY_DIR_SHIFT;
     // A hit: the same lines with the same text in the same paragraph at the same render rows as when the maps were last written
     // A shortcut: the same as a hit except that dirty rows may have signatures to check, and no row is above the view
@@ -5432,7 +5439,12 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued) {
     for (int y = first; y <= last; y++) {
         LineAttrs *a = bidi_row_attrs(src, y);
         // Every change to a row's text marks it dirty, so the memo of a clean row is current
-        if (a->has_dirty_text && a->bidi_stamp != BIDI_STAMP_NONE) a->bidi_stamp = bidi_row_memo(around[y - y0], src->linebuf->xnum, tc);
+        if (a->has_dirty_text) {
+            const CPUCell *cells = around[y - y0];
+            if (a->bidi_stamp != BIDI_STAMP_NONE) a->bidi_stamp = bidi_row_memo(cells, src->linebuf->xnum, tc);
+            else if (src->linebuf->bidi_regions)
+                a->bidi_auto = bidi_cells_have_idx(cells, src->linebuf->xnum) && bidi_row_has_isolates(cells, src->linebuf->xnum, tc);
+        }
         rtl |= a->bidi_stamp == BIDI_STAMP_RTL ||
                (a->bidi_stamp == BIDI_STAMP_ISOLATES && bidi_cells_may_reorder(around[y - y0], src->linebuf->xnum, tc));
         placeholders |= a->has_image_placeholders;
@@ -5449,15 +5461,24 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued) {
         }
         if (same) return last;
     }
+    // A paragraph of unstamped rows is laid out by the isolate regions of each row, on that row alone
+    const bool regions = !resolved && lead_raw.bidi_stamp == BIDI_STAMP_NONE && !placeholders;
+    bool regions_cacheable = true;
     if (resolved) {
         bidi_resolve_paragraph(b, around + (first - y0), last - first + 1, tc, bidi_record_base(lead), first + src->to_render_row, min_render_row);
     } else {
         for (int r = min_render_row; r < end_render_row; r++) {
+            const int y = r - src->to_render_row;
+            if (regions && line_attrs_region_memo(*bidi_row_attrs(src, y))) {
+                bidi_resolve_regions(b, around[y - y0], tc, (index_type)r);
+                regions_cacheable &= b->resolve_cacheable;
+                continue;
+            }
             bidi_set_row_inactive(b, r);
-            b->rtl[r] = false;
+            b->rtl[r] = b->region_row[r] = false;
         }
     }
-    const bool keep = cacheable && (!resolved || b->resolve_cacheable);
+    const bool keep = cacheable && (regions ? regions_cacheable : (!resolved || b->resolve_cacheable));
     for (int r = min_render_row; r < end_render_row; r++) {
         b->row_id[r] = keep ? bidi_row_id(src, r - src->to_render_row) : 0;
         b->para_first[r] = first_id;
