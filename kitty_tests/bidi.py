@@ -8,6 +8,7 @@ from .base import BaseTest, draw_multicell, parse_bytes
 NONE, LTR, RTL, AUTO = (0, False, False), (1, False, False), (1, True, False), (1, False, True)
 POWER_ON = (False, False, False)
 LRM, RLM, ALM = '\u200e', '\u200f', '\u061c'
+ISOLATE_CONTROLS = '\u2066\u2067\u2068\u2069'  # LRI RLI FSI PDI
 IA = '\x1b[8h\x1b[?2501h'
 CUP = '\x1b[{};1H'.format  # 1-based row
 
@@ -532,7 +533,9 @@ class TestBidi(BaseTest):
                     s = self.screen()
                     pb(s, IA)
                     self.draw_marked(s, mark, 'abc', split)
-                    self.ae(self.cell_texts(s, 4), ['a', 'b', 'c', '\0'], mark)
+                    # an isolate control with no previous cell is kept as a leading control of the cell written next
+                    first = 'a' + mark if mark in ISOLATE_CONTROLS else 'a'
+                    self.ae(self.cell_texts(s, 4), [first, 'b', 'c', '\0'], mark)
                     self.ae(self.records(s, 0), [AUTO], mark)
                     s = self.screen()
                     pb(s, IA + 'ab')

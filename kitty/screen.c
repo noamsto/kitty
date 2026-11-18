@@ -17,6 +17,7 @@
         PyModule_AddIntMacro(module, WIDTH_BITS);                             \
         PyModule_AddIntMacro(module, SUBSCALE_BITS);                          \
         PyModule_AddIntMacro(module, BIDI_MAX_ISOLATES);                      \
+        PyModule_AddIntMacro(module, BIDI_MAX_LEAD);                          \
         PyModule_AddIntMacro(module, BIDI_MAX_PARAGRAPH_ROWS);                \
         if (PyModule_AddFunctions(module, module_methods) != 0) return false; \
     }
@@ -1106,6 +1107,17 @@ init_prev_cell(Screen *self, text_loop_state *s) {
         if (!s->prev.cc->next_char_was_wrapped) s->prev.cc = NULL;
     }
 }
+static void __attribute__((noinline))
+segment_over_cell_chars(Screen *self, text_loop_state *s) {
+    text_in_cell(s->prev.cc, self->text_cache, self->lc);
+    // The leading controls of a cell come before its base char, so they do not end the cluster the cell holds
+    const bool leading = cell_has_leading_controls(s->prev.cc);
+    for (index_type i = 0; i < self->lc->count; i++) {
+        if (leading && i && self->lc->chars[i] - 0x2066u <= 0x2069u - 0x2066u) continue;
+        s->seg = grapheme_segmentation_step(s->seg, char_props_for(self->lc->chars[i]));
+    }
+}
+
 static void
 init_segmentation_state(Screen *self, text_loop_state *s) {
     init_prev_cell(self, s);
@@ -1128,10 +1140,7 @@ init_segmentation_state(Screen *self, text_loop_state *s) {
                 }
                 s->seg = empty_cell_seg;
             } else s->seg = grapheme_segmentation_step(s->seg, char_props_for(ch));
-        } else {
-            text_in_cell(s->prev.cc, self->text_cache, self->lc);
-            for (index_type i = 0; i < self->lc->count; i++) s->seg = grapheme_segmentation_step(s->seg, char_props_for(self->lc->chars[i]));
-        }
+        } else segment_over_cell_chars(self, s);
     }
 }
 
@@ -1175,6 +1184,94 @@ convert_record_at_leading_mark(Screen *self, char_type ch, uint8_t record) {
     self->linebuf->bidi_stamped = true;
 }
 
+// Whether the isolate controls kept for column 0 still stand for the cell at the cursor: the cursor is at (0, y) of the buffer they
+// were written in, no row has moved since (the linebuf's counters) and cell (0, y) is as it was then. An overwrite, a switch of
+// screen or a garbage collection of the text cache changes the cell, so no hook in any of them is needed; the counters are for a
+// scroll or a row move that leaves a blank row in place of a blank row, and the line and character erases drop the controls
+// themselves as they leave a blank cell as it was.
+static bool
+bidi_lead_stands(Screen *self) {
+    const BidiLead *p = &self->bidi.lead;
+    return p->lb == self->linebuf && self->cursor->x == 0 && self->cursor->y == p->y && p->y < p->lb->ynum &&
+           p->generation == p->lb->bidi_generation && p->scrolls == p->lb->bidi_scrolls &&
+           memcmp(&p->cell, linebuf_cpu_cell_at(p->lb, 0, p->y), sizeof(CPUCell)) == 0;
+}
+
+static void __attribute__((noinline, cold))
+record_leading_isolate(Screen *self, char_type ch) {
+    // An isolate control with no previous cell is kept for the cell written next at the cursor, which is at column 0
+    BidiLead *p = &self->bidi.lead;
+    if (self->cursor->x || self->cursor->y >= self->linebuf->ynum) return;
+    if (p->n && !bidi_lead_stands(self)) p->n = 0;
+    if (!p->n) {
+        p->lb = self->linebuf;
+        p->y = self->cursor->y;
+        p->cell = *linebuf_cpu_cell_at(p->lb, 0, p->y);
+        // the counters only run for a stamped buffer
+        p->lb->bidi_stamped = true;
+        p->generation = p->lb->bidi_generation;
+        p->scrolls = p->lb->bidi_scrolls;
+    }
+    if (p->n < BIDI_MAX_LEAD) p->chars[p->n++] = ch;
+}
+
+static void __attribute__((noinline, cold))
+leading_zero_width(Screen *self, char_type ch, uint8_t record) {
+    if (ch - 0x2066u <= 0x2069u - 0x2066u) record_leading_isolate(self, ch);
+    else convert_record_at_leading_mark(self, ch, record);
+}
+
+// Whether the cell about to be written at the cursor takes the kept controls. Called with some kept; drops them when they do not
+// stand for it. The first cell written after them consumes them either way.
+static bool __attribute__((noinline, cold))
+bidi_lead_applies(Screen *self) {
+    if (bidi_lead_stands(self)) return true;
+    self->bidi.lead.n = 0;
+    return false;
+}
+
+// A PDI written after a cell holding leading controls has no place of its own in the cell (all its controls are leading), so it
+// closes the last opener among them: LRI x PDI becomes x. Another control written there is dropped.
+static void __attribute__((noinline, cold))
+close_leading_control(Screen *self, CPUCell *c, char_type ch) {
+    if (ch != 0x2069) return;
+    ListOfChars *lc = self->lc;
+    text_in_cell(c, self->text_cache, lc);
+    // The last opener no PDI among the leading controls has closed
+    size_t i = lc->count;
+    for (unsigned depth = 0; --i > 0;) {
+        if (lc->chars[i] == 0x2069) depth++;
+        else if (lc->chars[i] - 0x2066u <= 0x2068u - 0x2066u) {
+            if (!depth) break;
+            depth--;
+        }
+    }
+    if (!i) return;
+    memmove(lc->chars + i, lc->chars + i + 1, (lc->count - i - 1) * sizeof(lc->chars[0]));
+    lc->count--;
+    bool controls = false;
+    for (i = 1; i < lc->count; i++) controls |= lc->chars[i] - 0x2066u <= 0x2069u - 0x2066u;
+    if (!controls) c->natural_width = false;
+    cell_set_chars(c, self->text_cache, lc);
+}
+
+// Stores the kept controls after the first chars of cell (0, y), just written, and marks them leading. A cell that is a multicell
+// (a wide char) takes none.
+static void __attribute__((noinline, cold))
+attach_leading_controls(Screen *self) {
+    BidiLead *p = &self->bidi.lead;
+    const unsigned n = p->n;
+    p->n = 0;
+    CPUCell *c = linebuf_cpu_cell_at(p->lb, 0, p->y);
+    if (c->is_multicell || !c->ch_and_idx) return;
+    text_in_cell(c, self->text_cache, self->lc);
+    if (self->lc->count + n > MAX_NUM_CODEPOINTS_PER_CELL) return;
+    ensure_space_for_chars(self->lc, self->lc->count + n);
+    for (unsigned i = 0; i < n; i++) self->lc->chars[self->lc->count++] = p->chars[i];
+    cell_set_chars(c, self->text_cache, self->lc);
+    c->natural_width = true;
+}
+
 static inline __attribute__((always_inline)) void
 record_written_line(Screen *self, index_type y, uint8_t record) {
     // Most writes go to a line that already has its record, so test for it
@@ -1210,6 +1307,7 @@ rederive_blank_bidi_records(LineBuf *lb, LineAttrs record) {
 
 static void
 bidi_controls_changed(Screen *self) {
+    self->bidi.lead.n = 0;
     rederive_blank_bidi_records(self->linebuf, current_bidi_record(self));
 }
 
@@ -1610,9 +1708,24 @@ move_widened_char_past_multiline_chars(Screen *self, text_loop_state *s, CPUCell
     else init_text_loop_line(self, s);
 }
 
+// A cell widened to a multicell, as a wide first cell does, takes no leading isolate controls: drops them
+static void __attribute__((noinline, cold))
+drop_leading_controls(Screen *self, CPUCell *c) {
+    ListOfChars *lc = self->lc;
+    text_in_cell(c, self->text_cache, lc);
+    size_t n = 1;
+    for (size_t i = 1; i < lc->count; i++) {
+        if (lc->chars[i] - 0x2066u > 0x2069u - 0x2066u) lc->chars[n++] = lc->chars[i];
+    }
+    lc->count = n;
+    cell_set_chars(c, self->text_cache, lc);
+    c->natural_width = false;
+}
+
 static void
 widen_cell_to_two(Screen *self, text_loop_state *s, CPUCell *cp, index_type xpos) {
     CPUCell *cpu_cell = cp + xpos;
+    if (UNLIKELY(cell_has_leading_controls(cpu_cell))) drop_leading_controls(self, cpu_cell);
     cpu_cell->is_multicell = true;
     cpu_cell->width = 2;
     cpu_cell->natural_width = true;
@@ -1649,7 +1762,10 @@ draw_combining_char(Screen *self, text_loop_state *s, char_type ch) {
     if (!add_combining_char(self, ch, xpos, s->prev.y) || self->lc->count < 2) return;
     unsigned base_pos = self->lc->count - 2;
     if (ch == VS16) { // emoji presentation variation marker makes default text presentation emoji (narrow emoji) into wide emoji
-        if (self->lc->chars[base_pos + 1] == VS16 && !cp[xpos].is_multicell && is_emoji_presentation_base(self->lc->chars[base_pos])) {
+        // The leading isolate controls of a cell are stored after its base char, which the marker then does not follow
+        const bool leading = cell_has_leading_controls(cp + xpos);
+        if (leading) base_pos = 0;
+        if ((leading || self->lc->chars[base_pos + 1] == VS16) && !cp[xpos].is_multicell && is_emoji_presentation_base(self->lc->chars[base_pos])) {
             widen_cell_to_two(self, s, cp, xpos);
         }
     } else if (ch == VS15) {
@@ -2019,9 +2135,11 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
         for (; j < n; j++) dest[j] = elem;                                                                 \
     }
                     size_t j;
+                    const bool lead = implicit && UNLIKELY(self->bidi.lead.n) && bidi_lead_applies(self);
                     copy_template(cp, cpu_template, cc);
 #undef copy_template
                     for (j = 0; j < n; j++) cell_set_char(cp + j, chars[i + j]);
+                    if (UNLIKELY(lead)) attach_leading_controls(self);
                     self->last_graphic_char = chars[i + n - 1];
                     s->prev.y = self->cursor->y;
                     s->prev.x = self->cursor->x + n - 1;
@@ -2041,8 +2159,10 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
             s->line_has_no_multicell = false;
             if (ch > DEL && LIKELY(!self->charset.current && !self->modes.mIRM && self->cursor->x < self->columns) &&
                 !batched_non_ascii_draw_disabled_for_tests) {
+                const bool lead = implicit && UNLIKELY(self->bidi.lead.n) && bidi_lead_applies(self);
                 const size_t n = draw_non_ascii_run(self, s, chars + i, num_chars - i);
                 if (n) {
+                    if (UNLIKELY(lead)) attach_leading_controls(self);
                     if (implicit) record_written_line(self, self->cursor->y, record);
                     i += n - 1;
                     continue;
@@ -2070,10 +2190,16 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
                         const index_type py = s->prev.y;
                         const char_type before = pc->ch_and_idx;
                         const bool was_multicell = pc->is_multicell;
+                        // A cell with leading controls holds only leading ones: a control after it has nowhere to go
+                        if (implicit && ch - 0x2066u <= 0x2069u - 0x2066u && cell_has_leading_controls(pc)) {
+                            close_leading_control(self, linebuf_cpu_cell_at(self->linebuf, s->prev.x, py), ch);
+                            continue;
+                        }
                         draw_combining_char(self, s, ch);
                         if (implicit) record_combining_write(self, pc, py, before, was_multicell, record);
-                    } else if (implicit && (ch == 0x200e || ch == 0x200f || ch == 0x61c)) {  // LRM, RLM, ALM
-                        convert_record_at_leading_mark(self, ch, record);
+                    } else if (implicit && (ch == 0x200e || ch == 0x200f || ch == 0x61c || ch - 0x2066u <= 0x2069u - 0x2066u)) {
+                        // LRM, RLM, ALM, or LRI, RLI, FSI, PDI
+                        leading_zero_width(self, ch, record);
                     }
                     continue;
                 }
@@ -2110,6 +2236,7 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
             s->image_placeholder_marked = true;
         }
         CPUCell *fc = s->cp + self->cursor->x;
+        const bool lead = implicit && UNLIKELY(self->bidi.lead.n) && bidi_lead_applies(self);
         if (char_width == 2) {
             CPUCell *second = fc + 1;
             if (second->is_multicell) {
@@ -2135,6 +2262,11 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
             s->prev.cc = fc;
             self->cursor->x++;
             fc->is_multicell = false;
+        }
+        if (UNLIKELY(lead)) {
+            // Past a multicell the char may have been written elsewhere than the cell the controls were kept for
+            if (s->prev.y == self->bidi.lead.y && s->prev.x == 0) attach_leading_controls(self);
+            else self->bidi.lead.n = 0;
         }
         if (implicit) record_written_line(self, s->prev.y, record);
     }
@@ -3577,6 +3709,7 @@ screen_erase_in_line(Screen *self, unsigned int how, bool private) {
         :param bool private: when ``True`` character attributes are left
                              unchanged.
         */
+    self->bidi.lead.n = 0;  // an erase of a blank cell leaves it as it was, so bidi_lead_stands() cannot see it
     unsigned int s = 0, n = 0;
     switch (how) {
         case 0:
@@ -3866,6 +3999,7 @@ screen_delete_characters(Screen *self, unsigned int count) {
 void
 screen_erase_characters(Screen *self, unsigned int count) {
     // Delete characters clearing the cells
+    self->bidi.lead.n = 0;  // as in screen_erase_in_line()
     if (count == 0) count = 1;
     unsigned int x = self->cursor->x;
     unsigned int num = MIN(self->columns - x, count);
@@ -5063,7 +5197,9 @@ bidi_row_continues(const BidiRows *src, int y, const CPUCell *cells) {
 // 3. both rows stamped, with equal bidi_rtl and bidi_auto;
 // 4. row y + 1 not marked as a prompt's or an output's start;
 // 5. y + 1 - group start < BIDI_MAX_PARAGRAPH_ROWS, so that a group fits the window and its extent does not depend on the row
-//    the walker starts from.
+//    the walker starts from;
+// 6. row y + 1 does not start with a PDI written at column 0 (a leading control of its first cell): that PDI is the shell
+//    closing the isolate when the command runs, so the row below is output and starts its own paragraph.
 // A blank row, one without text that continues no row below it, such as an empty line of a multi-line command or a line
 // erased below the prompt, is passed through: a run of them joins as a whole, the nearest row above it that is not blank giving
 // the record of rule 3 and the first row below it that is not blank standing for row y + 1 in rules 2, 3 and 5, while rule 4
@@ -5139,7 +5275,7 @@ bidi_record_row(const BidiRows *src, int y, int *row) {
     return true;
 }
 
-// Rules 3 and 4 for the hard break after row y, end being the row bidi_run_end() gives for y + 1. An alt screen row 0 continues
+// Rules 3, 4 and 6 for the hard break after row y, end being the row bidi_run_end() gives for y + 1. An alt screen row 0 continues
 // no history row.
 static bool
 bidi_boundary_may_join(const BidiRows *src, int y, int end) {
@@ -5148,6 +5284,7 @@ bidi_boundary_may_join(const BidiRows *src, int y, int end) {
         const unsigned kind = bidi_row_attrs(src, r)->prompt_kind;
         if (kind == PROMPT_START || kind == OUTPUT_START) return false;
     }
+    if (bidi_row_starts_with_pdi(bidi_row_cells(src, end), src->linebuf->xnum, src->screen->text_cache)) return false;
     int record;
     if (!bidi_record_row(src, y, &record)) return false;
     const LineAttrs above = *bidi_row_attrs(src, record), below = *bidi_row_attrs(src, end);
