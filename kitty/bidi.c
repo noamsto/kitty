@@ -7,6 +7,37 @@
 #include "bidi.h"
 
 #define row_of(arr) (b->arr + (size_t)render_row * b->cols)
+// In cell_of_char: an isolate control fed after its cell's first char, in the cell's column
+#define BIDI_EXTRA_CHAR (1u << 31)
+
+// Stores in buf the isolate controls (LRI RLI FSI PDI) among the chars of a cell after the first, returning how many.
+// A cell holding more chars than buf takes, which nothing stores, has none for every caller.
+static inline unsigned
+cell_isolates(const CPUCell *c, const TextCache *tc, char_type buf[MAX_NUM_CODEPOINTS_PER_CELL]) {
+    if (!c->ch_is_idx || (c->is_multicell && (c->x || c->y))) return 0;
+    ListOfChars lc = {.chars = buf, .capacity = MAX_NUM_CODEPOINTS_PER_CELL};
+    if (!tc_chars_at_index_without_alloc(tc, c->ch_or_idx, &lc)) return 0;
+    unsigned n = 0;
+    for (size_t i = 1; i < lc.count; i++) {
+        if (lc.chars[i] - 0x2066u <= 0x2069u - 0x2066u) buf[n++] = lc.chars[i];
+    }
+    return n;
+}
+
+bool
+bidi_cell_has_isolates(const CPUCell *c, const TextCache *tc) {
+    char_type buf[MAX_NUM_CODEPOINTS_PER_CELL];
+    return cell_isolates(c, tc, buf) != 0;
+}
+
+static bool
+row_has_isolates(const CPUCell *cells, index_type num, const TextCache *tc) {
+    char_type buf[MAX_NUM_CODEPOINTS_PER_CELL];
+    for (index_type x = 0; x < num; x++) {
+        if (cell_isolates(cells + x, tc, buf)) return true;
+    }
+    return false;
+}
 
 static void
 free_row_maps(BidiMaps *b) {
@@ -78,6 +109,7 @@ bidi_maps_ensure(BidiMaps *b, index_type rows, index_type cols) {
 
 bool
 bidi_cells_may_reorder(const CPUCell *cells, index_type num, const TextCache *tc) {
+    char_type buf[MAX_NUM_CODEPOINTS_PER_CELL];
     for (const CPUCell *c = cells, *end = cells + num; c < end; c++) {
         char_type ch = c->ch_or_idx;
         if (c->ch_is_idx) {
@@ -85,6 +117,11 @@ bidi_cells_may_reorder(const CPUCell *cells, index_type num, const TextCache *tc
             ch = tc_first_char_at_index(tc, ch);
         }
         if (bidi_codepoint_may_reorder(ch)) return true;
+        if (!c->ch_is_idx) continue;
+        // An RLI reorders digits and neutrals without an RTL letter: a RLI 12 34 PDI shows a 34 12, a RLI bc! PDI a !bc
+        for (unsigned i = 0, k = cell_isolates(c, tc, buf); i < k; i++) {
+            if (buf[i] == 0x2067) return true;
+        }
     }
     return false;
 }
@@ -109,11 +146,12 @@ ensure_scratch(BidiMaps *b, size_t cap) {
     return true;
 }
 
-// Appends to b->text the characters row r of a paragraph feeds FriBidi, one per
-// cell a character starts in, a blank as U+0020. Returns the new length, or
-// UINT32_MAX for a row with a cell spanning several rows, which cannot be reordered.
+// Appends to b->text the characters row r of a paragraph feeds FriBidi: per cell a
+// character starts in its first char, a blank as U+0020, then with feed_iso its
+// isolate controls. Returns the new length, or UINT32_MAX for a row with a cell
+// spanning several rows, which cannot be reordered.
 static inline uint32_t
-feed_row(BidiMaps *b, const CPUCell *cells, const TextCache *tc, uint32_t r, uint32_t n) {
+feed_row(BidiMaps *b, const CPUCell *cells, const TextCache *tc, uint32_t r, uint32_t n, bool feed_iso) {
     // Locals, as the stores through b->text could otherwise alias b's fields and make every iteration reload them
     FriBidiChar *restrict text = b->text + n, *const text_start = text;
     uint32_t *restrict cell_of_char = b->cell_of_char + n;
@@ -128,6 +166,13 @@ feed_row(BidiMaps *b, const CPUCell *cells, const TextCache *tc, uint32_t r, uin
         const char_type ch = cell_first_char(c, tc);
         *text++ = ch ? ch : ' ';
         *cell_of_char++ = row_bits | col;
+        if (!feed_iso || !c->ch_is_idx) continue;
+        // Within the scratch: resolve_levels sized it for the controls cell_isolates() counted in these same cells
+        char_type buf[MAX_NUM_CODEPOINTS_PER_CELL];
+        for (unsigned i = 0, k = cell_isolates(c, tc, buf); i < k; i++) {
+            *text++ = buf[i];
+            *cell_of_char++ = row_bits | col | BIDI_EXTRA_CHAR;
+        }
     }
     return n + (uint32_t)(text - text_start);
 }
@@ -135,8 +180,11 @@ feed_row(BidiMaps *b, const CPUCell *cells, const TextCache *tc, uint32_t r, uin
 static void
 retype_controls(BidiMaps *b, uint32_t n) {
     for (uint32_t i = 0; i < n; i++) {
-        // Drawn normally a bidi control is a combining char FriBidi never sees; OSC 66 can start a cell with one, and FriBidi is quadratic in sibling isolates
-        if (b->types[i] & (FRIBIDI_MASK_ISOLATE | FRIBIDI_MASK_EXPLICIT)) b->types[i] = FRIBIDI_TYPE_ON;
+        // Embeddings and overrides are never honoured, nor isolates but the combined ones fed under the cap: OSC 66 can start
+        // any number of cells with one, and FriBidi before 1.0.17 is quadratic in FSIs
+        const FriBidiCharType t = b->types[i];
+        if ((t & FRIBIDI_MASK_EXPLICIT) || ((t & FRIBIDI_MASK_ISOLATE) && !(b->cell_of_char[i] & BIDI_EXTRA_CHAR)))
+            b->types[i] = FRIBIDI_TYPE_ON;
     }
 }
 
@@ -153,24 +201,56 @@ sig_of(FriBidiCharType type, FriBidiBracketType bracket, FriBidiChar ch) {
     return (bracket != FRIBIDI_NO_BRACKET ? bracket_sig : (uint32_t)type) | (ch == ' ' ? SIG_BLANK : 0);
 }
 
+// In a paragraph that ends inside an isolate fed without its PDI, the blanks written right after a strong letter keep
+// the letter's level instead of taking the paragraph's (L1), so a space typed after a word sits where the next word of the
+// isolate's run will push it. Empty cells, and any blank after one, stay at the paragraph level. Retypes the kept blanks
+// as the letter so that fribidi_reorder_line()'s own L1 leaves them. Returns their count, which follow the n_trim chars
+// FriBidi resolved and end in the last row.
+static uint32_t
+keep_typed_blanks(BidiMaps *b, const CPUCell *last_row, uint32_t n_trim, uint32_t n) {
+    const uint32_t letter = n_trim - 1;
+    if ((b->cell_of_char[letter] & BIDI_EXTRA_CHAR) || !FRIBIDI_IS_LETTER(b->types[letter])) return 0;
+    int depth = 0;
+    for (uint32_t i = 0; i < n_trim; i++) {
+        if (b->types[i] == FRIBIDI_TYPE_PDI) depth -= depth > 0;
+        else if (FRIBIDI_IS_ISOLATE(b->types[i])) depth++;
+    }
+    if (!depth) return 0;
+    uint32_t k = 0;
+    while (n_trim + k < n && cell_is_char(last_row + (b->cell_of_char[n_trim + k] & 0xffff), ' ')) k++;
+    for (uint32_t i = n_trim; i < n_trim + k; i++) {
+        b->para_levels[i] = b->para_levels[letter];
+        b->types[i] = b->types[letter];
+    }
+    return k;
+}
+
 // Resolves the levels of the paragraph's characters into b->para_levels from
 // the base *base. Returns whether any row may be reordered. Then *base is the
 // resolved FRIBIDI_PAR_LTR or FRIBIDI_PAR_RTL, *n_trim_out the count of
-// characters FriBidi resolved, and the blank tail [*n_trim_out, n) is at the
-// paragraph level.
+// characters resolved, and the blank tail [*n_trim_out, n) is at the paragraph
+// level. Resolved are the characters FriBidi was given, and the typed blanks
+// kept by keep_typed_blanks().
 static bool
 resolve_levels(BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const TextCache *tc, FriBidiParType *base, uint32_t *n_trim_out) {
     b->resolve_cacheable = true;
     b->resolve_signed = false;
     if (!num_rows || num_rows > BIDI_MAX_PARAGRAPH_ROWS) return false;
-    if (!ensure_scratch(b, (size_t)num_rows * b->cols)) {
+    // Counted before anything is fed, as the scratch must hold the controls; over the cap none are fed, keeping FriBidi linear
+    unsigned isolates = 0;
+    char_type buf[MAX_NUM_CODEPOINTS_PER_CELL];
+    for (unsigned r = 0; r < num_rows && isolates <= BIDI_MAX_ISOLATES; r++) {
+        for (index_type x = 0; x < b->cols && isolates <= BIDI_MAX_ISOLATES; x++) isolates += cell_isolates(rows[r] + x, tc, buf);
+    }
+    const bool feed_iso = isolates && isolates <= BIDI_MAX_ISOLATES;
+    if (!ensure_scratch(b, (size_t)num_rows * b->cols + (feed_iso ? isolates : 0))) {
         b->resolve_cacheable = false;
         return false;
     }
     uint32_t n = 0;
     for (unsigned r = 0; r < num_rows; r++) {
         b->row_start[r] = n;
-        n = feed_row(b, rows[r], tc, r, n);
+        n = feed_row(b, rows[r], tc, r, n, feed_iso);
         if (n == UINT32_MAX) {
             b->resolve_cacheable = false;
             return false;
@@ -181,7 +261,8 @@ resolve_levels(BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const
     // Blanks at the paragraph's end take the paragraph level (L1) whatever
     // precedes them, so they need not be resolved: only inside an explicit
     // embedding could they set the eos of the run before them (X10), and the
-    // retype below leaves none.
+    // retype below leaves none. The exception, a deviation from L1, is
+    // keep_typed_blanks().
     uint32_t n_trim = n;
     if (!b->no_trim) {
         while (n_trim > b->row_start[num_rows - 1] && b->text[n_trim - 1] == ' ') n_trim--;
@@ -218,9 +299,11 @@ resolve_levels(BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const
     }
     // FriBidi leaves a weak base in place when no strong character decides
     *base = FRIBIDI_IS_RTL(*base) ? FRIBIDI_PAR_RTL : FRIBIDI_PAR_LTR;
-    b->resolve_signed = !budget_fired;
+    // A signature has no room for a cell's controls, and over the cap a row losing one changes the layout
+    b->resolve_signed = !budget_fired && !isolates;
     // Only an LTR result can leave every level at 0, an RTL one has them all at 1 or more
     if (max_level <= 1) return false;
+    if (feed_iso && n_trim < n && !b->no_trim) n_trim += keep_typed_blanks(b, rows[num_rows - 1], n_trim, n);
     for (uint32_t i = n_trim; i < n; i++) b->para_levels[i] = *base == FRIBIDI_PAR_RTL;
     *n_trim_out = n_trim;
     return true;
@@ -282,16 +365,23 @@ write_row(BidiMaps *b, index_type render_row, uint32_t row_first_char, uint32_t 
     bool differs = !b->active[render_row];
     index_type v = 0;
     for (uint32_t i = row_first_char; i < row_end_char; i++) {
-        const uint32_t logical = (uint32_t)b->map[i];
-        const index_type col = b->cell_of_char[logical] & 0xffff;
-        const index_type next = logical + 1 < row_end_char ? (b->cell_of_char[logical + 1] & 0xffff) : cols;
+        const uint32_t logical = (uint32_t)b->map[i], at = b->cell_of_char[logical];
+        const index_type col = at & 0xffff;
+        index_type next = logical + 1 < row_end_char ? (b->cell_of_char[logical + 1] & 0xffff) : cols;
         const uint8_t level = (uint8_t)b->para_levels[logical];
-        if (next == col + 1) {
+        if (next == col + 1 && !(at & BIDI_EXTRA_CHAR)) {
             // The common char of one cell, without the loop's setup
             differs |= (levels[col] != level) | (v2l[v] != col);
             levels[col] = level;
             v2l[v++] = (uint16_t)col;
             continue;
+        }
+        // A cell's isolate controls follow its first char and take no column
+        if (at & BIDI_EXTRA_CHAR) continue;
+        if (next == col) {
+            uint32_t j = logical + 1;
+            while (j < row_end_char && (b->cell_of_char[j] & BIDI_EXTRA_CHAR)) j++;
+            next = j < row_end_char ? (b->cell_of_char[j] & 0xffff) : cols;
         }
         for (index_type c = col; c < next; c++, v++) {
             // The renderer draws the first slice of a right-to-left multi-cell
@@ -314,7 +404,7 @@ write_signature(BidiMaps *b, index_type render_row, uint32_t row_first_char, uin
     const FriBidiBracketType *restrict brackets = b->brackets + row_first_char;
     const FriBidiChar *restrict text = b->text + row_first_char;
     const uint32_t n = row_end_char - row_first_char;
-    // A row feeds at most one char per cell, so a full row has char c in cell c
+    // A signed row feeds at most one char per cell, so a full row has char c in cell c
     if (n == cols) {
         for (index_type c = 0; c < cols; c++) sig[c] = sig_of(types[c], brackets[c], text[c]);
         return;
@@ -331,7 +421,9 @@ write_signature(BidiMaps *b, index_type render_row, uint32_t row_first_char, uin
 bool
 bidi_row_signature_matches(BidiMaps *b, const CPUCell *cells, const TextCache *tc, index_type render_row) {
     if (render_row >= b->rows || !b->sig_valid[render_row] || !ensure_scratch(b, b->cols)) return false;
-    const uint32_t n = feed_row(b, cells, tc, 0, 0);
+    // A paragraph holding a control is never signed
+    if (row_has_isolates(cells, b->cols, tc)) return false;
+    const uint32_t n = feed_row(b, cells, tc, 0, 0, false);
     if (n == UINT32_MAX) return false;
     fribidi_get_bidi_types(b->text, (FriBidiStrIndex)n, b->types);
     // Over all n, as a resolve without the trim would: the trimmed blanks are WS, which the retype leaves alone
@@ -424,6 +516,11 @@ bidi_logical_x(const BidiMaps *b, index_type render_row, index_type visual_x) {
 bool
 bidi_cell_is_rtl(const BidiMaps *b, index_type render_row, index_type x) {
     return row_has_map(b, render_row, x) && (row_of(levels)[x] & 1);
+}
+
+uint8_t
+bidi_cell_level(const BidiMaps *b, index_type render_row, index_type x) {
+    return row_has_map(b, render_row, x) ? row_of(levels)[x] : 0;
 }
 
 void

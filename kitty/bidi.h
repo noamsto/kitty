@@ -15,6 +15,8 @@
 #define BIDI_KEY_DIR_SHIFT 16
 // Steps per character a paragraph's bracket pairing (N0) may walk back to a letter or digit before it is skipped
 #define BIDI_N0_SCAN_PER_CHAR 16
+// Combined isolate controls a paragraph may feed FriBidi, as before 1.0.17 each FSI can scan to the paragraph end; over it none are fed
+#define BIDI_MAX_ISOLATES 32
 // Line ids of the paragraph cache: a screen row's id has this bit, a history row's is its absolute line number plus one; 0 is no id
 #define BIDI_ID_SCREEN (1ull << 63)
 
@@ -60,7 +62,8 @@ typedef struct BidiMaps {
     bool resolve_cacheable;
     // The last resolve ran FriBidi to success without skipping N0, so the signatures it wrote capture all its inputs
     bool resolve_signed;
-    // For tests: resolve the trailing blanks of a paragraph instead of trimming them
+    // For tests: resolve the trailing blanks of a paragraph with FriBidi, the UAX#9 reference, instead of trimming them. This also
+    // skips keep_typed_blanks(), so typed blanks after a letter in an unclosed fed isolate get the paragraph level
     bool no_trim;
     index_type cols, rows;
     // The LineBuf the maps were made from: the active linebuf, or the paused snapshot
@@ -91,7 +94,7 @@ void bidi_maps_free(BidiMaps *b);
 // When rows or cols differ from the maps', reallocates them with no row mapped
 // and sets changed. Returns false on allocation failure or cols > UINT16_MAX.
 bool bidi_maps_ensure(BidiMaps *b, index_type rows, index_type cols);
-// Whether the base codepoint of some cell passes bidi_codepoint_may_reorder()
+// Whether the base codepoint of some cell passes bidi_codepoint_may_reorder(), or some cell holds an RLI
 bool bidi_cells_may_reorder(const CPUCell *cells, index_type num, const TextCache *tc);
 // The FriBidi base of a paragraph whose first row has this record: with auto set the first strong character wins and rtl is the fallback
 static inline FriBidiParType
@@ -114,12 +117,17 @@ void bidi_cache_drop_screen_entries(BidiMaps *b);
 // Moves every render row's map and cache entry up by 0 < d < rows rows, leaving the bottom d rows with neither
 void bidi_cache_move_rows(BidiMaps *b, index_type d);
 
+// Whether the cell holds an isolate control (LRI RLI FSI PDI) after its first char
+bool bidi_cell_has_isolates(const CPUCell *c, const TextCache *tc);
+
 // The queries below are the identity, or false, for a row without a map.
 // The visual column of the left edge of the logical cell x spanning span cells
 index_type bidi_visual_x(const BidiMaps *b, index_type render_row, index_type x, index_type span);
 index_type bidi_logical_x(const BidiMaps *b, index_type render_row, index_type visual_x);
 // Whether the logical cell x is at an odd (right-to-left) level
 bool bidi_cell_is_rtl(const BidiMaps *b, index_type render_row, index_type x);
+// The embedding level of the logical cell x
+uint8_t bidi_cell_level(const BidiMaps *b, index_type render_row, index_type x);
 // row has cols cells of stride bytes each, in logical order: puts them in visual order
 void bidi_permute_row_bytes(BidiMaps *b, index_type render_row, uint8_t *row, size_t stride);
 
