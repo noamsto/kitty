@@ -20,6 +20,7 @@ typedef struct {
     Line *line;
     TextCache *text_cache;
     bool bidi_stamped; // set by the first bidi record written into this buffer, cleared only by RIS
+    bool bidi_regions; // set when an isolate control is stored with BDSM off, cleared only by RIS
     // The bidi paragraph cache drops its screen-row entries when bidi_generation changes and follows them when only
     // bidi_scrolls does. Every row-moving primitive and every clear that can leave a row clean bumps bidi_generation. Only
     // a full-height index bumps bidi_scrolls instead, and only the clear of the row such an index just scrolled
