@@ -129,6 +129,8 @@ jobs:
     bundle:
         name: Bundle test (${{ matrix.os }})
         runs-on: ${{ matrix.os }}
+        # The fork's macOS dependency bundle has no FriBidi, so that leg cannot build; keep it from failing the run or cancelling the ubuntu leg
+        continue-on-error: ${{ matrix.os == 'macos-latest' && github.repository != 'kovidgoyal/kitty' }}
         strategy:
             matrix:
                 os: [ubuntu-latest, macos-latest]

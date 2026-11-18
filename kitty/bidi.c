@@ -128,8 +128,8 @@ bidi_maps_ensure(BidiMaps *b, index_type rows, index_type cols) {
     b->para_rows = calloc(rows, sizeof(b->para_rows[0]));
     b->sig = malloc(cells * sizeof(b->sig[0]));
     b->sig_valid = calloc(rows, sizeof(b->sig_valid[0]));
-    if (!b->v2l || !b->levels || !b->active || !b->row_id || !b->para_first || !b->para_last || !b->para_rows || !b->sig ||
-        !b->sig_valid || !b->rtl || !b->region_row) {
+    if (!b->v2l || !b->levels || !b->active || !b->row_id || !b->para_first || !b->para_last || !b->para_rows || !b->sig || !b->sig_valid || !b->rtl ||
+        !b->region_row) {
         free_row_maps(b);
         return false;
     }
@@ -254,8 +254,7 @@ retype_controls(BidiMaps *b, uint32_t start, uint32_t end) {
         // Embeddings and overrides are never honoured, nor isolates but the combined ones fed under the cap: OSC 66 can start
         // any number of cells with one, and FriBidi before 1.0.17 is quadratic in FSIs
         const FriBidiCharType t = b->types[i];
-        if ((t & FRIBIDI_MASK_EXPLICIT) || ((t & FRIBIDI_MASK_ISOLATE) && !(b->cell_of_char[i] & BIDI_EXTRA_CHAR)))
-            b->types[i] = FRIBIDI_TYPE_ON;
+        if ((t & FRIBIDI_MASK_EXPLICIT) || ((t & FRIBIDI_MASK_ISOLATE) && !(b->cell_of_char[i] & BIDI_EXTRA_CHAR))) b->types[i] = FRIBIDI_TYPE_ON;
     }
 }
 
@@ -623,8 +622,7 @@ bidi_resolve_paragraph(
         // Returns the highest level plus one, or 0 on failure
         FriBidiLevel ret = 0;
         if (reorder_end > row_first) {
-            ret = fribidi_reorder_line(
-                0, b->types, (FriBidiStrIndex)(reorder_end - row_first), (FriBidiStrIndex)row_first, dir, b->para_levels, NULL, b->map);
+            ret = fribidi_reorder_line(0, b->types, (FriBidiStrIndex)(reorder_end - row_first), (FriBidiStrIndex)row_first, dir, b->para_levels, NULL, b->map);
         }
         if (rtl && reorder_end < row_end) {
             // The tail is at level 1 after every other char, so only L2's final level-1 reversal moves it: to the left of the
@@ -742,8 +740,7 @@ bidi_resolve_regions(BidiMaps *b, const CPUCell *cells, const TextCache *tc, ind
         FriBidiParType base = b->text[open] == 0x2066 ? FRIBIDI_PAR_LTR : b->text[open] == 0x2067 ? FRIBIDI_PAR_RTL : FRIBIDI_PAR_WLTR;
         b->resolve_count++;
         // Both return the highest level plus one, or 0 on failure
-        const FriBidiLevel max_level =
-            fribidi_get_par_embedding_levels_ex(b->types + s, b->brackets + s, (FriBidiStrIndex)len, &base, b->para_levels + s);
+        const FriBidiLevel max_level = fribidi_get_par_embedding_levels_ex(b->types + s, b->brackets + s, (FriBidiStrIndex)len, &base, b->para_levels + s);
         if (max_level == 1) continue;
         if (max_level) {
             base = FRIBIDI_IS_RTL(base) ? FRIBIDI_PAR_RTL : FRIBIDI_PAR_LTR;
