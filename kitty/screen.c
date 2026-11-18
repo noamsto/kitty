@@ -259,6 +259,7 @@ do_screen_reset(Screen *self, bool is_hard_reset) {
         historybuf_clear(self->historybuf);
         linebuf_clear(self->alt_linebuf, BLANK_CHAR);
         self->main_linebuf->bidi_stamped = self->alt_linebuf->bidi_stamped = false;
+        self->main_linebuf->bidi_regions = self->alt_linebuf->bidi_regions = false;
         if (self->bidi_maps) bidi_cache_invalidate(self->bidi_maps);
         // all buffers are now empty
         self->multiline_chars_used = false;
@@ -1163,11 +1164,10 @@ set_bidi_record(LineAttrs *a, LineAttrs r) {
 
 static void __attribute__((noinline, cold))
 stamp_line_for_bidi(Screen *self, index_type y, uint8_t record) {
-    // A line without a record has all its record bits clear, so the record
-    // is one OR.
+    // An unstamped line's bidi_auto may be a region memo, so the record replaces the bits rather than ORing into them.
     LineAttrs *a = self->linebuf->line_attrs + y;
     if (a->bidi_stamp) return;
-    a->val |= record;
+    set_bidi_record(a, (LineAttrs){.val = record});
     self->linebuf->bidi_stamped = true;
 }
 
@@ -4783,6 +4783,7 @@ screen_pause_rendering(Screen *self, bool pause, int for_in_ms) {
         }
     }
     self->paused_rendering.linebuf->bidi_stamped = self->linebuf->bidi_stamped;
+    self->paused_rendering.linebuf->bidi_regions = self->linebuf->bidi_regions;
     BidiMaps *bm = self->bidi_maps;
     bool record_ids = false;
     if (bm) {
