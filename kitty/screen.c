@@ -9436,6 +9436,11 @@ test_bidi_state(Screen *self, PyObject *args UNUSED) {
         self->main_linebuf->bidi_stamped ? Py_True : Py_False, self->alt_linebuf->bidi_stamped ? Py_True : Py_False);
 }
 
+static PyObject *
+test_bidi_regions(Screen *self, PyObject *args UNUSED) {
+    return Py_BuildValue("OO", self->main_linebuf->bidi_regions ? Py_True : Py_False, self->alt_linebuf->bidi_regions ? Py_True : Py_False);
+}
+
 static const BidiMaps *
 bidi_maps_for_test_row(Screen *self, PyObject *val, index_type *render_row) {
     *render_row = PyLong_AsUnsignedLong(val);
@@ -9666,6 +9671,7 @@ static PyMethodDef methods[] = {
     METHODB(test_set_style_table_limit, METH_O),
     METHODB(test_bidi_line_record, METH_O),
     METHODB(test_bidi_state, METH_NOARGS),
+    METHODB(test_bidi_regions, METH_NOARGS),
     METHODB(test_bidi_v2l, METH_O),
     METHODB(test_bidi_levels, METH_O),
     METHODB(test_bidi_paragraph_rtl, METH_O),
