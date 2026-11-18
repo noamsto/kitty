@@ -69,6 +69,19 @@ def osc66_controls(text, control_as=None):
     return ''.join(f'\x1b]66;w=1;{control_as or ch}\x07' if ch in BIDI_CONTROLS else ch for ch in text).encode()
 
 
+# Isolate regions (#55)
+FSI, LRI, RLI, PDI = '⁨', '⁦', '⁧', '⁩'
+REGION_GUTTER = ('   12 ' + FSI + 'שלום world' + PDI).encode()
+REGION_GUTTER_V2L = tuple(range(6)) + (11, 12, 13, 14, 15, 10, 9, 8, 7, 6) + tuple(range(16, 20))
+REGION_GUTTER_LEVELS = (0,) * 6 + (1,) * 5 + (2,) * 5 + (0,) * 4
+CLAUDE_NO_PDI = ('❯ ' + FSI + 'הסדר לא טוב' + '\x1b[C' + '\x1b[1;20H│' + '\x1b[1;15H').encode()
+CLAUDE_FIELD_END = ('❯ ' + FSI + 'הסדר לא טוב' + '\x1b[C' + '\x1b[1;20H' + PDI + '│' + '\x1b[1;15H').encode()
+
+
+def ID(a, b):
+    return tuple(range(a, b))
+
+
 class TestBidiReorder(BaseTest):
     def setUp(self):
         self.enterContext(setup_for_testing())
@@ -4503,3 +4516,196 @@ class TestBidiReorder(BaseTest):
             s = self.screen(cols=12, lines=2)
             parse_bytes(s, ('⁦' * (BIDI_MAX_LEAD + 3) + 'a').encode())
             self.ae(len(s.cpu_cells(0)[0]['text']), 1 + BIDI_MAX_LEAD)
+
+    # Isolate regions (#55)
+
+    def alt(self, cols, lines=3):
+        # the alternate screen, BDSM never sent
+        s = self.create_screen(cols=cols, lines=lines, scrollback=0, options={})
+        parse_bytes(s, b'\x1b[?1049h\x1b[H')
+        return s
+
+    def region_maps(self, s, y=0):
+        # (v2l, levels) of screen row y after a frame
+        test_screen_update_cell_data(s)
+        v2l = s.test_bidi_v2l(self.rr(s, y))
+        if v2l is not None:
+            self.ae(sorted(v2l), list(range(s.columns)), 'v2l must be a bijection over the columns')
+        return v2l, self.lv(s, y)
+
+    def assert_region(self, s, y, v2l, levels, msg=''):
+        self.ae(self.region_maps(s, y), (v2l, levels), msg)
+
+    def assert_no_region(self, s, y=0, msg=''):
+        self.ae(self.region_maps(s, y), (None, None), msg)
+
+    def cursor_at(self, s, x, shape, y=0):
+        return s.test_cursor_visual(x, y, shape)
+
+    def test_region_vim_gutter(self):
+        s = self.alt(20)
+        parse_bytes(s, ('   12 ' + FSI + 'שלום world' + PDI).encode())
+        self.assert_region(s, 0, REGION_GUTTER_V2L, REGION_GUTTER_LEVELS)
+
+    def test_region_vim_split(self):
+        s = self.alt(20)
+        parse_bytes(s, ('1 ' + FSI + 'אבג d' + PDI + '  │2 ' + FSI + 'שלום' + PDI).encode())
+        self.assert_region(
+            s, 0, (0, 1, 6, 5, 4, 3, 2, 7, 8, 9, 10, 11, 15, 14, 13, 12, 16, 17, 18, 19),
+            (0, 0, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0))
+
+    def test_region_claude_code_no_pdi(self):
+        s = self.alt(20)
+        parse_bytes(s, CLAUDE_NO_PDI)
+        self.assert_no_region(s)
+        self.ae(self.cursor_at(s, 14, CURSOR_BEAM), (14, False))
+        self.assertTrue(s.test_bidi_state()[4], 'the walker ran')
+
+    def test_region_claude_code_field_end(self):
+        s = self.alt(20)
+        parse_bytes(s, CLAUDE_FIELD_END)
+        self.assert_region(s, 0, (0, 1) + tuple(range(18, 1, -1)) + (19,), (0, 0) + (1,) * 17 + (0,))
+        self.ae(self.cursor_at(s, 14, CURSOR_BEAM), (6, True))
+        self.ae(self.cursor_at(s, 14, CURSOR_BLOCK)[0], 6)
+        self.ae(s.line(0)[18], ' ' + PDI)
+
+    def test_region_lazygit_box(self):
+        s = self.alt(12)
+        for y, row in enumerate(('┌' + '─' * 10 + '┐', '│' + FSI + 'שלום ab' + PDI + '   │', '└' + '─' * 10 + '┘')):
+            parse_bytes(s, f'\x1b[{y + 1};1H{row}'.encode())
+        test_screen_update_cell_data(s)
+        self.assert_region(s, 1, (0, 6, 7, 5, 4, 3, 2, 1, 8, 9, 10, 11), (0, 1, 1, 1, 1, 1, 2, 2, 0, 0, 0, 0))
+        self.assert_no_region(s, 0)
+        self.assert_no_region(s, 2)
+
+    def test_region_no_isolates_identity(self):
+        s = self.alt(10)
+        parse_bytes(s, 'שלום world'.encode())
+        self.assert_no_region(s)
+        self.assertFalse(s.test_bidi_state()[4])
+
+    def test_region_nesting(self):
+        s = self.alt(12)
+        parse_bytes(s, ('x ' + FSI + 'אב ' + LRI + 'cd' + PDI + PDI).encode())
+        self.assert_region(s, 0, (0, 1, 5, 6, 4, 3, 2) + ID(7, 12), (0, 0, 1, 1, 1, 2, 2) + (0,) * 5)
+
+    def test_region_unmatched_pdi(self):
+        s = self.alt(10)
+        parse_bytes(s, ('a' + PDI + ' ' + FSI + 'אב' + PDI).encode())
+        self.assert_region(s, 0, (0, 1, 3, 2) + ID(4, 10), (0, 0, 1, 1) + (0,) * 6)
+
+    def test_region_initiator_at_column_0(self):
+        text = 'שלום x'
+        for name, chunks in (
+            ('one write', (FSI + text + PDI,)),
+            ('initiator alone', (FSI, text + PDI)),
+            ('sgr between', (FSI + '\x1b[31m' + text + PDI,)),
+        ):
+            with self.subTest(name):
+                s = self.alt(10)
+                parse_bytes(s, b'\x1b[2;1H')
+                for chunk in chunks:
+                    parse_bytes(s, chunk.encode())
+                self.assert_region(s, 1, (5, 4, 3, 2, 1, 0) + ID(6, 10), (1, 1, 1, 1, 1, 2) + (0,) * 4)
+
+    def test_region_column_0_one_cell_then_region(self):
+        s = self.alt(10)
+        parse_bytes(s, (FSI + 'א' + PDI + ' ' + FSI + 'בג' + PDI).encode())
+        self.assert_region(s, 0, (0, 1, 3, 2) + ID(4, 10), (0, 0, 1, 1) + (0,) * 6)
+        self.ae(s.line(0)[0], 'א')
+
+    def test_region_column_0_continuation_row(self):
+        s = self.alt(5)
+        parse_bytes(s, b'abcdef')
+        parse_bytes(s, ('\r' + FSI + 'אב' + PDI).encode())
+        self.assert_region(s, 1, (1, 0, 2, 3, 4), (1, 1, 0, 0, 0))
+        self.assert_no_region(s, 0)
+        self.ae(s.line(0)[4], 'e')
+
+    def test_region_over_isolate_cap(self):
+        nested = 2 * 11 + 2 * 6
+        self.assertGreater(nested, BIDI_MAX_ISOLATES)
+        s = self.alt(10)
+        parse_bytes(s, ('x ' + FSI + 'א' + (LRI + PDI) * 11 + 'b' + (LRI + PDI) * 6 + 'c' + PDI).encode())
+        self.assert_region(s, 0, (0, 1, 3, 4, 2) + ID(5, 10), (0, 0, 1, 2, 2) + (0,) * 5)
+
+    def test_region_adjacent_share_cell(self):
+        s = self.alt(10)
+        parse_bytes(s, ('x ' + FSI + 'אב' + PDI + FSI + 'גד' + PDI).encode())
+        self.assert_region(s, 0, (0, 1, 3, 2, 5, 4) + ID(6, 10), (0, 0, 1, 1, 1, 1) + (0,) * 4)
+
+    def test_region_memo_and_redraw(self):
+        def fresh():
+            s = self.alt(20)
+            parse_bytes(s, REGION_GUTTER)
+            self.assert_region(s, 0, REGION_GUTTER_V2L, REGION_GUTTER_LEVELS)
+            return s
+
+        with self.subTest('overwrite a cell inside'):
+            s = fresh()
+            parse_bytes(s, '\x1b[1;9Hז'.encode())
+            self.assert_region(s, 0, REGION_GUTTER_V2L, REGION_GUTTER_LEVELS)
+        with self.subTest('overwrite the cell holding the PDI'):
+            s = fresh()
+            parse_bytes(s, b'\x1b[1;16He')
+            self.assert_no_region(s)
+        with self.subTest('overwrite the row without controls'):
+            s = fresh()
+            self.ae(s.test_bidi_line_record(0), (0, False, True))
+            parse_bytes(s, ('\x1b[1;1H' + 'abc' + ' ' * 17).encode())
+            self.assert_no_region(s)
+            self.ae(s.test_bidi_line_record(0), (0, False, False))
+        with self.subTest('overwrite the cell holding the initiator'):
+            s = fresh()
+            parse_bytes(s, b'\x1b[1;6H ')
+            self.assert_no_region(s)
+
+    def test_region_bdsm_on_unchanged(self):
+        s = self.alt(20)
+        parse_bytes(s, b'\x1b[8h' + CLAUDE_FIELD_END)
+        self.assert_region(s, 0, (0, 1) + tuple(range(19, 1, -1)), (0, 0) + (1,) * 18)
+
+    def test_region_full_screen_scroll(self):
+        s = self.alt(20)
+        for y, n in enumerate((12, 13, 14)):
+            parse_bytes(s, f'\x1b[{y + 1};1H   {n} '.encode() + (FSI + 'שלום world' + PDI).encode())
+        test_screen_update_cell_data(s)
+        parse_bytes(s, b'\x1b[S')
+        self.ae(self.frame(s)[0], 0)
+        self.assert_region(s, 0, REGION_GUTTER_V2L, REGION_GUTTER_LEVELS)
+        self.assert_region(s, 1, REGION_GUTTER_V2L, REGION_GUTTER_LEVELS)
+        self.assert_no_region(s, 2)
+
+    def test_region_cursor(self):
+        with self.subTest('a: inside and outside a region'):
+            s = self.alt(20)
+            parse_bytes(s, REGION_GUTTER)
+            test_screen_update_cell_data(s)
+            self.ae(self.cursor_at(s, 17, CURSOR_BEAM), (17, False))
+            self.ae(self.cursor_at(s, 16, CURSOR_BEAM), (16, False))
+            self.ae(self.cursor_at(s, 6, CURSOR_BEAM), (15, True))
+            self.ae(self.cursor_at(s, 6, CURSOR_BLOCK)[0], 15)
+        with self.subTest('b: all-rtl region, cursor right after it'):
+            s = self.alt(10)
+            parse_bytes(s, ('x ' + FSI + 'שלום' + PDI).encode())
+            self.assert_region(s, 0, (0, 1, 5, 4, 3, 2) + ID(6, 10), (0, 0) + (1, 1, 1, 1) + (0,) * 4)
+            self.ae(self.cursor_at(s, 6, CURSOR_BEAM), (6, False))
+            self.ae(self.cursor_at(s, 6, CURSOR_BLOCK)[0], 6)
+        with self.subTest('c: region base differs from the row base'):
+            s = self.alt(14)
+            parse_bytes(s, ('x ' + RLI + 'אב cd' + '\x1b[1;13H' + PDI).encode())
+            self.assert_region(
+                s, 0, (0, 1, 11, 10, 9, 8, 7, 5, 6, 4, 3, 2, 12, 13), (0, 0, 1, 1, 1, 2, 2, 1, 1, 1, 1, 1, 0, 0))
+            self.ae(self.cursor_at(s, 7, CURSOR_BEAM), (9, False))
+            self.ae(self.cursor_at(s, 7, CURSOR_BLOCK)[0], 9)
+
+    def test_region_main_screen_bdsm_off(self):
+        s = self.create_screen(cols=20, lines=3, scrollback=0, options={})
+        parse_bytes(s, REGION_GUTTER)
+        self.assert_region(s, 0, REGION_GUTTER_V2L, REGION_GUTTER_LEVELS)
+
+    def test_region_r7_copy(self):
+        s = self.alt(20)
+        parse_bytes(s, CLAUDE_FIELD_END)
+        # str(line) keeps zero-width chars and prints an empty cell as a space: cells 17, 18 and 19
+        self.ae(str(s.line(0))[-4:], '  ' + PDI + '│')
