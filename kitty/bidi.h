@@ -123,6 +123,8 @@ void bidi_cache_drop_screen_entries(BidiMaps *b);
 // Moves every render row's map and cache entry up by 0 < d < rows rows, leaving the bottom d rows with neither
 void bidi_cache_move_rows(BidiMaps *b, index_type d);
 
+// Whether the row's first cell holds leading isolate controls and the first of them is a PDI
+bool bidi_row_starts_with_pdi(const CPUCell *cells, index_type num, const TextCache *tc);
 // Whether the cell holds an isolate control (LRI RLI FSI PDI) after its first char
 bool bidi_cell_has_isolates(const CPUCell *c, const TextCache *tc);
 
