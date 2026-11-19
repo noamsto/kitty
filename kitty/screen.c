@@ -5296,19 +5296,20 @@ bidi_row_continues(const BidiRows *src, int y, const CPUCell *cells) {
 //    the walker starts from;
 // 6. row y + 1 does not start with a PDI written at column 0 (a leading control of its first cell): that PDI is the shell
 //    closing the isolate when the command runs, so the row below is output and starts its own paragraph.
-// A blank row, one without text that continues no row below it, such as an empty line of a multi-line command or a line
-// erased below the prompt, is passed through: a run of them joins as a whole, the nearest row above it that is not blank giving
-// the record of rule 3 and the first row below it that is not blank standing for row y + 1 in rules 2, 3 and 5, while rule 4
-// holds for every row of the run. A group then never ends in blank rows, which would keep the typed blanks of its last text
-// row at the paragraph level.
+// A blank row, one holding only empty cells and written spaces that continues no row below it, such as an empty line of a multi-line
+// command or a line erased below the prompt, or padded with spaces in place of an erase, is passed through: a run of them joins as a
+// whole, the nearest row above it that is not blank giving the record of rule 3 and the first row below it that is not blank standing
+// for row y + 1 in rules 2, 3 and 5, while rule 4 holds for every row of the run. A group then never ends in blank rows, which would
+// keep the typed blanks of its last text row at the paragraph level.
 // Every answer comes from the rows' text alone, never from where the walker started.
 
-// Whether row y holds no text and continues no row below it
+// Whether row y holds only empty cells and written spaces, as a program's padding written in place of an erase, and continues no
+// row below it
 static bool
 bidi_row_blank(const BidiRows *src, int y) {
     const CPUCell *cells = bidi_row_cells(src, y);
     for (index_type x = 0; x < src->linebuf->xnum; x++) {
-        if (cells[x].ch_and_idx) return false;
+        if (cells[x].ch_and_idx && !cell_is_char(cells + x, ' ')) return false;
     }
     return !bidi_row_continues(src, y, cells);
 }
