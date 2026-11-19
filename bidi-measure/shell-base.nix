@@ -1,0 +1,102 @@
+{pkgs ? import <nixpkgs> {}}:
+with pkgs; let
+  inherit (lib) optional optionals;
+  inherit (xorg) libX11 libXrandr libXinerama libXcursor libXi libXext libXrender;
+  harfbuzzWithCoreText = harfbuzz.override {withCoreText = stdenv.isDarwin;};
+in
+  with python3Packages;
+    mkShell rec {
+      buildInputs =
+        [
+          harfbuzzWithCoreText
+          fribidi
+          ncurses
+          lcms2
+          xxHash
+          simde
+          go
+          matplotlib
+          shader-slang
+        ]
+        ++ optionals stdenv.isDarwin [
+          libpng
+          zlib
+        ]
+        ++ optionals stdenv.isLinux [
+          fontconfig
+          libunistring
+          libcanberra
+          libX11
+          libXrandr
+          libXinerama
+          libXcursor
+          libxkbcommon
+          libXi
+          libXext
+          libXrender
+          vulkan-headers
+          vulkan-loader
+          vulkan-validation-layers
+          wayland-protocols
+          wayland
+          openssl
+          dbus
+          cairo #
+        ]
+        ++ lib.optionals stdenv.hostPlatform.isLinux [
+          wayland-scanner
+        ]
+        ++ checkInputs;
+
+      nativeBuildInputs =
+        [
+          ncurses
+          pkg-config
+          sphinx
+          furo
+          sphinx-copybutton
+          sphinxext-opengraph
+          sphinx-design
+        ]
+        ++ optionals stdenv.isDarwin [
+          imagemagick
+          libicns # For the png2icns tool.
+        ];
+
+      propagatedBuildInputs = optional stdenv.isLinux libGL;
+
+      checkInputs = [
+        pillow
+      ];
+
+      # Causes build failure due to warning when using Clang
+      hardeningDisable = ["strictoverflow"];
+
+      shellHook =
+        if stdenv.isDarwin
+        then ''
+          export KITTY_NO_LTO=
+          # Add fonts by hand
+
+          if [ ! -e ./fonts/SymbolsNerdFontMono-Regular.ttf ]; then
+            mkdir -p ./fonts/
+            cp "${nerd-fonts.symbols-only}/share/fonts/truetype/NerdFonts/Symbols/SymbolsNerdFontMono-Regular.ttf" ./fonts/
+          fi
+        ''
+        else ''
+          export KITTY_EGL_LIBRARY='${lib.getLib libGL}/lib/libEGL.so.1'
+          export KITTY_STARTUP_NOTIFICATION_LIBRARY='${libstartup_notification}/lib/libstartup-notification-1.so'
+          export KITTY_CANBERRA_LIBRARY='${libcanberra}/lib/libcanberra.so'
+          export KITTY_FONTCONFIG_LIBRARY='${fontconfig.lib}/lib/libfontconfig.so'
+          # The Vulkan GPU driver dlopen()s libvulkan at runtime
+          export LD_LIBRARY_PATH="${lib.makeLibraryPath [vulkan-loader]}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          # Make the validation layer available, used with --debug-rendering
+          export VK_ADD_LAYER_PATH="${vulkan-validation-layers}/share/vulkan/explicit_layer.d''${VK_ADD_LAYER_PATH:+:$VK_ADD_LAYER_PATH}"
+
+          # Add fonts by hand
+          if [ ! -e ./fonts/SymbolsNerdFontMono-Regular.ttf ]; then
+            mkdir -p ./fonts/
+            cp "${nerd-fonts.symbols-only}/share/fonts/truetype/NerdFonts/Symbols/SymbolsNerdFontMono-Regular.ttf" ./fonts/
+          fi
+        '';
+    }
