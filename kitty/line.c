@@ -235,7 +235,7 @@ find_colon_slash(Line *self, index_type x, index_type limit, ListOfChars *lc, in
 #undef next_char_is
 
     do {
-        text_in_cell(c, self->text_cache, lc);
+        line_text_in_cell(self, pos, lc);
         if (!is_hostname_lc(lc)) return false;
         switch (state) {
             case ANY:
@@ -260,7 +260,8 @@ prefix_matches(Line *self, index_type at, const char_type *prefix, index_type pr
     if (prefix_len > at) return false;
     while (prefix_len--) {
         at = prev_char_pos(self, at, 1);
-        if (at >= self->xnum || cell_scale(self->cpu_cells + at) != scale || !cell_is_char(self->cpu_cells + at, prefix[prefix_len])) return false;
+        if (at >= self->xnum || cell_scale(self->cpu_cells + at) != scale) return false;
+        if (!line_cell_is_char(self, at, prefix[prefix_len])) return false;
     }
     return true;
 }
@@ -287,7 +288,7 @@ has_url_beyond_colon_slash(Line *self, const index_type x, ListOfChars *lc, cons
     while ((pos = next_char_pos(self, pos, 1)) < self->xnum && num_chars++ < MIN_URL_LEN + 2) {
         const CPUCell *c = self->cpu_cells + pos;
         if (cell_scale(c) != scale) return false;
-        text_in_cell(c, self->text_cache, lc);
+        line_text_in_cell(self, pos, lc);
         if (num_of_slashes < 3) {
             if (!is_hostname_lc(lc)) return false;
             if (lc->count == 1 && lc->chars[0] == '/') num_of_slashes++;
@@ -320,7 +321,7 @@ line_url_start_at(Line *self, index_type x, ListOfChars *lc) {
 static bool
 is_pos_ok_for_url(Line *self, index_type x, bool in_hostname, index_type last_hostname_char_pos, ListOfChars *lc) {
     if (x >= self->xnum) return false;
-    text_in_cell(self->cpu_cells + x, self->text_cache, lc);
+    line_text_in_cell(self, x, lc);
     if (in_hostname && x <= last_hostname_char_pos) return is_hostname_lc(lc);
     return is_url_lc(lc);
 }
@@ -336,7 +337,7 @@ line_url_end_at(
     index_type last_hostname_char_pos,
     ListOfChars *lc) {
     index_type ans = x;
-#define is_not_ok(n) ((sentinel && cell_is_char(self->cpu_cells + n, sentinel)) || !is_pos_ok_for_url(self, n, in_hostname, last_hostname_char_pos, lc))
+#define is_not_ok(n) ((sentinel && line_cell_is_char(self, n, sentinel)) || !is_pos_ok_for_url(self, n, in_hostname, last_hostname_char_pos, lc))
     if (x >= self->xnum || (check_short && self->xnum <= MIN_URL_LEN + 3) || is_not_ok(x)) return 0;
     index_type n = ans;
     while ((n = next_char_pos(self, ans, 1)) < self->xnum) {
@@ -356,7 +357,7 @@ line_url_end_at(
 
 bool
 line_startswith_url_chars(Line *self, bool in_hostname, ListOfChars *lc) {
-    text_in_cell(self->cpu_cells, self->text_cache, lc);
+    line_text_in_cell(self, 0, lc);
     if (in_hostname) return is_hostname_lc(lc);
     return is_url_lc(lc);
 }
@@ -364,7 +365,7 @@ line_startswith_url_chars(Line *self, bool in_hostname, ListOfChars *lc) {
 index_type
 find_char(Line *self, index_type start, char_type ch) {
     do {
-        if (cell_is_char(self->cpu_cells + start, ch)) return start;
+        if (line_cell_is_char(self, start, ch)) return start;
     } while ((start = next_char_pos(self, start, 1)) < self->xnum);
     return self->xnum;
 }
@@ -374,7 +375,7 @@ get_url_sentinel(Line *line, index_type url_start) {
     char_type before = 0, sentinel;
     if (url_start > 0 && url_start < line->xnum) {
         index_type n = prev_char_pos(line, url_start, 1);
-        if (n < line->xnum) before = cell_first_char(line->cpu_cells + n, line->text_cache);
+        if (n < line->xnum) before = line_cell_first_char(line, n);
     }
     switch (before) {
         case '"':
@@ -1047,6 +1048,17 @@ report_marker_error(PyObject *marker) {
     } else PyErr_Clear();
 }
 
+// On a line holding a bidi record, the leading controls of a cell are matched as text before the cell, except the last of a
+// cell holding nothing else, so that a match of its text marks the cell
+static unsigned
+leading_controls_before_cell(const Line *line, index_type x) {
+    if (!line->attrs.bidi_stamp || x >= line->xnum) return 0;
+    char_type buf[MAX_NUM_CODEPOINTS_PER_CELL];
+    ListOfChars lc = {.chars = buf, .capacity = arraysz(buf)};
+    const unsigned n = cell_leading_controls(line->cpu_cells + x, line->text_cache, &lc);
+    return n && n == lc.count ? n - 1 : n;
+}
+
 static void
 apply_mark(Line *line, const uint16_t mark, index_type *cell_pos, unsigned int *match_pos) {
 #define MARK \
@@ -1056,6 +1068,7 @@ apply_mark(Line *line, const uint16_t mark, index_type *cell_pos, unsigned int *
     (*match_pos)++;
     RAII_ListOfChars(lc);
     text_in_cell(line->cpu_cells + x, line->text_cache, &lc);
+    lc.count -= leading_controls_before_cell(line, x);
     if (lc.chars[0]) {
         if (lc.chars[0] == '\t') {
             unsigned num_cells_to_skip_for_tab = lc.count > 1 ? lc.chars[1] : 0;
@@ -1074,6 +1087,7 @@ apply_mark(Line *line, const uint16_t mark, index_type *cell_pos, unsigned int *
         }
     }
     *cell_pos = x + 1;
+    *match_pos += leading_controls_before_cell(line, x + 1);
 #undef MARK
 }
 
@@ -1096,6 +1110,7 @@ apply_marker(PyObject *marker, Line *line, const PyObject *text) {
     }
     PyObject *match;
     index_type x = 0;
+    match_pos = leading_controls_before_cell(line, 0);
     while ((match = PyIter_Next(iter)) && x < line->xnum) {
         Py_DECREF(match);
         while (match_pos < l && x < line->xnum) { apply_mark(line, 0, &x, &match_pos); }
