@@ -125,6 +125,8 @@ Detailed list of changes
 0.51.1 [future]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+- Add support for bidirectional text. A program turns it on with the ECMA-48 mode ``CSI 8 h`` and kitty then lays out the lines it writes using the Unicode bidirectional algorithm. ``CSI ? 2501 h`` detects each paragraph's direction and ``CSI Ps SP k`` sets it. See :ref:`bidi_support` (:iss:`2109`)
+
 - dnd kitten: Fix a malicious remote drop source being able to write files outside the staging directory by sending a directory with the same name as a previously sent symlink (follow up to :cve:`2026-54056`)
 
 - Fix a crash when calling :code:`Screen.hyperlink_at()` with coordinates outside the screen, such as from a watcher (:iss:`10890`)
