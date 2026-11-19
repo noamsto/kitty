@@ -7,7 +7,8 @@
 #include "bidi.h"
 
 #define BIDI_N0_SCAN_PER_CHAR 16
-// In cell_of_char: a char that takes no column, fed in its cell's column: an isolate control or mark after the cell's first char
+// In cell_of_char: a char that takes no column, fed in its cell's column: an isolate control or mark after the cell's
+// first char, or a leading mark before it
 #define BIDI_EXTRA_CHAR (1u << 31)
 
 // False for codepoints outside the blocks that contain right-to-left or Arabic
@@ -21,15 +22,17 @@ bidi_codepoint_may_reorder(char_type ch) {
     return ch <= 0xfdff || ch - 0xfe70 <= 0xfefe - 0xfe70 || ch - 0x10800 <= 0x10fff - 0x10800 || ch - 0x1e800 <= 0x1efff - 0x1e800;
 }
 
-// Stores in buf the isolate controls (LRI RLI FSI PDI) and marks (LRM RLM ALM) among the chars of a cell after the first,
-// returning how many. A cell holding more chars than buf takes, which nothing stores, has none for every caller.
+// Stores in buf the isolate controls (LRI RLI FSI PDI) and marks (LRM RLM ALM) among the chars of a cell after its first char
+// past the leading marks, returning how many.
 static inline unsigned
 cell_extra_chars(const CPUCell *c, const TextCache *tc, char_type buf[MAX_NUM_CODEPOINTS_PER_CELL]) {
     if (!c->ch_is_idx || (c->is_multicell && (c->x || c->y))) return 0;
     ListOfChars lc = {.chars = buf, .capacity = MAX_NUM_CODEPOINTS_PER_CELL};
     if (!tc_chars_at_index_without_alloc(tc, c->ch_or_idx, &lc)) return 0;
+    size_t i = 0;
+    while (i < lc.count && is_leading_mark(lc.chars[i])) i++;
     unsigned n = 0;
-    for (size_t i = 1; i < lc.count; i++) {
+    for (i++; i < lc.count; i++) {
         const char_type ch = lc.chars[i];
         if (ch - 0x2066u <= 0x2069u - 0x2066u || (ch | 1) == 0x200f || ch == 0x61c) buf[n++] = ch;
     }
@@ -56,6 +59,15 @@ bidi_cells_may_reorder(const CPUCell *cells, index_type num, const TextCache *tc
         if (c->ch_is_idx) {
             if (c->is_multicell && (c->x || c->y)) continue;
             ch = tc_first_char_at_index(tc, ch);
+            // A leading RLM reorders digits and neutrals without an RTL letter, as an RLI does; a leading LRM does not
+            if (is_leading_mark(ch)) {
+                ListOfChars lc = {.chars = buf, .capacity = arraysz(buf)};
+                const unsigned k = cell_leading_marks(c, tc, &lc);
+                for (unsigned i = 0; i < k; i++) {
+                    if (buf[i] == 0x200f) return true;
+                }
+                ch = k < lc.count ? buf[k] : 0;
+            }
         }
         if (bidi_codepoint_may_reorder(ch)) return true;
         if (!c->ch_is_idx) continue;
@@ -67,8 +79,9 @@ bidi_cells_may_reorder(const CPUCell *cells, index_type num, const TextCache *tc
     return false;
 }
 
-// Appends to s->text the characters a row feeds FriBidi: per cell its first char, a blank as U+0020, then the isolate controls and
-// marks after it. Returns the new length, or UINT32_MAX for a row with a cell spanning several rows, which cannot be reordered.
+// Appends to s->text the characters a row feeds FriBidi: per cell the leading marks its text starts with, its first char after
+// them, a blank as U+0020, then the isolate controls and marks after it. Returns the new length, or UINT32_MAX for a row with a
+// cell spanning several rows, which cannot be reordered.
 static inline uint32_t
 feed_row(BidiScratch *s, const CPUCell *cells, index_type cols, const TextCache *tc, uint32_t n) {
     FriBidiChar *restrict text = s->text + n, *const text_start = text;
@@ -79,12 +92,17 @@ feed_row(BidiScratch *s, const CPUCell *cells, index_type cols, const TextCache 
             if (c->scale > 1) return UINT32_MAX;
             if (col && c->x) continue;
         }
-        const char_type ch = cell_first_char(c, tc);
+        char_type buf[MAX_NUM_CODEPOINTS_PER_CELL];
+        ListOfChars lc = {.chars = buf, .capacity = arraysz(buf)};
+        const unsigned k = cell_leading_marks(c, tc, &lc);
+        for (unsigned i = 0; i < k; i++) {
+            *text++ = buf[i];
+            *cell_of_char++ = col | BIDI_EXTRA_CHAR;
+        }
+        const char_type ch = k ? (k < lc.count ? buf[k] : 0) : cell_first_char(c, tc);
         *text++ = ch ? ch : ' ';
         *cell_of_char++ = col;
         if (!c->ch_is_idx) continue;
-        char_type buf[MAX_NUM_CODEPOINTS_PER_CELL];
-        // Within the scratch: bidi_resolve_paragraph() sized it for the chars cell_extra_chars() counted in these same cells
         for (unsigned i = 0, k = cell_extra_chars(c, tc, buf); i < k; i++) {
             *text++ = buf[i];
             *cell_of_char++ = col | BIDI_EXTRA_CHAR;
@@ -122,11 +140,11 @@ retype_controls(BidiScratch *s, uint32_t n) {
 bool
 bidi_resolve_paragraph(
     BidiScratch *s, const CPUCell *const *rows, unsigned num_rows, index_type cols, const TextCache *tc, FriBidiParType base, uint8_t *levels) {
-    // Counted before anything is fed, as the scratch must hold the controls
     size_t extra = 0;
     char_type buf[MAX_NUM_CODEPOINTS_PER_CELL];
+    ListOfChars lc = {.chars = buf, .capacity = arraysz(buf)};
     for (unsigned r = 0; r < num_rows; r++) {
-        for (index_type x = 0; x < cols; x++) extra += cell_extra_chars(rows[r] + x, tc, buf);
+        for (index_type x = 0; x < cols; x++) extra += cell_extra_chars(rows[r] + x, tc, buf) + cell_leading_marks(rows[r] + x, tc, &lc);
     }
     const size_t cap = (size_t)num_rows * cols + extra;
     ensure_space_for(s, text, FriBidiChar, cap, text_cap, cap, false);

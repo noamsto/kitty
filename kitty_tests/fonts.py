@@ -1225,9 +1225,9 @@ class BidiRendering(FontBaseTest):
         sprites = self.sprites if sprites is None else sprites
         return idx, [bytes(sprites[sprite_idx_to_pos(i, setup_for_testing.xnum, setup_for_testing.ynum)]) for i in idx]
 
-    def line(self, text, cols=None, **opts):
+    def line(self, text, cols=None, bdsm=False, **opts):
         s = self.create_screen(cols=cols or len(text), lines=1, scrollback=0, options=opts)
-        parse_bytes(s, text.encode())
+        parse_bytes(s, (('\x1b[8h' if bdsm else '') + text).encode())
         return s.line(0)
 
     def render_text(self, text, cols=None, levels=None):
@@ -1339,6 +1339,13 @@ class BidiRendering(FontBaseTest):
         self.assertNotEqual(px0[0], px0[1])
         self.ae(self.render_text(text, levels=[1, 1])[1], [px0[1], px0[0]])
         self.ae(self.render_text(text, levels=[0, 1])[0][1], 0)
+
+    def test_leading_mark_not_rendered(self):
+        for text in ('abc', '\u05d0\u05d1\u05d2', '\u4f60x', '\u2588', ''):
+            for marks in ('\u200e', '\u200f', '\u200e\u200f'):
+                with self.subTest(text=text, marks=marks):
+                    rendered = (self.render_cells(self.line(m + text, len(text) + 2, bdsm=True))[1] for m in (marks, ''))
+                    self.ae(*rendered)
 
 
 def test_chars(chars: str = '╌', sz: int = 128) -> None:

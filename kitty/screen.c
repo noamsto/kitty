@@ -2006,6 +2006,101 @@ draw_non_ascii_run(Screen *self, text_loop_state *s, const uint32_t *chars, size
     return i;
 }
 
+// In bidi mode, stores num_marks LRM or RLM in the text of the first cell of
+// line y, the cell drawn into with no previous cell, after the marks it already
+// starts with, if the cell then holds at most room code points.
+static bool
+put_leading_marks(Screen *self, index_type y, const char_type *marks, unsigned num_marks, unsigned room) {
+    CPUCell *c = linebuf_cpu_cells_for_line(self->linebuf, y);
+    // no cell can take them without moving the cursor
+    if (c->is_multicell && (c->x || c->y)) return false;
+    text_in_cell(c, self->text_cache, self->lc);
+    const unsigned count = cell_has_text(c) ? self->lc->count : 0;
+    if (count + num_marks > room) return false;
+    unsigned at = 0;
+    while (at < count && is_leading_mark(self->lc->chars[at])) at++;
+    ensure_space_for_chars(self->lc, count + num_marks);
+    memmove(self->lc->chars + at + num_marks, self->lc->chars + at, (count - at) * sizeof(char_type));
+    memcpy(self->lc->chars + at, marks, num_marks * sizeof(char_type));
+    self->lc->count = count + num_marks;
+    // must be computed before the char is changed
+    const MulticellRows rows = multicell_char_rows(self, 0, y);
+    if (!c->is_multicell) {
+        // stored as OSC 66 stores a narrow char of natural width, so that every
+        // writer reaches the multicell code before it overwrites the marks
+        c->is_multicell = true;
+        c->natural_width = true;
+        c->width = 1;
+        c->scale = 1;
+    }
+    c->ch_or_idx = tc_get_or_insert_chars_with_glyph(self->text_cache, self->lc, cell_registered_glyph(c, self->text_cache));
+    c->ch_is_idx = true;
+    const char_type ch_and_idx = c->ch_and_idx;
+    const index_type x_limit = MIN(mcd_x_limit(c), self->columns);
+    for (int v = rows.start; v < rows.limit; v++) {
+        CPUCell *cells = linebuf_cpu_cells_for_line(self->linebuf, v);
+        for (index_type h = 0; h < x_limit; h++) cells[h].ch_and_idx = ch_and_idx;
+        linebuf_mark_line_dirty(self->linebuf, v);
+    }
+    return true;
+}
+
+// Whether c has the shape put_leading_marks() gives a plain narrow cell, unlike an OSC 66 char with a size or alignment
+static inline bool
+is_marked_plain_cell(const CPUCell *c) {
+    return c->natural_width && c->width == 1 && c->scale == 1 && !c->subscale_n && !c->subscale_d && !c->valign && !c->halign;
+}
+
+// Sets the text of c to the text after its leading marks, keeping the glyph protocol glyph bound to it
+static void
+cell_set_chars_after_marks(CPUCell *c, TextCache *tc, const ListOfChars *text, unsigned num_marks) {
+    const ListOfChars rest = {.chars = text->chars + num_marks, .count = text->count - num_marks};
+    VGGlyph *g = cell_registered_glyph(c, tc);
+    if (!g) {
+        cell_set_chars(c, tc, &rest);
+        return;
+    }
+    c->ch_or_idx = tc_get_or_insert_chars_with_glyph(tc, &rest, g);
+    c->ch_is_idx = true;
+}
+
+// Makes the narrow cell c, whose text starts with num_marks marks, a plain cell holding its text without them
+static void
+drop_leading_marks(CPUCell *c, TextCache *tc, const ListOfChars *text, unsigned num_marks) {
+    cell_clear_multicell(c);
+    cell_set_chars_after_marks(c, tc, text, num_marks);
+}
+
+// Takes the marks the first cell of line y starts with out of its char, for ICH in column 0 to put back in column 0,
+// returning how many it took. An OSC 66 char keeps its shape and shifts as without marks.
+static unsigned
+lift_leading_marks(Screen *self, index_type y, ListOfChars *marks) {
+    CPUCell *cp = linebuf_cpu_cells_for_line(self->linebuf, y);
+    const unsigned num_marks = cell_leading_marks(cp, self->text_cache, marks);
+    if (!num_marks) return 0;
+    if (marks->count == num_marks) nuke_multicell_char_at(self, 0, y, false);
+    else if (is_marked_plain_cell(cp)) drop_leading_marks(cp, self->text_cache, marks, num_marks);
+    else if (cp->scale == 1) {
+        // a multiline char is erased by the shift, so only a single line one needs its text
+        cell_set_chars_after_marks(cp, self->text_cache, marks, num_marks);
+        const index_type x_limit = MIN(mcd_x_limit(cp), self->columns);
+        for (index_type x = 1; x < x_limit; x++) cp[x].ch_and_idx = cp->ch_and_idx;
+    }
+    return num_marks;
+}
+
+// In bidi mode the char drawn with no previous cell into the multicell cell under the cursor keeps the marks the cell
+// starts with, returning how many it keeps
+static unsigned
+nuke_multicell_char_keeping_marks(Screen *self, text_loop_state *s, ListOfChars *marks) {
+    CPUCell *c = s->cp + self->cursor->x;
+    const unsigned num_marks = cell_leading_marks(c, self->text_cache, marks);
+    // in insert mode a narrow char after the marks moves right, as it does without them
+    if (num_marks && self->modes.mIRM && marks->count > num_marks && is_marked_plain_cell(c)) drop_leading_marks(c, self->text_cache, marks, num_marks);
+    else nuke_multicell_char_at(self, self->cursor->x, self->cursor->y, c->x != 0);
+    return num_marks;
+}
+
 static inline __attribute__((always_inline)) void
 draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_state *s, const bool implicit, const uint8_t record) {
     init_text_loop_line(self, s);
@@ -2013,7 +2108,10 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
 #define TEMPLATE_CELLS 16
     CPUCell cpu_template[TEMPLATE_CELLS];
     bool templates_initialized = false;
+    char_type mark_buf[MAX_NUM_CODEPOINTS_PER_CELL];
+    ListOfChars marks = {.chars = mark_buf, .capacity = arraysz(mark_buf)};
     for (size_t i = 0; i < num_chars; i++) {
+        unsigned num_marks = 0;
         uint32_t ch = map_char(self, chars[i]);
         if (ch < DEL && s->seg.grapheme_break <= GBP_None) { // fast path for printable ASCII
             if (ch < ' ') {
@@ -2112,6 +2210,9 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
                         const bool was_multicell = pc->is_multicell;
                         draw_combining_char(self, s, ch);
                         if (implicit) record_combining_write(self, pc, py, before, was_multicell, record);
+                    } else if (implicit && is_leading_mark(ch)) {
+                        if (put_leading_marks(self, self->cursor->y, &ch, 1, MAX_NUM_CODEPOINTS_PER_CELL - 1))
+                            record_written_line(self, self->cursor->y, record);
                     }
                     continue;
                 }
@@ -2120,7 +2221,8 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
         }
 
         if (self->cursor->x < self->columns && s->cp[self->cursor->x].is_multicell) {
-            if (s->cp[self->cursor->x].y) {
+            if (implicit && !s->prev.cc && !s->cp[self->cursor->x].y) num_marks = nuke_multicell_char_keeping_marks(self, s, &marks);
+            else if (s->cp[self->cursor->x].y) {
                 move_cursor_past_multicell(self, 1);
                 reinit_text_loop_line(self, s);
             } else nuke_multicell_char_at(self, self->cursor->x, self->cursor->y, s->cp[self->cursor->x].x != 0);
@@ -2175,6 +2277,7 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
             self->cursor->x++;
             fc->is_multicell = false;
         }
+        if (implicit && UNLIKELY(num_marks) && !s->prev.x) put_leading_marks(self, s->prev.y, marks.chars, num_marks, MAX_NUM_CODEPOINTS_PER_CELL);
         if (implicit) record_written_line(self, s->prev.y, record);
     }
 #undef init_line
@@ -2203,7 +2306,7 @@ draw_text(Screen *self, const uint32_t *chars, size_t num_chars) {
     draw_text_loop_(self, chars, num_chars, &s, false, 0);
 }
 
-// Text written in implicit bidi mode records each line it is written to
+// Text written in implicit bidi mode records each line it is written to and keeps LRM and RLM at the start of a line
 static void
 draw_text_implicit(Screen *self, const uint32_t *chars, size_t num_chars) {
     PREPARE_FOR_DRAW_TEXT;
@@ -3999,9 +4102,16 @@ screen_insert_characters(Screen *self, unsigned int count) {
     if (self->cursor->y <= bottom) {
         unsigned int x = self->cursor->x;
         unsigned int num = MIN(self->columns - x, count);
+        char_type mark_buf[MAX_NUM_CODEPOINTS_PER_CELL];
+        ListOfChars marks = {.chars = mark_buf, .capacity = arraysz(mark_buf)};
+        // only a multicell cell can hold leading marks, and they stay in column 0
+        const unsigned num_marks = UNLIKELY(self->modes.mBDSM) && !x && linebuf_cpu_cells_for_line(self->linebuf, self->cursor->y)->is_multicell
+                                       ? lift_leading_marks(self, self->cursor->y, &marks)
+                                       : 0;
         insert_characters(self, x, num, self->cursor->y, false);
         linebuf_init_line(self->linebuf, self->cursor->y);
         line_apply_cursor(self->linebuf->line, self->cursor, x, num, true);
+        if (UNLIKELY(num_marks)) put_leading_marks(self, self->cursor->y, marks.chars, num_marks, MAX_NUM_CODEPOINTS_PER_CELL);
         linebuf_mark_line_dirty(self->linebuf, self->cursor->y);
         self->is_dirty = true;
         clear_intersecting_selections(self, self->cursor->y);
@@ -6192,7 +6302,10 @@ current_url_text(Screen *self, PyObject *args UNUSED) {
             } else ans = Py_NewRef(text);
         }
     }
-    return Py_NewRef(ans ? ans : Py_None);
+    if (!ans) Py_RETURN_NONE;
+    Py_ssize_t start = 0, len = PyUnicode_GET_LENGTH(ans);
+    while (start < len && is_leading_mark(PyUnicode_READ_CHAR(ans, start))) start++;
+    return PyUnicode_Substring(ans, start, len);
 }
 
 
@@ -7616,6 +7729,11 @@ is_opt_word_char(char_type ch, bool forward) {
 static bool
 is_char_ok_for_word_extension(Line *line, index_type x, bool forward) {
     char_type ch = cell_first_char(line->cpu_cells + x, line->text_cache);
+    if (is_leading_mark(ch)) {
+        RAII_ListOfChars(lc);
+        text_in_cell_without_leading_marks(line->cpu_cells + x, line->text_cache, &lc);
+        ch = lc.chars[0];
+    }
     if (char_props_for(ch).is_word_char || is_opt_word_char(ch, forward)) return true;
     // pass : from :// so that common URLs are matched
     return ch == ':' && x + 2 < line->xnum && cell_is_char(line->cpu_cells + x + 1, '/') && cell_is_char(line->cpu_cells + x + 2, '/');

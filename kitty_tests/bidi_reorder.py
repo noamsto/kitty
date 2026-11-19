@@ -635,6 +635,50 @@ class TestBidiReorder(BaseTest):
         s.test_update_overlay_text('')
         self.ae((s.test_bidi_line_record(0), orders(s)[0]), (record, None))
 
+    def test_leading_mark_layout(self):
+        # a leading mark is the first strong char of its paragraph under ?2501; an RLM alone makes an LTR row reorder, as the digits
+        # after it stay EN, which N1 treats as R
+        for seqs, text, want in (
+            ((AUTO,), RLM + 'abc', '       ' + RLM + 'abc'),
+            ((AUTO,), LRM + A, 'גב' + LRM + 'א'),
+            ((AUTO,), RLM, '         ' + RLM),
+            ((AUTO, 'abc\r'), RLM, '       ' + RLM + 'abc'),
+            ((), RLM + '1 2', '2 ' + RLM + '1'),
+            ((), LRM + RLM + '1 2', '2 ' + LRM + RLM + '1'),
+            ((SCP_RTL,), LRM + '1 2', '       ' + LRM + '1 2'),  # by W7 the digits after the LRM are L
+            ((), LRM + 'א 1', '1 ' + LRM + 'א'),
+        ):
+            with self.subTest(seqs=seqs, text=text):
+                self.ae(visual(self.screen(*seqs, text=text)), want)
+        for seqs, text in (((AUTO,), 'abc'), ((), '1 2'), ((), LRM + '1 2'), ((), LRM), ((), RLM)):
+            self.assertIsNone(orders(self.screen(*seqs, text=text))[0], text)
+        self.assertIsNone(orders(self.screen(AUTO, text=RLM + 'abc', force_ltr=True))[0])
+        # the marks are fed once, before the char: the ! between the RLM and the a is L, so a beam on it is on its own edge
+        self.ae(self.drawn(self.screen(text=LRM + RLM + '!a'), 0, CURSOR_BEAM), 0)
+        # without bidi mode, or before it, the mark is dropped
+        s = self.create_screen(cols=10, options={})
+        pb(s, RLM + '\x1b[8h' + AUTO + 'abc')
+        self.ae((s.cpu_cells(0, 0)['text'], orders(s)[0]), ('a', None))
+        # ICH in column 0 leaves the marks there, before what it shifts, and a char drawn there keeps them
+        self.ae(visual(self.written('\r\x1b[@', text=RLM + '1 2')), '2 1' + RLM)
+        self.ae(visual(self.written('\r\x1b[@x', text=RLM + '1 2')), RLM + 'x1 2')
+        s, f = self.written('\r\x1b[@\x1b[3G1 2', text=RLM), self.written('\r\x1b[@', text=RLM + ' 1 2')
+        self.ae(([s.cpu_cells(0, x)['text'] for x in range(2)], [f.cpu_cells(0, x)['text'] for x in range(2)]), ([RLM, ''], [RLM, ' ']))
+        self.ae(orders(s), orders(f))
+        self.assertIsNotNone(orders(s)[0])
+        # a cell that loses its mark is resolved again
+        s = self.screen(AUTO, text=RLM + 'abc')
+        pb(s, '\r\x1b[Xa')
+        self.ae((s.cpu_cells(0, 0)['text'], orders(s)[0]), ('a', None))
+        # the pre-edit is drawn over a marks-only cell, which keeps its mark
+        for preedit in ('xy', RLM + 'xy'):
+            s = self.screen(text=RLM)
+            s.test_update_overlay_text(preedit)
+            frame(s)
+            s.test_update_overlay_text('')
+            s.draw('a')
+            self.ae(s.cpu_cells(0, 0)['text'], RLM + 'a')
+
     # The randomized differential: after every frame, the cell data uploaded for a screen that is rendered after each operation
     # equals that of a fresh screen given the same operations and rendered once. Paragraphs longer than a screen are left out, as
     # one longer than the resolve window is laid out from the part of it in the window, which depends on where the view was.

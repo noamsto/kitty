@@ -403,7 +403,19 @@ For each decoded code point:
    the Unicode standard.
 
 #. If there is no previous cell and the code point's width is zero,
-   the code point is discarded and its processing is finished.
+   the code point is discarded and its processing is finished. The one
+   exception is in bidi mode (``CSI 8 h``): :code:`U+200E LEFT-TO-RIGHT MARK`
+   and :code:`U+200F RIGHT-TO-LEFT MARK`, which set the direction of the
+   line's text, are kept. Such a mark is stored in the current cell, after
+   any marks the cell already starts with and before the rest of its text,
+   and the cursor does not move. A cell that held nothing shows empty. A
+   character later written into that cell while there is still no
+   previous cell replaces what follows the marks, and the marks stay first,
+   also for a wide character. The mark
+   is discarded instead when the current cell is part of a multiline
+   character other than its top left cell, or when the cell already holds
+   the maximum number of code points per cell less one. Text copied from
+   the screen contains the marks.
 
 #. If there is a previous cell, the
    `Grapheme segmentation algorithm UAX29-C1-1 <https://www.unicode.org/reports/tr29/#C1-1>`__

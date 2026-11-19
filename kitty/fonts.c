@@ -960,7 +960,7 @@ font_for_cell(
     FontGroup *fg, const CPUCell *cpu_cell, const GPUCell *gpu_cell, bool *is_main_font, bool *is_emoji_presentation, TextCache *tc, ListOfChars *lc) {
     *is_main_font = false;
     *is_emoji_presentation = false;
-    text_in_cell(cpu_cell, tc, lc);
+    text_in_cell_without_leading_marks(cpu_cell, tc, lc);
     START_ALLOW_CASE_RANGE
     ssize_t ans;
     switch (lc->chars[0]) {
@@ -2746,7 +2746,7 @@ render_line(
             cell_font.multicell_y = cpu_cell->y;
         }
         if (levels) cell_font.level = levels[i];
-        text_in_cell(cpu_cell, line->text_cache, lc);
+        text_in_cell_without_leading_marks(cpu_cell, line->text_cache, lc);
         bool is_main_font, is_emoji_presentation;
         GPUCell *gpu_cell = gpu_cells + i;
         const char_type first_ch = lc->chars[0];

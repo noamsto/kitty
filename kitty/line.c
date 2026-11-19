@@ -260,7 +260,13 @@ prefix_matches(Line *self, index_type at, const char_type *prefix, index_type pr
     if (prefix_len > at) return false;
     while (prefix_len--) {
         at = prev_char_pos(self, at, 1);
-        if (at >= self->xnum || cell_scale(self->cpu_cells + at) != scale || !cell_is_char(self->cpu_cells + at, prefix[prefix_len])) return false;
+        if (at >= self->xnum || cell_scale(self->cpu_cells + at) != scale) return false;
+        const CPUCell *c = self->cpu_cells + at;
+        if (cell_is_char(c, prefix[prefix_len])) continue;
+        if (!is_leading_mark(cell_first_char(c, self->text_cache))) return false;
+        RAII_ListOfChars(lc);
+        text_in_cell_without_leading_marks(c, self->text_cache, &lc);
+        if (lc.count != 1 || lc.chars[0] != prefix[prefix_len]) return false;
     }
     return true;
 }

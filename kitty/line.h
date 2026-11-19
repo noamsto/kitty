@@ -211,6 +211,35 @@ text_in_cell(const CPUCell *c, const TextCache *tc, ListOfChars *ans) {
     }
 }
 
+// U+200E LRM and U+200F RLM, which in bidi mode the first cell of a line can hold before its text
+static inline bool
+is_leading_mark(char_type ch) {
+    return (ch | 1) == 0x200f;
+}
+
+// Stores in lc the text of a cell that starts with such marks, returning how many it starts with
+static inline unsigned
+cell_leading_marks(const CPUCell *c, const TextCache *tc, ListOfChars *lc) {
+    if (!c->ch_is_idx || (c->is_multicell && (c->x || c->y)) || !is_leading_mark(tc_first_char_at_index(tc, c->ch_or_idx))) return 0;
+    if (!tc_chars_at_index_without_alloc(tc, c->ch_or_idx, lc)) return 0;
+    unsigned n = 0;
+    while (n < lc->count && is_leading_mark(lc->chars[n])) n++;
+    return n;
+}
+
+static inline void
+text_in_cell_without_leading_marks(const CPUCell *c, const TextCache *tc, ListOfChars *ans) {
+    text_in_cell(c, tc, ans);
+    if (!c->ch_is_idx) return;
+    unsigned n = 0;
+    while (n < ans->count && is_leading_mark(ans->chars[n])) n++;
+    if (!n) return;
+    ans->count -= n;
+    memmove(ans->chars, ans->chars + n, ans->count * sizeof(ans->chars[0]));
+    // a cell with only marks reads as an empty one
+    if (!ans->count) ans->chars[ans->count++] = 0;
+}
+
 static inline bool
 text_in_cell_without_alloc(const CPUCell *c, const TextCache *tc, ListOfChars *ans) {
     if (c->ch_is_idx) {
