@@ -16,6 +16,9 @@
 #define BIDI_KEY_DIR_SHIFT 16
 // Bits 32..47 of para_rows hold the paragraph's cursor gap column, 0 for none
 #define BIDI_KEY_GAP_SHIFT 32
+// Bits 48..56 of para_rows hold the row of an isolate region's cursor gap in the paragraph when bits 32..47 hold its column;
+// a paragraph's own gap is on its last row and leaves them 0
+#define BIDI_KEY_GAP_ROW_SHIFT 48
 // Steps per character a paragraph's bracket pairing (N0) may walk back to a letter or digit before it is skipped
 #define BIDI_N0_SCAN_PER_CHAR 16
 // Combined isolate controls a paragraph may feed FriBidi, as before 1.0.17 each FSI can scan to the paragraph end; over it none are fed
@@ -155,10 +158,15 @@ bool bidi_row_has_isolates(const CPUCell *cells, index_type num, const TextCache
 // Lays out the row's isolate regions, each the chars strictly between a top-level initiator its cells hold as a control and
 // the PDI closing it on the row, as a paragraph of its own with the initiator's base, every other cell in place at level 0.
 // Writes the row's map and sets its region_row, or drops it when no region reorders. Returns whether the row got a map.
-bool bidi_resolve_regions(BidiMaps *b, const CPUCell *cells, const TextCache *tc, index_type render_row);
+// gap_x is the cursor's column on the row, 0 for none: the region it is the bidi_region_cursor_gap() of shows the cursor gap.
+bool bidi_resolve_regions(BidiMaps *b, const CPUCell *cells, const TextCache *tc, index_type render_row, index_type gap_x);
 // The region bidi_resolve_regions() lays out whose chars include the one starting in or spanning the logical cell x: its
 // cells [*start, *end) and its resolved base. False when x is in no region or the row cannot be fed. Overwrites the scratch.
 bool bidi_region_at(BidiMaps *b, const CPUCell *cells, const TextCache *tc, index_type x, index_type *start, index_type *end, bool *rtl);
+// x when lo < x < hi and the cells from x - 1 to hi are all gap cells: the cursor gap in the region of cells [lo, hi), else 0
+index_type bidi_region_cursor_gap(const CPUCell *cells, index_type lo, index_type hi, index_type x, const TextCache *tc);
+// The bidi_region_cursor_gap() of the cursor at x in the region bidi_region_at() finds, else 0. Overwrites the scratch.
+index_type bidi_region_gap(BidiMaps *b, const CPUCell *cells, const TextCache *tc, index_type x);
 
 // The queries below are the identity, or false, for a row without a map.
 // The visual column of the left edge of the logical cell x spanning span cells

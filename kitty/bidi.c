@@ -416,9 +416,10 @@ is_strong_or_number(FriBidiCharType t) {
 // as at that level the next char joins the paragraph's run and L1 already shows it, when keep_typed_blanks() left the
 // gap's last blank at the paragraph level, when the probe moves no level up to p, and when the last blank ends off the
 // paragraph level. Retypes the gap's blanks as their level's direction so that fribidi_reorder_line()'s own L1 leaves
-// them. Returns the new n_trim, one past the gap, or n_trim unchanged.
+// them. The paragraph's chars start at first: 0 for a paragraph, the region's first for an isolate region, whose memmoves
+// then write the closing PDI's slot n. Returns the new n_trim, one past the gap, or n_trim unchanged.
 static uint32_t
-show_typed_gap(BidiMaps *b, uint32_t row_first, uint32_t gap_x, FriBidiLevel par, uint32_t n_trim, uint32_t n) {
+show_typed_gap(BidiMaps *b, uint32_t first, uint32_t row_first, uint32_t gap_x, FriBidiLevel par, uint32_t n_trim, uint32_t n) {
     uint32_t c0 = row_first;
     while (c0 < n && (b->cell_of_char[c0] & 0xffff) < gap_x) c0++;
     for (uint32_t i = c0; i < n; i++) {
@@ -446,14 +447,15 @@ show_typed_gap(BidiMaps *b, uint32_t row_first, uint32_t gap_x, FriBidiLevel par
     b->brackets[P] = FRIBIDI_NO_BRACKET;
     // The resolved direction, so that the probe cannot flip an auto paragraph
     FriBidiParType dir = par ? FRIBIDI_PAR_RTL : FRIBIDI_PAR_LTR;
-    const FriBidiLevel max_level = fribidi_get_par_embedding_levels_ex(b->types, b->brackets, (FriBidiStrIndex)(len + 1), &dir, b->probe_levels);
+    const FriBidiLevel max_level = fribidi_get_par_embedding_levels_ex(
+        b->types + first, b->brackets + first, (FriBidiStrIndex)(len + 1 - first), &dir, b->probe_levels + first);
     memmove(b->types + P, b->types + P + 1, (n - P) * sizeof(b->types[0]));
     memmove(b->brackets + P, b->brackets + P + 1, (n - P) * sizeof(b->brackets[0]));
     if (!max_level) {
         b->resolve_cacheable = false;
         return n_trim;
     }
-    for (uint32_t i = 0; i <= p; i++) {
+    for (uint32_t i = first; i <= p; i++) {
         if (b->probe_levels[i] != b->para_levels[i]) return n_trim;
     }
     if (b->probe_levels[P - 1] == par) return n_trim;
@@ -545,7 +547,7 @@ resolve_levels(BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const
     // Only an LTR result can leave every level at 0, an RTL one has them all at 1 or more
     if (max_level <= 1) return false;
     if (feed_iso && n_trim < n && !b->no_trim) n_trim += keep_typed_blanks(b, rows[num_rows - 1], n_trim, n, gap_x);
-    if (gap_x && !b->no_trim) n_trim = show_typed_gap(b, b->row_start[num_rows - 1], gap_x, *base == FRIBIDI_PAR_RTL, n_trim, n);
+    if (gap_x && !b->no_trim) n_trim = show_typed_gap(b, 0, b->row_start[num_rows - 1], gap_x, *base == FRIBIDI_PAR_RTL, n_trim, n);
     for (uint32_t i = n_trim; i < n; i++) b->para_levels[i] = *base == FRIBIDI_PAR_RTL;
     *n_trim_out = n_trim;
     return true;
@@ -800,8 +802,32 @@ next_region(const BidiMaps *b, uint32_t n, uint32_t *i, uint32_t *open, uint32_t
     return false;
 }
 
+// The cells [*lo, *hi) the chars of the region from open to close start in. False for a region of controls only, as
+// controls take no cell.
+static bool
+region_cells(const BidiMaps *b, const CPUCell *cells, uint32_t open, uint32_t close, index_type *lo, index_type *hi) {
+    uint32_t first = open + 1, last = close;
+    while (first < close && (b->cell_of_char[first] & BIDI_EXTRA_CHAR)) first++;
+    if (first == close) return false;
+    while (b->cell_of_char[last - 1] & BIDI_EXTRA_CHAR) last--;
+    *lo = b->cell_of_char[first] & 0xffff;
+    const index_type last_col = b->cell_of_char[last - 1] & 0xffff;
+    const CPUCell *c = cells + last_col;
+    *hi = MIN(last_col + (c->is_multicell ? mcd_x_limit(c) - c->x : 1u), b->cols);
+    return true;
+}
+
+index_type
+bidi_region_cursor_gap(const CPUCell *cells, index_type lo, index_type hi, index_type x, const TextCache *tc) {
+    if (x <= lo || x >= hi) return 0;
+    for (index_type i = x - 1; i < hi; i++) {
+        if (!bidi_cell_is_gap(cells + i, tc)) return 0;
+    }
+    return x;
+}
+
 bool
-bidi_resolve_regions(BidiMaps *b, const CPUCell *cells, const TextCache *tc, index_type render_row) {
+bidi_resolve_regions(BidiMaps *b, const CPUCell *cells, const TextCache *tc, index_type render_row, index_type gap_x) {
     b->resolve_cacheable = true;
     b->resolve_signed = false;
     b->rtl[render_row] = false;
@@ -845,6 +871,15 @@ bidi_resolve_regions(BidiMaps *b, const CPUCell *cells, const TextCache *tc, ind
         if (max_level == 1) continue;
         if (max_level) {
             base = FRIBIDI_IS_RTL(base) ? FRIBIDI_PAR_RTL : FRIBIDI_PAR_LTR;
+            index_type lo, hi;
+            if (gap_x && region_cells(b, cells, open, close, &lo, &hi) && bidi_region_cursor_gap(cells, lo, hi, gap_x, tc)) {
+                // Its memmoves leave the closing PDI's slot holding the region's last char
+                const FriBidiCharType close_type = b->types[close];
+                const FriBidiBracketType close_bracket = b->brackets[close];
+                show_typed_gap(b, s, s, gap_x, base == FRIBIDI_PAR_RTL, close, close);
+                b->types[close] = close_type;
+                b->brackets[close] = close_bracket;
+            }
             // As one line, so L1 puts the region's trailing blanks at its base level: a short RTL region is right-aligned
             if (fribidi_reorder_line(0, b->types, (FriBidiStrIndex)len, (FriBidiStrIndex)s, base, b->para_levels, NULL, b->map)) {
                 any = true;
@@ -887,17 +922,10 @@ bidi_region_at(BidiMaps *b, const CPUCell *cells, const TextCache *tc, index_typ
     const uint32_t n = feed_region_row(b, cells, tc);
     if (n == UINT32_MAX) return false;
     for (uint32_t i = 0, open = 0, close = 0; next_region(b, n, &i, &open, &close);) {
-        // The region's cells are those its chars start in: controls take no cell, so a region of controls only has none
-        uint32_t first = open + 1, last = close;
-        while (first < close && (b->cell_of_char[first] & BIDI_EXTRA_CHAR)) first++;
-        if (first == close) continue;
-        while (b->cell_of_char[last - 1] & BIDI_EXTRA_CHAR) last--;
-        const index_type lo = b->cell_of_char[first] & 0xffff;
+        index_type lo, hi;
+        if (!region_cells(b, cells, open, close, &lo, &hi)) continue;
         // Regions come in column order
         if (x < lo) return false;
-        const index_type last_col = b->cell_of_char[last - 1] & 0xffff;
-        const CPUCell *c = cells + last_col;
-        const index_type hi = MIN(last_col + (c->is_multicell ? mcd_x_limit(c) - c->x : 1u), b->cols);
         if (x >= hi) continue;
         *start = lo;
         *end = hi;
@@ -905,6 +933,14 @@ bidi_region_at(BidiMaps *b, const CPUCell *cells, const TextCache *tc, index_typ
         return true;
     }
     return false;
+}
+
+index_type
+bidi_region_gap(BidiMaps *b, const CPUCell *cells, const TextCache *tc, index_type x) {
+    index_type lo, hi;
+    bool rtl;
+    if (!x || x >= b->cols || !bidi_region_at(b, cells, tc, x, &lo, &hi, &rtl)) return 0;
+    return bidi_region_cursor_gap(cells, lo, hi, x, tc);
 }
 
 static inline bool
