@@ -5487,9 +5487,9 @@ class TestBidiReorder(BaseTest):
         return ''.join(''.join(ch for ch in t if ch not in BIDI_CONTROLS) or ' ' for t in cells)
 
     def row_layout(self, s, y, x):
-        # (beam cursor, block cursor column, visual, v2l) of row y with the cursor at x
-        v2l = self.region_maps(s, y)[0]
-        return self.cursor_at(s, x, CURSOR_BEAM, y), self.cursor_at(s, x, CURSOR_BLOCK, y)[0], self.visual(s, y), v2l
+        # (beam cursor, block cursor column, visual, v2l, levels) of row y with the cursor at x
+        v2l, levels = self.region_maps(s, y)
+        return self.cursor_at(s, x, CURSOR_BEAM, y), self.cursor_at(s, x, CURSOR_BLOCK, y)[0], self.visual(s, y), v2l, levels
 
     def tmux_oracle(self, width, prompt, typed):
         # the pane's text laid out alone in outer bidi mode: the typed blanks are spaces, the cells after them are erased
@@ -5500,7 +5500,7 @@ class TestBidiReorder(BaseTest):
         return self.row_layout(s, 0, x)
 
     def assert_layout(self, got, want, label=''):
-        for what, g, w in zip(('beam', 'block', 'visual', 'v2l'), got, want):
+        for what, g, w in zip(('beam', 'block', 'visual', 'v2l', 'levels'), got, want):
             with self.subTest(what, label=label):
                 self.ae(g, w)
 
@@ -5515,6 +5515,9 @@ class TestBidiReorder(BaseTest):
             ('typing stage 5', 'שלום', 1, 'erased', 1),
             ('typing stage 9', 'שלום abc', 1, 'erased', 6),
             ('typing stage 10', 'שלום abc d', 0, 'erased', None),
+            ('number after RTL', 'אב 12', 1, 'erased', 1),
+            ('number after RTL, two spaces', 'אב 12', 2, 'erased', 1),
+            ('bracket after RTL', 'אב (', 1, 'spaces', 1),
         )
         for name, prompt, typed, pad, beam in cases:
             with self.subTest(name):
@@ -5554,10 +5557,13 @@ class TestBidiReorder(BaseTest):
                     want = self.tmux_oracle(pw, 'אני a', typed)
                     mine = slice(off, off + pw)
                     with self.subTest('prompt pane cursor'):
-                        self.ae((got[0][0] - off, got[1] - off), (want[0][0], want[1]))
+                        self.ae((got[0][0] - off, got[0][1], got[1] - off), (want[0][0], want[0][1], want[1]))
                     with self.subTest('prompt pane visual'):
                         self.ae(got[2][mine], want[2])
                     v2l, levels = self.region_maps(s, 0)
+                    with self.subTest('prompt pane maps'):
+                        self.ae(tuple(v - off for v in v2l[mine]), want[3])
+                        self.ae(levels[mine], want[4])
                     with self.subTest('other pane and border'):
                         self.ae((v2l[other], levels[other]), (b_v2l[other], b_levels[other]))
                         self.ae(s.line(0)[pw], before.line(0)[pw])
@@ -5588,6 +5594,43 @@ class TestBidiReorder(BaseTest):
                 self.assertTrue(s.test_bidi_cursor_gap_changed())
             with self.subTest('gap layout restored'):
                 self.ae(self.row_layout(s, 0, 8), want_gap)
+
+        with self.subTest('c: the cursor moves from one gap to another'):
+
+            def build_at(x):
+                s = self.alt(20)
+                self.tmux_row(s, 0, 'אני a', 2, 20, 'spaces')
+                if x is not None:
+                    s.cursor_position(1, x + 1)
+                return s
+
+            ref = build_at(8)
+            want = (self.region_maps(ref, 0), self.cursor_at(ref, 8, CURSOR_BEAM))
+            s = build_at(None)
+            test_screen_update_cell_data(s)
+            s.cursor_position(1, 9)
+            self.assertTrue(s.test_bidi_cursor_gap_changed())
+            self.ae((self.region_maps(s, 0), self.cursor_at(s, 8, CURSOR_BEAM)), want)
+
+        with self.subTest('d: the cursor row is a wrapped row of a region paragraph'):
+            seg = 'x ' + FSI + 'a אב' + '  ' + PDI
+
+            def build_wrapped(pos):
+                s = self.alt(20)
+                parse_bytes(s, (seg + 'y' * 12 + seg).encode())
+                s.cursor_position(*pos)
+                return s
+
+            s = build_wrapped((1, 8))
+            for y in (0, 1):
+                self.ae(s.cpu_cells(y, 7)['text'], ' ' + PDI, f'row {y} x=7')
+            ref = build_wrapped((2, 8))
+            want = tuple(self.region_maps(ref, y) for y in (0, 1))
+            s = build_wrapped((1, 8))
+            test_screen_update_cell_data(s)
+            s.cursor_position(2, 8)
+            self.assertTrue(s.test_bidi_cursor_gap_changed())
+            self.ae(tuple(self.region_maps(s, y) for y in (0, 1)), want)
 
         with self.subTest('b: cursor-only moves that enter no gap resolve nothing'):
             s = self.alt(20)

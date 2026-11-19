@@ -5500,12 +5500,15 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued) {
     // So does the cursor gap of an isolate region on the cursor row of unstamped rows. The memo must be current before the key
     // is compared, and a dirty row cannot hit anyway.
     index_type region_gap = 0;
+    bool gap_row_refreshed = false;
     if (!*continued && src->gap_y >= first && src->gap_y <= last && lead_raw.bidi_stamp == BIDI_STAMP_NONE) {
         LineAttrs *a = bidi_row_attrs(src, src->gap_y);
         const CPUCell *cells = around[src->gap_y - y0];
         if (a->bidi_stamp == BIDI_STAMP_NONE) {
-            if (a->has_dirty_text && src->linebuf->bidi_regions)
+            if (a->has_dirty_text && src->linebuf->bidi_regions) {
                 a->bidi_auto = bidi_cells_have_idx(cells, src->linebuf->xnum) && bidi_row_has_isolates(cells, src->linebuf->xnum, src->screen->text_cache);
+                gap_row_refreshed = true;
+            }
             if (line_attrs_region_memo(*a)) region_gap = bidi_region_gap(b, cells, src->screen->text_cache, src->cursor_x);
         }
     }
@@ -5547,7 +5550,7 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued) {
         if (a->has_dirty_text) {
             const CPUCell *cells = around[y - y0];
             if (a->bidi_stamp != BIDI_STAMP_NONE) a->bidi_stamp = bidi_row_memo(cells, src->linebuf->xnum, tc);
-            else if (src->linebuf->bidi_regions)
+            else if (src->linebuf->bidi_regions && !(gap_row_refreshed && y == src->gap_y))
                 a->bidi_auto = bidi_cells_have_idx(cells, src->linebuf->xnum) && bidi_row_has_isolates(cells, src->linebuf->xnum, tc);
         }
         rtl |= a->bidi_stamp == BIDI_STAMP_RTL || (a->bidi_stamp == BIDI_STAMP_ISOLATES && bidi_cells_may_reorder(around[y - y0], src->linebuf->xnum, tc));
