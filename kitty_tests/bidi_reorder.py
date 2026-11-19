@@ -5,7 +5,7 @@ import os
 import random
 import struct
 
-from kitty.fast_data_types import CURSOR_BEAM, CURSOR_BLOCK, CURSOR_HOLLOW, CURSOR_UNDERLINE, get_options, test_screen_update_cell_data
+from kitty.fast_data_types import BIDI_MAX_ISOLATES, CURSOR_BEAM, CURSOR_BLOCK, CURSOR_HOLLOW, CURSOR_UNDERLINE, get_options, test_screen_update_cell_data
 from kitty.fonts.render import setup_for_testing
 
 from .base import BaseTest, draw_multicell, parse_bytes
@@ -13,7 +13,7 @@ from .base import BaseTest, draw_multicell, parse_bytes
 A = 'אבג'  # three Hebrew letters, bidi class R
 MIXED = 'abc' + A
 NSI = 'אב 12'  # R R WS EN EN: its map (3, 4, 2, 1, 0) is not its own inverse
-RLM = '‏'
+LRM, RLM = '‎', '‏'
 ISOLATES = '⁦⁧⁨⁩'  # LRI RLI FSI PDI
 LRE, RLE, PDF, LRO, RLO = '‪‫‬‭‮'
 AUTO, SCP_RTL, SCP_LTR = '\x1b[?2501h', '\x1b[2 k', '\x1b[1 k'
@@ -234,6 +234,59 @@ class TestBidiReorder(BaseTest):
                 neutral = orders(self.written(osc66_controls(text, '!'), cols=cols, lines=lines))
                 self.assertIsNotNone(neutral[0])
                 self.ae(orders(self.written(osc66_controls(text), cols=cols, lines=lines)), neutral)
+
+    def test_combined_isolates(self):
+        # each control is written right after a drawn char, so it is stored in that char's cell and takes no column
+        for text, cells in (('a⁧bc⁩', ['a⁧', 'b', 'c⁩']), ('a⁦b⁩c', ['a⁦', 'b⁩', 'c']), ('a' + RLE + 'bc' + PDF, ['a' + RLE, 'b', 'c' + PDF])):
+            s = self.screen(text=text)
+            self.ae(([s.line(0)[i] for i in range(len(cells) + 1)], s.cursor.x), (cells + ['\x00'], len(cells)))
+        for text, seqs, cols, rows in (
+            ('a⁧12 34⁩', (), 10, ['a⁧34⁩ 12']),  # RLI makes the digits level 2 and the space between them R
+            ('a⁧bc!⁩', (), 10, ['a⁧!⁩bc']),  # the ! takes the isolate's direction (N2, eos R)
+            ('a⁨א!', (), 10, ['a⁨!א']),  # without the FSI the ! would take the paragraph's L
+            ('a⁧!b⁩c', (), 10, ['a⁧b⁩!c']),  # the PDI ends the isolate
+            ('א⁦!a⁩ג', (AUTO,), 10, ['      ג!a⁩א⁦']),  # LRI in an RTL paragraph makes the ! L
+            ('a⁧b😀⁩c', (), 10, ['a⁧😀⁩bc']),  # a wide cell holds the PDI
+            ('a⁧12 中⁩x', (), 10, ['a⁧中⁩ 12x']),
+            ('a⁨אבגדהו!', (), 5, ['a⁨דגבא', '!וה']),  # an unmatched FSI isolates to the paragraph end, across the soft wrap
+            # marks combined after a char are fed too
+            ('C++' + LRM, (SCP_RTL,), 10, ['       C++' + LRM]),  # the + take the direction of C and the LRM (N1)
+            ('12' + RLM + ' 34', (), 10, ['12' + RLM + '34']),  # the space between the RLM and 34 is R
+            ('12؜ 34', (), 10, ['12؜34']),  # ALM makes 34 an Arabic number (W2)
+        ):
+            with self.subTest(text=text):
+                s = self.screen(*seqs, cols=cols, lines=len(rows), text=text)
+                self.ae([visual(s, y) for y in range(len(rows))], rows)
+        # combined embeddings and overrides are never fed
+        for control in (LRE, RLE, LRO, RLO):
+            self.ae(orders(self.written('אa' + control + 'b!12' + PDF)), orders(self.written('אab!12')))
+        self.ae(orders(self.written('x' + RLO + 'abc' + PDF + 'd' + LRE + 'אב' + PDF)), orders(self.written('xabcdאב')))
+        # P2 and P3 skip the isolate: with no strong char before the FSI the paragraph takes the fallback direction
+        self.ae(visual(self.screen(AUTO, text='> שלום')), '    םולש >')
+        self.ae(visual(self.screen(AUTO, text='> ⁨שלום')), '> ⁨םולש')
+
+    def test_isolate_flood(self):
+        # every cell of a soft-wrapped paragraph holds a letter and 23 isolate controls, far over the cap: those past it are fed as
+        # neutrals, so dropping the controls of the last cell changes no other row
+        cell = (ISOLATES * 6)[:23]
+        n = 9000
+        s = self.written('a' + cell, cols=200)
+        self.ae(len(s.line(0)[0]), 24)
+        flood = orders(self.written('א' + cell + ('a' + cell) * (n - 1), cols=200, lines=50))
+        self.assertIsNotNone(flood[0])
+        last = n // 200 - 1
+        self.ae(orders(self.written('א' + cell + ('a' + cell) * (n - 2) + 'a', cols=200, lines=50))[:last], flood[:last])
+
+    def test_isolate_cap(self):
+        # later text never changes the layout of earlier text: RLI 12 34 PDI stays honoured whatever the number of empty isolates
+        # after it, up to the cap and past it
+        head = 'א a⁧12 34⁩ '
+        for groups in (16, 17, BIDI_MAX_ISOLATES, BIDI_MAX_ISOLATES + 1):
+            with self.subTest(groups=groups):
+                self.assertTrue(visual(self.written(head + 'b⁦⁩' * (groups - 1), cols=60)).startswith('א a⁧34⁩ 12 b'))
+        # an initiator past the cap is fed as a neutral, and so is the PDI that matches it
+        late = 'b⁦⁩' * BIDI_MAX_ISOLATES + head
+        self.ae(orders(self.written(late, cols=60)), orders(self.written(''.join(ch for ch in late if ch not in ISOLATES), cols=60)))
 
     def test_bracket_pairs(self):
         # The N0 scan adds, per opening bracket, its distance back to the last letter or digit: 1 for the ( after א, then

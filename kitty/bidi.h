@@ -10,6 +10,10 @@
 #include "line.h"
 #include <fribidi.h>
 
+// Isolate initiators (LRI RLI FSI) of a paragraph fed to FriBidi as isolates, with the PDIs that match them; later ones are fed
+// as neutrals. FriBidi's NEWS lists quadratic time in FSIs before 1.0.17 and in back-to-back isolates before 1.0.18.
+#define BIDI_MAX_ISOLATES 32
+
 typedef struct BidiScratch {
     FriBidiChar *text;
     FriBidiCharType *types;
@@ -24,7 +28,7 @@ typedef struct BidiScratch {
 } BidiScratch;
 
 void bidi_scratch_free(BidiScratch *s);
-// Whether the base codepoint of some cell may be right-to-left
+// Whether the base codepoint of some cell may be right-to-left, or some cell holds an RLI, RLM or ALM
 bool bidi_cells_may_reorder(const CPUCell *cells, index_type num, const TextCache *tc);
 // The FriBidi base of a paragraph whose first row has this record: with auto set the first strong character wins and rtl is the fallback
 static inline FriBidiParType

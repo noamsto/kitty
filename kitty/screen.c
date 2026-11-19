@@ -16,6 +16,7 @@
         PyModule_AddIntMacro(module, SCALE_BITS);                             \
         PyModule_AddIntMacro(module, WIDTH_BITS);                             \
         PyModule_AddIntMacro(module, SUBSCALE_BITS);                          \
+        PyModule_AddIntMacro(module, BIDI_MAX_ISOLATES);                      \
         if (PyModule_AddFunctions(module, module_methods) != 0) return false; \
     }
 
