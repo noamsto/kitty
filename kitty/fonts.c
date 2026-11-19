@@ -1362,7 +1362,7 @@ inked_width(const pixel *canvas, unsigned width, unsigned height) {
     unsigned ans = 0;
     for (unsigned y = 0; y < height; y++, canvas += width) {
         for (unsigned x = width; x > ans; x--) {
-            if (canvas[x - 1]) {
+            if (canvas[x - 1] & 0xff) {
                 ans = x;
                 break;
             }
