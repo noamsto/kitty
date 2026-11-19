@@ -1958,6 +1958,7 @@ class TestBidiReorder(BaseTest):
 
         def crossing(name, text, col, new, final):
             with self.subTest(name):
+
                 def build(t):
                     s = self.screen(cols=80, lines=1, scrollback=0)
                     s.draw(t)
@@ -2410,6 +2411,7 @@ class TestBidiReorder(BaseTest):
         # a cleared line takes the new base, as does a line inserted and rewritten
         for name, clear in (('ED', b'\x1b[2J\x1b[H'), ('IL', b'\x1b[H\x1b[L')):
             with self.subTest(name):
+
                 def op(s):
                     parse_bytes(s, self.AUTO + self.SCP_RTL + clear)
                     s.draw(text)
@@ -2528,6 +2530,7 @@ class TestBidiReorder(BaseTest):
                 parse_bytes(s, seq)
                 self.ae(self.frame(s)[0], 0)
                 self.ae(self.state(s), maps)
+
         # the cleared screen is written again under the new base
         def trigger(s):
             parse_bytes(s, b'\x1b[2J\x1b[H' + self.SCP_RTL)
@@ -2700,9 +2703,12 @@ class TestBidiReorder(BaseTest):
                 if s.historybuf.count and s.historybuf.endswith_wrap():
                     paras = paras[1:]
                 live = not paused and not s.scrolled_by
-                rtl_bases.append(int(live and any(
-                    any(ps[y] for y in para) and not any('\u0590' <= c <= '\u05ff' for y in para for c in str(s.linebuf.line(y)))
-                    for para in paras)))
+                rtl_bases.append(
+                    int(
+                        live
+                        and any(any(ps[y] for y in para) and not any('\u0590' <= c <= '\u05ff' for y in para for c in str(s.linebuf.line(y))) for para in paras)
+                    )
+                )
         return shortcuts
 
     def snapshot_top_rows(self, f):
@@ -3446,8 +3452,7 @@ class TestBidiReorder(BaseTest):
         # (name, rtl base, row, erased row, v2l, ((x, (beam column, mirrored), (block column, mirrored))..))
         cases = (
             # x=7: the cursor gap, the empty cells join the run
-            ('ltr base', F, 0, F, ltr_v2l, (
-                (0, (0, F), (0, F)), (3, (5, T), (5, F)), (4, (4, T), (4, F)), (6, (2, T), (2, F)), (7, (2, T), (2, F)))),
+            ('ltr base', F, 0, F, ltr_v2l, ((0, (0, F), (0, F)), (3, (5, T), (5, F)), (4, (4, T), (4, F)), (6, (2, T), (2, F)), (7, (2, T), (2, F)))),
             ('rtl base', T, 0, F, rtl_v2l, ((0, (7, F), (7, F)), (3, (6, T), (6, F)), (4, (5, T), (5, F)), (6, (3, T), (3, F)), (7, (2, T), (2, F)))),
             ('rtl base, erased row', T, 1, T, ID10[::-1], ((0, (9, T), (9, F)),)),
         )
@@ -3646,41 +3651,97 @@ class TestBidiReorder(BaseTest):
             ('hebrew', 'B', None, F, 'אני', 5, (0, 1, 4, 3, 2, 5), (0, 0, 1, 1, 1, 0), (1, T), 1),
             ('latin and space', 'B', None, F, 'hello ', 8, None, None, (8, F), 8),
             (
-                'hebrew, latin and space', 'B', None, F, 'שלום abc ', 11,
-                (0, 1, 7, 8, 9, 10, 6, 5, 4, 3, 2, 11), (0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 0), (6, F), 6,
+                'hebrew, latin and space',
+                'B',
+                None,
+                F,
+                'שלום abc ',
+                11,
+                (0, 1, 7, 8, 9, 10, 6, 5, 4, 3, 2, 11),
+                (0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 0),
+                (6, F),
+                6,
             ),
             (
-                'rtl paragraph, hebrew, latin and space', 'B', RTL, T, 'שלום abc ', 11,
-                (11, 7, 8, 9, 10, 6, 5, 4, 3, 2, 1, 0), (2, 1, 3, 3, 3, 3, 3, 4, 4, 4, 4, 1), (17, F), 17,
+                'rtl paragraph, hebrew, latin and space',
+                'B',
+                RTL,
+                T,
+                'שלום abc ',
+                11,
+                (11, 7, 8, 9, 10, 6, 5, 4, 3, 2, 1, 0),
+                (2, 1, 3, 3, 3, 3, 3, 4, 4, 4, 4, 1),
+                (17, F),
+                17,
             ),
             ('rtl paragraph, latin', 'B', RTL, T, 'abc', 5, (5, 2, 3, 4, 1, 0), (2, 1, 2, 2, 2, 1), (22, F), 22),
             ('rtl paragraph, latin and space', 'B', RTL, T, 'abc ', 6, (6, 2, 3, 4, 5, 1, 0), (2, 1, 2, 2, 2, 2, 1), (22, F), 22),
             (
-                'rtl paragraph, latin and two spaces', 'B', RTL, T, 'abc  ', 7,
-                (7, 2, 3, 4, 5, 6, 1, 0), (2, 1, 2, 2, 2, 2, 2, 1), (22, F), 22,
+                'rtl paragraph, latin and two spaces',
+                'B',
+                RTL,
+                T,
+                'abc  ',
+                7,
+                (7, 2, 3, 4, 5, 6, 1, 0),
+                (2, 1, 2, 2, 2, 2, 2, 1),
+                (22, F),
+                22,
             ),
             # without the FSI the cursor's gap still takes the run's level
             ('no isolate, hebrew and space', 'A', None, F, 'אני ', 6, (0, 1, 5, 4, 3, 2, 6), (0, 0, 1, 1, 1, 1, 0), (1, T), 1),  # the space joins the run
             # empty cells, a space after a number and a space over the isolate cap join the run; a closed isolate is left alone
             (
-                'cursor moved past empty cells', 'B', None, F, 'אני\x1b[3C', 8,
-                (0, 1, 7, 6, 5, 4, 3, 2, 8), (0, 0, 1, 1, 1, 1, 1, 1, 0), (1, T), 1,  # the empty cells join the run
+                'cursor moved past empty cells',
+                'B',
+                None,
+                F,
+                'אני\x1b[3C',
+                8,
+                (0, 1, 7, 6, 5, 4, 3, 2, 8),
+                (0, 0, 1, 1, 1, 1, 1, 1, 0),
+                (1, T),
+                1,  # the empty cells join the run
             ),
             # the PDI joins the cell of the first space, and L1 resets the spaces and the PDI at the end to the paragraph level
             ('closed isolate', 'B', None, F, 'אני \u2069 ', 7, (0, 1, 4, 3, 2, 5, 6, 7), (0, 0, 1, 1, 1, 0, 0, 0), (7, F), 7),
             (
-                'number and space', 'B', None, F, 'שלום 12 ', 10,
-                (0, 1, 9, 7, 8, 6, 5, 4, 3, 2, 10), (0, 0, 1, 1, 1, 1, 1, 2, 2, 1, 0), (1, T), 1,  # the space joins the run
+                'number and space',
+                'B',
+                None,
+                F,
+                'שלום 12 ',
+                10,
+                (0, 1, 9, 7, 8, 6, 5, 4, 3, 2, 10),
+                (0, 0, 1, 1, 1, 1, 1, 2, 2, 1, 0),
+                (1, T),
+                1,  # the space joins the run
             ),
             # a cell holds two controls: the FSI and 15 LRI PDI pairs are 31 isolates, under BIDI_MAX_ISOLATES, so they are fed and
             # with 16 pairs they are 33, no isolate is fed, and the cursor's gap puts the space beside the word
             (
-                'under the isolate cap', 'B', None, F, 'א\u2066\u2069' * (BIDI_MAX_ISOLATES // 2 - 1) + 'י ', 19,
-                (0, 1) + tuple(range(18, 1, -1)) + (19,), (0, 0) + (1,) * 17 + (0,), (1, T), 1,
+                'under the isolate cap',
+                'B',
+                None,
+                F,
+                'א\u2066\u2069' * (BIDI_MAX_ISOLATES // 2 - 1) + 'י ',
+                19,
+                (0, 1) + tuple(range(18, 1, -1)) + (19,),
+                (0, 0) + (1,) * 17 + (0,),
+                (1, T),
+                1,
             ),
             (
-                'over the isolate cap', 'B', None, F, 'א\u2066\u2069' * (BIDI_MAX_ISOLATES // 2) + 'י ', 20,
-                (0, 1) + tuple(range(19, 1, -1)) + (20,), (0, 0) + (1,) * 18 + (0,), (1, T), 1,  # the space joins the run
+                'over the isolate cap',
+                'B',
+                None,
+                F,
+                'א\u2066\u2069' * (BIDI_MAX_ISOLATES // 2) + 'י ',
+                20,
+                (0, 1) + tuple(range(19, 1, -1)) + (20,),
+                (0, 0) + (1,) * 18 + (0,),
+                (1, T),
+                1,  # the space joins the run
             ),
             # readline erases a letter with backspace, space, backspace: the space it writes is a typed blank after a letter, so it
             # joins the run and shows where the erased letter was
@@ -3695,7 +3756,7 @@ class TestBidiReorder(BaseTest):
                 if v2l is None:
                     self.assertIsNone(got_v2l)
                 else:
-                    self.ae(got_v2l[-len(v2l):] if rtl else got_v2l[: len(v2l)], v2l)
+                    self.ae(got_v2l[-len(v2l) :] if rtl else got_v2l[: len(v2l)], v2l)
                 if levels is None:
                     self.assertIsNone(got_levels)
                 else:
@@ -3920,7 +3981,7 @@ class TestBidiReorder(BaseTest):
     def test_tmux_pane_typed_gap(self):
         # tmux side by side panes: the pane's FSI rides on the glyph cell, the prompt's on the space, the PDI closing the prompt
         # on the typed space (cell 5), then blanks and the pane's PDI on a space at the pane's end
-        row = '\U000F023A⁨ ⁨אני ⁩' + ' ' * 10 + ' ⁩'
+        row = '\U000f023a⁨ ⁨אני ⁩' + ' ' * 10 + ' ⁩'
         F, T = False, True
         for seqs in (b'', b'\x1b[?2501h'):  # the glyph is class L, so the paragraph is LTR with and without 2501
             s = self.screen(cols=24)
@@ -3995,7 +4056,7 @@ class TestBidiReorder(BaseTest):
         # from a fresh screen's, whatever the cursor does next
         def build(first='א', x=7):
             s = self.screen(cols=24)
-            s.draw('\U000F023A⁨ ⁨' + first + 'ני ⁩' + ' ' * 10 + ' ⁩')
+            s.draw('\U000f023a⁨ ⁨' + first + 'ני ⁩' + ' ' * 10 + ' ⁩')
             s.cursor_position(1, x + 1)
             return s
 
@@ -4127,8 +4188,7 @@ class TestBidiReorder(BaseTest):
         # plain: the text drawn as is. fish: the repaint idiom. tmux: every row placed with CUP, the indent cells never written.
         first, *rest = rows
         if form == 'tmux':
-            return b'\x1b[1;1H' + self.PROMPT_ROW + first.encode() + b''.join(
-                f'\x1b[{i + 2};3H{row}'.encode() for i, row in enumerate(rest))
+            return b'\x1b[1;1H' + self.PROMPT_ROW + first.encode() + b''.join(f'\x1b[{i + 2};3H{row}'.encode() for i, row in enumerate(rest))
         if form == 'fish':
             return self.PROMPT_ROW + b'\x1b[K' + self.fish_repaint(first) + b''.join(self.CONTINUE + self.fish_repaint(row) for row in rest)
         return self.PROMPT_ROW + first.encode() + b''.join(self.CONTINUE + row.encode() for row in rest)
@@ -4151,7 +4211,7 @@ class TestBidiReorder(BaseTest):
         ident = tuple(range(n))
 
         def v(*head):
-            return head + ident[len(head):]
+            return head + ident[len(head) :]
 
         def lv(*head):
             return head + (0,) * (n - len(head))
@@ -4165,33 +4225,38 @@ class TestBidiReorder(BaseTest):
         # place, so its next letter takes column 2 and the beam is on that column's left edge, drawn mirrored in column 1.
         cases = (
             (
-                'english, hebrew', ('hello', H2),
+                'english, hebrew',
+                ('hello', H2),
                 (english, (v(0, 1, *range(10, 1, -1)), lv(2, 2, *(3,) * 9))),
                 (1, 11, (1, T), 1),
             ),
             # the isolate is RTL: indent and text are one run at level 1 (N1 between two R), so the indent lands right of the text.
             # The run starts at column 0, the beam on its left edge, which is the left edge of the row.
             (
-                'hebrew, hebrew', (H1, H2),
+                'hebrew, hebrew',
+                (H1, H2),
                 (hebrew, (v(*range(10, -1, -1)), lv(*(1,) * 11))),
                 (1, 11, (0, F), 0),
             ),
             # the English at level 2 inside the RTL isolate's level 1; the blanks between the Hebrew and the English are R (N2)
             (
-                'hebrew, english', (H1, 'hello'),
+                'hebrew, english',
+                (H1, 'hello'),
                 (hebrew, (v(2, 3, 4, 5, 6, 1, 0), lv(1, 1, 2, 2, 2, 2, 2))),
                 (1, 7, (5, F), 5),
             ),
             # the second Hebrew row's indent lies between two Hebrew letters, so it joins their run at level 3. The first Hebrew
             # row's trailing blanks are at the paragraph level, as at the end of any line
             (
-                'english, hebrew, hebrew', ('hello', H2, H3),
+                'english, hebrew, hebrew',
+                ('hello', H2, H3),
                 (english, (v(0, 1, *range(10, 1, -1)), lv(2, 2, *(3,) * 9)), (v(*range(9, -1, -1)), lv(*(3,) * 10))),
                 (2, 10, (0, F), 0),
             ),
             # the typed space after the letter takes the letter's level (kitty's rule), so the run grows over it
             (
-                'english, hebrew and a typed space', ('hello', H2 + ' '),
+                'english, hebrew and a typed space',
+                ('hello', H2 + ' '),
                 (english, (v(0, 1, *range(11, 1, -1)), lv(2, 2, *(3,) * 10))),
                 (1, 12, (1, T), 1),
             ),
@@ -4199,14 +4264,16 @@ class TestBidiReorder(BaseTest):
             # paragraph level (L1). Under 'h' the blanks from 'o' to the Hebrew are between L and R, so take the isolate's L (N2):
             # the third row is laid out as the second row of 'english, hebrew'
             (
-                'english, empty line, hebrew', ('hello', '', H2),
+                'english, empty line, hebrew',
+                ('hello', '', H2),
                 (english, (ident, lv()), (v(0, 1, *range(10, 1, -1)), lv(2, 2, *(3,) * 9))),
                 (2, 11, (1, T), 1),
             ),
             # under a Hebrew first letter the blanks from the first Hebrew word to the next are between two R, so R at level 1 (N1):
             # the third row is laid out as the second row of 'hebrew, hebrew'
             (
-                'hebrew, empty line, hebrew', (H1, '', H2),
+                'hebrew, empty line, hebrew',
+                (H1, '', H2),
                 (hebrew, (ident, lv()), (v(*range(10, -1, -1)), lv(*(1,) * 11))),
                 (2, 11, (0, F), 0),
             ),
@@ -4229,7 +4296,7 @@ class TestBidiReorder(BaseTest):
         ident = tuple(range(n))
 
         def v(*head):
-            return head + ident[len(head):]
+            return head + ident[len(head) :]
 
         def lv(*head):
             return head + (0,) * (n - len(head))
@@ -4247,16 +4314,28 @@ class TestBidiReorder(BaseTest):
             ('typed space', ('אני ',), 1, True, ((v(0, 1, 5, 4, 3, 2), lv(0, 0, 1, 1, 1, 1)),), (0, 6, (1, T), 1)),
             ('typed space, unstamped row below', ('אני ',), 1, False, ((v(0, 1, 5, 4, 3, 2), lv(0, 0, 1, 1, 1, 1)),), (0, 6, (1, T), 1)),
             (
-                'typed space on a continuation row', ('hello', H2 + ' '), 2, True,
-                (english, (v(0, 1, *range(11, 1, -1)), lv(2, 2, *(3,) * 10))), (1, 12, (1, T), 1),
+                'typed space on a continuation row',
+                ('hello', H2 + ' '),
+                2,
+                True,
+                (english, (v(0, 1, *range(11, 1, -1)), lv(2, 2, *(3,) * 10))),
+                (1, 12, (1, T), 1),
             ),
             (
-                'typed space on a continuation row, unstamped row below', ('hello', H2 + ' '), 2, False,
-                (english, (v(0, 1, *range(11, 1, -1)), lv(2, 2, *(3,) * 10))), (1, 12, (1, T), 1),
+                'typed space on a continuation row, unstamped row below',
+                ('hello', H2 + ' '),
+                2,
+                False,
+                (english, (v(0, 1, *range(11, 1, -1)), lv(2, 2, *(3,) * 10))),
+                (1, 12, (1, T), 1),
             ),
             (
-                'blank row between two rows', ('hello', '', H2), 1, True,
-                (english, (ident, lv()), (v(0, 1, *range(10, 1, -1)), lv(2, 2, *(3,) * 9))), (2, 11, (1, T), 1),
+                'blank row between two rows',
+                ('hello', '', H2),
+                1,
+                True,
+                (english, (ident, lv()), (v(0, 1, *range(10, 1, -1)), lv(2, 2, *(3,) * 9))),
+                (2, 11, (1, T), 1),
             ),
         )
         for name, rows, blank, stamped, layouts, (cy, cx, beam, block) in cases:
@@ -4294,7 +4373,8 @@ class TestBidiReorder(BaseTest):
             ('output row at column 0 after a PDI', prompt + PDI + b'\r\n' + H1.encode(), (ltr_row, rtl_row)),
             # its own LTR paragraph from 'w', the Hebrew at level 1; joined into a still open isolate it would be at level 3
             (
-                'english and hebrew output after a PDI', prompt + PDI + self.CONTINUE + b'world ' + H1.encode(),
+                'english and hebrew output after a PDI',
+                prompt + PDI + self.CONTINUE + b'world ' + H1.encode(),
                 (ltr_row, (tuple(range(8)) + (11, 10, 9, 8) + tuple(range(12, n)), (0,) * 8 + (1,) * 4 + (0,) * (n - 12), False)),
             ),
             # an empty row joins nothing by itself: the output row after it is still cut by the PDI or the mark
@@ -4302,11 +4382,13 @@ class TestBidiReorder(BaseTest):
             ('output after an empty row and OSC 133 C', prompt + b'\r\n\r\n' + self.OSC133_C + H1.encode(), (ltr_row, ltr_row, rtl_row)),
             ('output after an empty row marked by OSC 133 C', prompt + b'\r\n' + self.OSC133_C + b'\r\n' + H1.encode(), (ltr_row, ltr_row, rtl_row)),
             (
-                'hebrew first row closed by a PDI', self.PROMPT_ROW + H1.encode() + PDI + b'\r\n' + H3.encode(),
+                'hebrew first row closed by a PDI',
+                self.PROMPT_ROW + H1.encode() + PDI + b'\r\n' + H3.encode(),
                 ((tuple(range(2)) + (5, 4, 3, 2) + tuple(range(6, n)), (0, 0, 1, 1, 1, 1) + (0,) * (n - 6), False), rtl_row),
             ),
             (
-                'three rows closed by a PDI', prompt + PDI + self.CONTINUE + H2.encode() + self.CONTINUE + H3.encode(),
+                'three rows closed by a PDI',
+                prompt + PDI + self.CONTINUE + H2.encode() + self.CONTINUE + H3.encode(),
                 (ltr_row, rtl_row, rtl_row),
             ),
             ('row under another record, 2501 off', prompt + b'\r\n\x1b[?2501l\x1b[K\x1b[2C' + H2.encode(), (ltr_row, ltr_hebrew)),
@@ -4322,10 +4404,7 @@ class TestBidiReorder(BaseTest):
         # with the shell's marks, the rows between the prompt (A) and the output (C) join, the output after C does not
         n = 40
         ident = tuple(range(n))
-        data = (
-            self.OSC133_A + self.PROMPT_ROW + self.OSC133_B + b'hello' + self.CONTINUE + 'שורה שניה'.encode()
-            + b'\r\n' + self.OSC133_C + 'עוד שורה'.encode()
-        )
+        data = self.OSC133_A + self.PROMPT_ROW + self.OSC133_B + b'hello' + self.CONTINUE + 'שורה שניה'.encode() + b'\r\n' + self.OSC133_C + 'עוד שורה'.encode()
         s = self.replay_bytes(data)
         with self.subTest('rows between the marks join'):
             self.assert_obs(self.obs(s, 0), ident, (0, 0, 2, 2, 2, 2, 2) + (0,) * (n - 7), False)
@@ -5001,8 +5080,8 @@ class TestBidiReorder(BaseTest):
         s = self.alt(20)
         parse_bytes(s, ('1 ' + FSI + 'אבג d' + PDI + '  │2 ' + FSI + 'שלום' + PDI).encode())
         self.assert_region(
-            s, 0, (0, 1, 6, 5, 4, 3, 2, 7, 8, 9, 10, 11, 15, 14, 13, 12, 16, 17, 18, 19),
-            (0, 0, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0))
+            s, 0, (0, 1, 6, 5, 4, 3, 2, 7, 8, 9, 10, 11, 15, 14, 13, 12, 16, 17, 18, 19), (0, 0, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0)
+        )
 
     def test_region_claude_code_no_pdi(self):
         s = self.alt(20)
@@ -5176,8 +5255,7 @@ class TestBidiReorder(BaseTest):
         with self.subTest('c: region base differs from the row base'):
             s = self.alt(14)
             parse_bytes(s, ('x ' + RLI + 'אב cd' + '\x1b[1;13H' + PDI).encode())
-            self.assert_region(
-                s, 0, (0, 1, 11, 10, 9, 8, 7, 5, 6, 4, 3, 2, 12, 13), (0, 0, 1, 1, 1, 2, 2, 1, 1, 1, 1, 1, 0, 0))
+            self.assert_region(s, 0, (0, 1, 11, 10, 9, 8, 7, 5, 6, 4, 3, 2, 12, 13), (0, 0, 1, 1, 1, 2, 2, 1, 1, 1, 1, 1, 0, 0))
             self.ae(self.cursor_at(s, 7, CURSOR_BEAM), (9, False))
             self.ae(self.cursor_at(s, 7, CURSOR_BLOCK)[0], 9)
 
