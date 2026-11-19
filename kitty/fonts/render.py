@@ -244,13 +244,21 @@ class setup_for_testing:
     ynum = 100
     baseline = 0
 
-    def __init__(self, family: str = 'monospace', size: float = 11.0, dpi: float = 96.0, main_face_path: str = ''):
+    def __init__(
+        self,
+        family: str = 'monospace',
+        size: float = 11.0,
+        dpi: float = 96.0,
+        main_face_path: str = '',
+        symbol_map: dict[tuple[int, int], str] | None = None,
+    ):
         self.family, self.size, self.dpi = family, size, dpi
         self.main_face_path = main_face_path
+        self.symbol_map = symbol_map or {}
 
     def __enter__(self) -> tuple[dict[tuple[int, int, int], bytes], int, int]:
         global descriptor_overrides
-        opts = defaults._replace(font_family=parse_font_spec(self.family), font_size=self.size)
+        opts = defaults._replace(font_family=parse_font_spec(self.family), font_size=self.size, symbol_map=self.symbol_map)
         set_options(opts)
         sprites = {}
 
@@ -263,6 +271,8 @@ class setup_for_testing:
         descriptor_overrides = {}
         if self.main_face_path:
             descriptor_overrides[0] = self.main_face_path, False, False
+        for i, path in enumerate(create_symbol_map(opts)[1]):
+            descriptor_overrides[4 + i] = path, False, False  # the symbol_map faces follow the four text faces
         try:
             set_font_family(opts)
             cell_width, cell_height, self.baseline = create_test_font_group(self.size, self.dpi, self.dpi)
@@ -296,13 +306,13 @@ def render_string(text: str, family: str = 'monospace', size: float = 11.0, dpi:
 
 
 def shape_string(
-    text: str = 'abcd', family: str = 'monospace', size: float = 11.0, dpi: float = 96.0, path: str | None = None
+    text: str = 'abcd', family: str = 'monospace', size: float = 11.0, dpi: float = 96.0, path: str | None = None, rtl: bool = False
 ) -> list[tuple[int, int, int, tuple[int, ...]]]:
     with setup_for_testing(family, size, dpi) as (sprites, cell_width, cell_height):
         s = Screen(None, 1, len(text) * 2)
         line = s.line(0)
         s.draw(text)
-        return test_shape(line, path)
+        return test_shape(line, path, 0, rtl)
 
 
 def show(rgba_data: bytes | memoryview, width: int, height: int, fmt: int = 32) -> None:
