@@ -288,9 +288,11 @@ n0_budget_fired(const BidiMaps *b, uint32_t start, uint32_t end) {
 // the letter's level instead of taking the paragraph's (L1), so a space typed after a word sits where the next word of the
 // isolate's run will push it. Empty cells, and any blank after one, stay at the paragraph level. Retypes the kept blanks
 // as the letter so that fribidi_reorder_line()'s own L1 leaves them. Returns their count, which follow the n_trim chars
-// FriBidi resolved and end in the last row.
+// FriBidi resolved and end in the last row. A run that reaches the row's end may be a program's padding, written in place
+// of an erase (tmux does so without bce), which no cell tells from typed blanks: of it only the blanks before the cursor's
+// gap gap_x are kept, none without one.
 static uint32_t
-keep_typed_blanks(BidiMaps *b, const CPUCell *last_row, uint32_t n_trim, uint32_t n) {
+keep_typed_blanks(BidiMaps *b, const CPUCell *last_row, uint32_t n_trim, uint32_t n, uint32_t gap_x) {
     const uint32_t letter = n_trim - 1;
     if ((b->cell_of_char[letter] & BIDI_EXTRA_CHAR) || !FRIBIDI_IS_LETTER(b->types[letter])) return 0;
     int depth = 0;
@@ -301,6 +303,11 @@ keep_typed_blanks(BidiMaps *b, const CPUCell *last_row, uint32_t n_trim, uint32_
     if (!depth) return 0;
     uint32_t k = 0;
     while (n_trim + k < n && cell_is_char(last_row + (b->cell_of_char[n_trim + k] & 0xffff), ' ')) k++;
+    if (n_trim + k == n) {
+        uint32_t typed = 0;
+        while (typed < k && (b->cell_of_char[n_trim + typed] & 0xffff) < gap_x) typed++;
+        k = typed;
+    }
     for (uint32_t i = n_trim; i < n_trim + k; i++) {
         b->para_levels[i] = b->para_levels[letter];
         b->types[i] = b->types[letter];
@@ -444,7 +451,7 @@ resolve_levels(BidiMaps *b, const CPUCell *const *rows, unsigned num_rows, const
     b->resolve_signed = !budget_fired && !isolates;
     // Only an LTR result can leave every level at 0, an RTL one has them all at 1 or more
     if (max_level <= 1) return false;
-    if (feed_iso && n_trim < n && !b->no_trim) n_trim += keep_typed_blanks(b, rows[num_rows - 1], n_trim, n);
+    if (feed_iso && n_trim < n && !b->no_trim) n_trim += keep_typed_blanks(b, rows[num_rows - 1], n_trim, n, gap_x);
     if (gap_x && !b->no_trim) n_trim = show_typed_gap(b, b->row_start[num_rows - 1], gap_x, *base == FRIBIDI_PAR_RTL, n_trim, n);
     for (uint32_t i = n_trim; i < n; i++) b->para_levels[i] = *base == FRIBIDI_PAR_RTL;
     *n_trim_out = n_trim;

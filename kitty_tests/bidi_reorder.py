@@ -3763,6 +3763,96 @@ class TestBidiReorder(BaseTest):
                     self.ae(got_levels[: len(levels)], levels)
                 self.assert_cursor_at(s, x, beam, block)
 
+    def test_padded_prompt_row(self):
+        # Under a non-default pane background tmux has no bce to lean on, so it fills the prompt row with written spaces to the last
+        # column in place of EL, then moves the cursor with CUP and the typed text follows. Only the blanks the user typed, up to the
+        # cursor's gap, stay at the word's level; the padding behind them stays at the paragraph level. Rows are screen rows of the
+        # alternate screen.
+        F, T = False, True
+        BG = b'\x1b[38;2;205;214;244m\x1b[48;2;30;30;46m'
+
+        def padded(text, cols=24, lines=3, row=None, below=b'', erase=False):
+            # the prompt row replayed on screen row `row` (1-based, the last by default), `below` written before it
+            row = row or lines
+            s = self.create_screen(cols=cols, lines=lines, scrollback=0, options={})
+            fill = b'\x1b[K' if erase else b' ' * (cols - 2)
+            parse_bytes(s, b'\x1b[?1049h\x1b[8h\x1b[?2501h' + below + b'\x1b[%d;1H' % row + self.PUA + BG + b' ' + FSI.encode() + fill)
+            parse_bytes(s, b'\x1b[%d;3H' % row + text.encode())
+            test_screen_update_cell_data(s)
+            return s, row - 1
+
+        def below_padded(first, cols=24, last=3):
+            return b''.join(b'\x1b[%d;1H' % r + BG + b' ' * cols for r in range(first, last + 1))
+
+        hebrew = 'עברית בצד ימין'
+        word = (0, 1) + tuple(range(15, 1, -1)) + (16,)
+        word_levels = (0, 0) + (1,) * 14 + (0,)
+        # (name, text, columns, row, rows below, erase, cursor x, v2l, levels, beam (column, mirrored), column of the other shapes)
+        # v2l and levels cover the cells up to the cursor's or the text's last, whichever is later, the cells after it are in order at the paragraph level
+        cases = (
+            ('bottom row', hebrew, 40, None, b'', F, 16, word, word_levels, (1, T), 1),
+            ('middle row, blank rows below', hebrew, 40, 2, b'', F, 16, word, word_levels, (1, T), 1),
+            ('middle row, padded rows below', hebrew, 40, 2, below_padded(3, 40), F, 16, word, word_levels, (1, T), 1),
+            ('typed space', 'אני ', 24, None, b'', F, 6, (0, 1, 5, 4, 3, 2, 6), (0, 0, 1, 1, 1, 1, 0), (1, T), 1),
+            ('typed two spaces', 'אני  ', 24, None, b'', F, 7, (0, 1, 6, 5, 4, 3, 2, 7), (0, 0, 1, 1, 1, 1, 1, 0), (1, T), 1),
+            (
+                'latin after hebrew',
+                'שלום abc ',
+                24,
+                None,
+                b'',
+                F,
+                11,
+                (0, 1, 7, 8, 9, 10, 6, 5, 4, 3, 2, 11),
+                (0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 0),
+                (6, F),
+                6,
+            ),
+            (
+                'cursor moved into the padding',
+                'אני\x1b[3C',
+                24,
+                None,
+                b'',
+                F,
+                8,
+                (0, 1, 7, 6, 5, 4, 3, 2, 8),
+                (0, 0, 1, 1, 1, 1, 1, 1, 0),
+                (1, T),
+                1,
+            ),
+            # the cursor is on a blank, not after it: the typed blank is indistinguishable from the padding, so it stays at the paragraph level
+            ('cursor back on the typed space', 'שלום \x1b[D', 24, None, b'', F, 6, (0, 1, 5, 4, 3, 2, 6), (0, 0, 1, 1, 1, 1, 0), (1, T), 1),
+            ('erase idiom', 'אני\x08 \x08', 24, None, b'', F, 4, (0, 1, 3, 2, 4), (0, 0, 1, 1, 0), (1, T), 1),
+            # an autosuggestion after the cursor, the padding behind it at the paragraph level
+            (
+                'autosuggestion',
+                'אני abc\x1b[4D',
+                24,
+                None,
+                b'',
+                F,
+                5,
+                (0, 1, 6, 7, 8, 5, 4, 3, 2),
+                (0, 0, 1, 1, 1, 1, 2, 2, 2),
+                (5, T),
+                5,
+            ),
+            # the same prompt with EL
+            ('erased row', hebrew, 40, None, b'', T, 16, word, word_levels, (1, T), 1),
+        )
+        for name, text, cols, row, below, erase, x, v2l, levels, beam, block in cases:
+            with self.subTest(name):
+                s, y = padded(text, cols=cols, row=row, below=below, erase=erase)
+                self.ae(s.cursor.x, x)
+                self.ae(self.region_maps(s, y), (v2l + ID(len(v2l), cols), levels + (0,) * (cols - len(levels))))
+                self.assert_cursor_at_row(s, y, x, beam, block)
+        # the history row: the cursor is off it, the PDI of the next row closes nothing on this one
+        with self.subTest('history row'):
+            s, _ = padded('אני\r\n' + PDI + 'output text', row=1)
+            self.ae((s.cursor.y, s.cursor.x), (1, 11))
+            self.ae(self.region_maps(s, 0)[1], (0, 0, 1, 1, 1) + (0,) * 19)
+
     def test_cursor_follows_run_lands(self):
         # The cursor drawn after the text is where the next char lands: type the char the probe rule predicts at the cursor (a
         # Hebrew letter after an odd level, a digit after an even one, an Arabic-Indic digit after one) and its column is the
@@ -4080,6 +4170,15 @@ class TestBidiReorder(BaseTest):
             settle(s)
             self.assertTrue(moved(s, 3, 0))
             settle(s)
+        # blanks only on the last row, written as padding: inactive at x 0, so a cursor-only move to x 3 must still upload
+        with self.subTest('padded wrapped row'):
+            s = self.create_screen(cols=10, lines=3, scrollback=0, options={})
+            parse_bytes(s, b'\x1b[?1049h\x1b[8h\x1b[?2501h\x1b[2;1H' + self.PUA + b'\x1b[48;2;30;30;46m ' + FSI.encode() + 'אבגדהוזח'.encode() + b' ' * 10)
+            s.cursor_position(3, 1)
+            settle(s)
+            self.assertTrue(moved(s, 2, 3))
+            test_screen_update_cell_data(s)
+            self.ae(tuple(s.test_bidi_v2l(self.rr(s, 2))), (2, 1, 0) + tuple(range(3, 10)))
         with self.subTest('paused'):
             s = self.screen()
             s.draw('אני ')

@@ -5603,13 +5603,15 @@ bidi_maps_for_upload(Screen *self, const LineBuf *source) {
     return b;
 }
 
-// Whether the walker could apply a gap at the live cursor (x, y): its row is a shown, stamped paragraph row with a typed gap there
+// Whether the walker could apply a gap at the live cursor (x, y): its row is a shown, stamped paragraph row, or the blank last row
+// of an active one, with a typed gap there
 static bool
 bidi_gap_live(Screen *self, index_type x, index_type y) {
     const BidiMaps *b = self->bidi_maps;
     if (y >= self->lines) return false;
     const index_type r = y + self->scrolled_by + pixel_scroll_enabled(self);
-    return r < b->rows && b->active[r] && !b->region_row[r] && self->linebuf->line_attrs[y].bidi_stamp != BIDI_STAMP_NONE &&
+    return r < b->rows && (b->active[r] || (r && b->active[r - 1] && b->para_first[r - 1] == b->para_first[r] && b->para_last[r - 1] == b->para_last[r])) &&
+           !b->region_row[r] && self->linebuf->line_attrs[y].bidi_stamp != BIDI_STAMP_NONE &&
            bidi_cursor_gap(linebuf_cpu_cells_for_line(self->linebuf, y), self->columns, x, self->text_cache) != 0;
 }
 
