@@ -976,7 +976,7 @@ font_for_cell(
     FontGroup *fg, const CPUCell *cpu_cell, const GPUCell *gpu_cell, bool *is_main_font, bool *is_emoji_presentation, TextCache *tc, ListOfChars *lc) {
     *is_main_font = false;
     *is_emoji_presentation = false;
-    text_in_cell(cpu_cell, tc, lc);
+    text_in_cell_without_leading_controls(cpu_cell, tc, lc);
     START_ALLOW_CASE_RANGE
     ssize_t ans;
     switch (lc->chars[0]) {
@@ -1311,7 +1311,7 @@ index_for_decorations(FontGroup *fg, RunFont rf, Region src, Region dest, FontCe
 static inline __attribute__((always_inline)) void
 render_box_cell(FontGroup *fg, RunFont rf, CPUCell *cpu_cell, GPUCell *gpu_cell, const TextCache *tc, bool rtl) {
     ensure_glyph_render_scratch_space(64);
-    text_in_cell(cpu_cell, tc, global_glyph_render_scratch.lc);
+    text_in_cell_without_leading_controls(cpu_cell, tc, global_glyph_render_scratch.lc);
     ensure_glyph_render_scratch_space(rf.scale * global_glyph_render_scratch.lc->count);
     unsigned num_glyphs = 0, num_cells = rf.scale;
     for (unsigned i = 0; i < global_glyph_render_scratch.lc->count; i++) {
@@ -1675,7 +1675,7 @@ load_hb_buffer(CPUCell *first_cpu_cell, index_type num_cells, const TextCache *t
     // of context??
     for (; num_cells; first_cpu_cell++, num_cells--) {
         if (first_cpu_cell->is_multicell && first_cpu_cell->x) continue;
-        text_in_cell(first_cpu_cell, tc, lc);
+        text_in_cell_without_leading_controls(first_cpu_cell, tc, lc);
         ensure_space_for((&shape_buffer), codepoints, shape_buffer.codepoints[0], lc->count + num, capacity, 512, false);
         ensure_space_for((&shape_buffer), cells_at, shape_buffer.cells_at[0], lc->count + num + 1, cells_at_capacity, 512, false);
         memcpy(shape_buffer.codepoints + num, lc->chars, lc->count * sizeof(shape_buffer.codepoints[0]));
@@ -1814,7 +1814,7 @@ render_group(
     ensure_canvas_can_fit(fg, MAX(num_cells, num_scaled_cells) + 1, rf.scale);
     if (rendering_in_smaller_area) ensure_canvas_can_fit(fg, 2 * num_cells + 1, (unsigned)ceil(scale)); // scratch space
     pixel *scratch = fg->canvas.buf + canvas_width * unscaled_metrics.cell_height;
-    text_in_cell(cpu_cells, tc, global_glyph_render_scratch.lc);
+    text_in_cell_without_leading_controls(cpu_cells, tc, global_glyph_render_scratch.lc);
     bool is_only_filled_boxes = false;
     if (global_glyph_render_scratch.lc->chars[0] == 0x2588) {
         glyph_index box_glyph_id = global_glyph_render_scratch.glyphs[0];
@@ -2848,7 +2848,7 @@ render_line(FONTS_DATA_HANDLE fg_, Line *line, index_type lnum, Cursor *cursor, 
             cell_font.align.horizontal = cpu_cell->halign;
             cell_font.multicell_y = cpu_cell->y;
         }
-        text_in_cell(cpu_cell, line->text_cache, lc);
+        text_in_cell_without_leading_controls(cpu_cell, line->text_cache, lc);
         bool is_main_font, is_emoji_presentation;
         GPUCell *gpu_cell = gpu_cells + i;
         const char_type first_ch = lc->chars[0];
@@ -2968,7 +2968,7 @@ render_line_levels(
             first_cell_in_run = i;
             run_level = levels[i];
         }
-        text_in_cell(cpu_cell, line->text_cache, lc);
+        text_in_cell_without_leading_controls(cpu_cell, line->text_cache, lc);
         bool is_main_font, is_emoji_presentation;
         GPUCell *gpu_cell = gpu_cells + i;
         const char_type first_ch = lc->chars[0];

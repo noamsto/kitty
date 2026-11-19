@@ -890,6 +890,17 @@ class GlyphRendering(FontBaseTest):
         s.reset()
         self.ae(vg_live_glyph_memory(), base_memory)
 
+    def test_registered_glyph_after_leading_control(self):
+        # a bidi control kept first in the line's first cell leaves the glyph bound to that cell
+        s = self.create_screen(cols=8, lines=4, scrollback=0)
+        self.register(s, 0x100000, 'fill=nonzero,fg:M12 2A10 10 0 1 1 12 22A10 10 0 1 1 12 2Z')
+        plain = self.render(s, '\U00100000x').sprite_at(0)
+        for control in ('⁧', '‏'):
+            with self.subTest(control=control):
+                line = self.render(s, control + '\U00100000x', y=1)
+                self.ae(str(line), control + '\U00100000x')
+                self.ae(line.sprite_at(0), plain)
+
     def test_registered_glyphs_in_multicell(self):
         s = self.create_screen(cols=8, lines=4, scrollback=0)
         self.register(s, 0x100000, 'fill=nonzero,fg:M0 0H24V24H0Z', fit='stretch')

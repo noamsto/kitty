@@ -132,23 +132,6 @@ multicell_is_continuation_of_previous(const CPUCell *prev, const CPUCell *curr) 
     return prev->width == curr->width && !curr->natural_width;
 }
 
-// A cell's leading isolate controls are stored after its base char but come before it in the text: moves the controls among
-// chars[1..n) in front of chars[0]
-static void
-put_leading_controls_first(char_type *chars, size_t n) {
-    char_type controls[MAX_NUM_CODEPOINTS_PER_CELL], others[MAX_NUM_CODEPOINTS_PER_CELL];
-    if (n > MAX_NUM_CODEPOINTS_PER_CELL) return;
-    size_t nc = 0, no = 0;
-    for (size_t i = 1; i < n; i++) {
-        if (chars[i] - 0x2066u <= 0x2069u - 0x2066u) controls[nc++] = chars[i];
-        else others[no++] = chars[i];
-    }
-    const char_type base = chars[0];
-    memcpy(chars, controls, nc * sizeof(chars[0]));
-    chars[nc] = base;
-    memcpy(chars + nc + 1, others, no * sizeof(chars[0]));
-}
-
 static index_type
 text_in_cell_ansi(ANSILineState *s, const CPUCell *c, TextCache *tc, bool skip_multiline_non_zero_lines) {
     index_type num_cells_to_skip_for_tab = 0;
@@ -164,7 +147,12 @@ text_in_cell_ansi(ANSILineState *s, const CPUCell *c, TextCache *tc, bool skip_m
 
     size_t pos = s->output_buf->len;
     if (c->ch_is_idx) {
-        tc_chars_at_index_ansi(tc, c->ch_or_idx, s->output_buf);
+        const unsigned count = tc_chars_at_index_ansi(tc, c->ch_or_idx, s->output_buf);
+        // a cell with only leading controls is an empty cell that starts with them, so its controls are followed by the space an empty cell exports
+        if (chars_are_leading_controls(s->output_buf->buf + pos, count) && s->pos + 1 < s->limit) {
+            ensure_space_in_ansi_output_buf(s, 1);
+            s->output_buf->buf[s->output_buf->len++] = ' ';
+        }
     } else {
         ensure_space_in_ansi_output_buf(s, 2);
         s->output_buf->buf[s->output_buf->len++] = c->ch_or_idx;
@@ -180,7 +168,6 @@ text_in_cell_ansi(ANSILineState *s, const CPUCell *c, TextCache *tc, bool skip_m
                 }
             } break;
         }
-        if (c->ch_is_idx && cell_has_leading_controls(c)) put_leading_controls_first(s->output_buf->buf + pos, s->output_buf->len - pos);
     }
     return num_cells_to_skip_for_tab;
 }
@@ -253,7 +240,7 @@ find_colon_slash(Line *self, index_type x, index_type limit, ListOfChars *lc, in
 #undef next_char_is
 
     do {
-        text_in_cell(c, self->text_cache, lc);
+        text_in_cell_without_leading_controls(c, self->text_cache, lc);
         if (!is_hostname_lc(lc)) return false;
         switch (state) {
             case ANY:
@@ -273,12 +260,27 @@ find_colon_slash(Line *self, index_type x, index_type limit, ListOfChars *lc, in
     return 0;
 }
 
+// cell_is_char() that also matches a cell whose text is ch after leading controls, so that a URL at the start of a line
+// after a control is found
+static bool
+cell_is_char_after_leading_controls(const CPUCell *c, const TextCache *tc, char_type ch) {
+    if (!c->ch_is_idx) return cell_is_char(c, ch);
+    char_type buf[MAX_NUM_CODEPOINTS_PER_CELL];
+    ListOfChars lc = {.chars = buf, .capacity = arraysz(buf)};
+    if (!text_in_cell_without_alloc(c, tc, &lc)) return false;
+    size_t n = 0;
+    while (n + 1 < lc.count && is_leading_control(lc.chars[n])) n++;
+    return n && n + 1 == lc.count && lc.chars[n] == ch;
+}
+
 static bool
 prefix_matches(Line *self, index_type at, const char_type *prefix, index_type prefix_len, index_type scale) {
     if (prefix_len > at) return false;
     while (prefix_len--) {
         at = prev_char_pos(self, at, 1);
-        if (at >= self->xnum || cell_scale(self->cpu_cells + at) != scale || !cell_is_char(self->cpu_cells + at, prefix[prefix_len])) return false;
+        if (at >= self->xnum || cell_scale(self->cpu_cells + at) != scale ||
+            !cell_is_char_after_leading_controls(self->cpu_cells + at, self->text_cache, prefix[prefix_len]))
+            return false;
     }
     return true;
 }
@@ -305,7 +307,7 @@ has_url_beyond_colon_slash(Line *self, const index_type x, ListOfChars *lc, cons
     while ((pos = next_char_pos(self, pos, 1)) < self->xnum && num_chars++ < MIN_URL_LEN + 2) {
         const CPUCell *c = self->cpu_cells + pos;
         if (cell_scale(c) != scale) return false;
-        text_in_cell(c, self->text_cache, lc);
+        text_in_cell_without_leading_controls(c, self->text_cache, lc);
         if (num_of_slashes < 3) {
             if (!is_hostname_lc(lc)) return false;
             if (lc->count == 1 && lc->chars[0] == '/') num_of_slashes++;
@@ -338,7 +340,7 @@ line_url_start_at(Line *self, index_type x, ListOfChars *lc) {
 static bool
 is_pos_ok_for_url(Line *self, index_type x, bool in_hostname, index_type last_hostname_char_pos, ListOfChars *lc) {
     if (x >= self->xnum) return false;
-    text_in_cell(self->cpu_cells + x, self->text_cache, lc);
+    text_in_cell_without_leading_controls(self->cpu_cells + x, self->text_cache, lc);
     if (in_hostname && x <= last_hostname_char_pos) return is_hostname_lc(lc);
     return is_url_lc(lc);
 }
@@ -374,7 +376,7 @@ line_url_end_at(
 
 bool
 line_startswith_url_chars(Line *self, bool in_hostname, ListOfChars *lc) {
-    text_in_cell(self->cpu_cells, self->text_cache, lc);
+    text_in_cell_without_leading_controls(self->cpu_cells, self->text_cache, lc);
     if (in_hostname) return is_hostname_lc(lc);
     return is_url_lc(lc);
 }
@@ -509,6 +511,26 @@ unicode_in_range(
             lc.capacity = buf->capacity - buf->len;
         }
         if (self->cpu_cells[i].is_multicell && (self->cpu_cells[i].x || (skip_multiline_non_zero_lines && self->cpu_cells[i].y))) continue;
+        if (self->cpu_cells[i].ch_is_idx && chars_are_leading_controls(lc.chars, lc.count)) {
+            // An empty cell that starts with leading controls. Without include_cc a cell gives one char, so it is the empty cell's space
+            if (!include_cc) lc.chars[0] = 0;
+            else {
+                size_t n = lc.count;
+                if (i + 1 < limit && !skip_zero_cells) {
+                    if (n >= lc.capacity) {
+                        size_t ns = MAX(initial_cap, 2 * buf->capacity);
+                        char_type *np = realloc(buf->buf, ns * sizeof(buf->buf[0]));
+                        if (!np) return false;
+                        buf->capacity = ns;
+                        buf->buf = np;
+                        lc.chars = buf->buf + buf->len;
+                    }
+                    lc.chars[n++] = ' ';
+                }
+                buf->len += n;
+                continue;
+            }
+        }
         if (!lc.chars[0]) {
             if (skip_zero_cells) continue;
             lc.chars[0] = ' ';
@@ -520,10 +542,7 @@ unicode_in_range(
                 i++;
                 num_cells_to_skip_for_tab--;
             }
-        } else {
-            if (include_cc && lc.count > 1 && cell_has_leading_controls(self->cpu_cells + i)) put_leading_controls_first(lc.chars, lc.count);
-            buf->len += include_cc ? lc.count : 1;
-        }
+        } else buf->len += include_cc ? lc.count : 1;
     }
     if (add_trailing_newline && !self->cpu_cells[self->xnum - 1].next_char_was_wrapped && buf->len < buf->capacity) buf->buf[buf->len++] = '\n';
     return true;
@@ -899,12 +918,7 @@ colors_for_cell(Line *self, const ColorProfile *cp, index_type *x, color_type *f
 
 char_type
 line_get_char(Line *self, index_type at) {
-    if (self->cpu_cells[at].ch_is_idx) {
-        RAII_ListOfChars(lc);
-        text_in_cell(self->cpu_cells + at, self->text_cache, &lc);
-        if (self->cpu_cells[at].is_multicell && (self->cpu_cells[at].x || self->cpu_cells[at].y)) return 0;
-        return lc.chars[0];
-    } else return self->cpu_cells[at].ch_or_idx;
+    return cell_first_char(self->cpu_cells + at, self->text_cache);
 }
 
 
@@ -1077,6 +1091,8 @@ apply_mark(Line *line, const uint16_t mark, index_type *cell_pos, unsigned int *
     (*match_pos)++;
     RAII_ListOfChars(lc);
     text_in_cell(line->cpu_cells + x, line->text_cache, &lc);
+    // a cell with only leading controls is exported as its controls and the space of an empty cell, see unicode_in_range()
+    const unsigned only_controls = line->cpu_cells[x].ch_is_idx && chars_are_leading_controls(lc.chars, lc.count);
     if (lc.chars[0]) {
         if (lc.chars[0] == '\t') {
             unsigned num_cells_to_skip_for_tab = lc.count > 1 ? lc.chars[1] : 0;
@@ -1086,12 +1102,12 @@ apply_mark(Line *line, const uint16_t mark, index_type *cell_pos, unsigned int *
                 MARK;
             }
         } else if (line->cpu_cells[x].is_multicell) {
-            *match_pos += lc.count - 1;
+            *match_pos += lc.count - 1 + only_controls;
             index_type x_limit = MIN(line->xnum, x + mcd_x_limit(line->cpu_cells + x));
             for (; x < x_limit; x++) { MARK; }
             x--;
         } else {
-            *match_pos += lc.count - 1;
+            *match_pos += lc.count - 1 + only_controls;
         }
     }
     *cell_pos = x + 1;

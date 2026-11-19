@@ -403,7 +403,20 @@ For each decoded code point:
    the Unicode standard.
 
 #. If there is no previous cell and the code point's width is zero,
-   the code point is discarded and its processing is finished.
+   the code point is discarded and its processing is finished. The
+   exceptions are the bidi controls :code:`U+200E LEFT-TO-RIGHT MARK`,
+   :code:`U+200F RIGHT-TO-LEFT MARK`, :code:`U+2066 LEFT-TO-RIGHT ISOLATE`,
+   :code:`U+2067 RIGHT-TO-LEFT ISOLATE`, :code:`U+2068 FIRST STRONG ISOLATE`
+   and :code:`U+2069 POP DIRECTIONAL ISOLATE`, which affect the direction of
+   the line's text. Such a code point is stored in the current cell and the cursor
+   does not move. If the cell already holds only these controls, the code point
+   is added after them, otherwise it replaces what the cell held, as a code
+   point added to the cell would. A code point later drawn into such a cell
+   at the start of the line, other than by an automatic wrap from the line
+   above (which discards the controls), is added after them. Until then the
+   cell is shown empty. With bidi mode off, an isolate control at the start
+   of a line that was not written in bidi mode is stored in this way even when
+   the line continues a wrapped line.
 
 #. If there is a previous cell, the
    `Grapheme segmentation algorithm UAX29-C1-1 <https://www.unicode.org/reports/tr29/#C1-1>`__
