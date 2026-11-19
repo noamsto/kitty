@@ -1198,7 +1198,7 @@ convert_record_at_leading_mark(Screen *self, char_type ch, uint8_t record) {
     LineAttrs r = a->bidi_stamp ? *a : (LineAttrs){.val = record};
     if (!r.bidi_auto) return;
     r.bidi_auto = false;
-    r.bidi_rtl = ch != 0x200e;  // LRM
+    r.bidi_rtl = ch != 0x200e; // LRM
     set_bidi_record(a, r);
     self->linebuf->bidi_stamped = true;
 }
@@ -1211,9 +1211,8 @@ convert_record_at_leading_mark(Screen *self, char_type ch, uint8_t record) {
 static bool
 bidi_lead_stands(Screen *self) {
     const BidiLead *p = &self->bidi.lead;
-    return p->lb == self->linebuf && self->cursor->x == 0 && self->cursor->y == p->y && p->y < p->lb->ynum &&
-           p->generation == p->lb->bidi_generation && p->scrolls == p->lb->bidi_scrolls &&
-           memcmp(&p->cell, linebuf_cpu_cell_at(p->lb, 0, p->y), sizeof(CPUCell)) == 0;
+    return p->lb == self->linebuf && self->cursor->x == 0 && self->cursor->y == p->y && p->y < p->lb->ynum && p->generation == p->lb->bidi_generation &&
+           p->scrolls == p->lb->bidi_scrolls && memcmp(&p->cell, linebuf_cpu_cell_at(p->lb, 0, p->y), sizeof(CPUCell)) == 0;
 }
 
 static void __attribute__((noinline, cold))
@@ -2463,7 +2462,8 @@ handle_fixed_width_multicell_command(Screen *self, CPUCell mcd, ListOfChars *lc)
     if (lc->count && is_glyph_block_codepoint(lc->chars[0])) bind_registered_glyph(self, &mcd, lc->chars[0]);
     // Tested before the writes below, which may reuse lc
     bool region_control = false;
-    if (!self->modes.mBDSM) for (size_t i = 1; i < lc->count; i++) region_control |= lc->chars[i] - 0x2066u <= 0x2069u - 0x2066u;
+    if (!self->modes.mBDSM)
+        for (size_t i = 1; i < lc->count; i++) region_control |= lc->chars[i] - 0x2066u <= 0x2069u - 0x2066u;
     move_cursor_past_multicell(self, width);
     if (height > 1) {
         if (self->cursor->y <= self->margin_bottom) {
@@ -3958,7 +3958,7 @@ screen_erase_in_line(Screen *self, unsigned int how, bool private) {
         :param bool private: when ``True`` character attributes are left
                              unchanged.
         */
-    self->bidi.lead.n = 0;  // an erase of a blank cell leaves it as it was, so bidi_lead_stands() cannot see it
+    self->bidi.lead.n = 0; // an erase of a blank cell leaves it as it was, so bidi_lead_stands() cannot see it
     unsigned int s = 0, n = 0;
     switch (how) {
         case 0:
@@ -4248,7 +4248,7 @@ screen_delete_characters(Screen *self, unsigned int count) {
 void
 screen_erase_characters(Screen *self, unsigned int count) {
     // Delete characters clearing the cells
-    self->bidi.lead.n = 0;  // as in screen_erase_in_line()
+    self->bidi.lead.n = 0; // as in screen_erase_in_line()
     if (count == 0) count = 1;
     unsigned int x = self->cursor->x;
     unsigned int num = MIN(self->columns - x, count);
@@ -5584,16 +5584,15 @@ bidi_boundary_may_join(const BidiRows *src, int y, int end) {
     int record;
     if (!bidi_record_row(src, y, &record)) return false;
     const LineAttrs above = *bidi_row_attrs(src, record), below = *bidi_row_attrs(src, end);
-    return above.bidi_stamp != BIDI_STAMP_NONE && below.bidi_stamp != BIDI_STAMP_NONE && above.bidi_rtl == below.bidi_rtl &&
-           above.bidi_auto == below.bidi_auto;
+    return above.bidi_stamp != BIDI_STAMP_NONE && below.bidi_stamp != BIDI_STAMP_NONE && above.bidi_rtl == below.bidi_rtl && above.bidi_auto == below.bidi_auto;
 }
 
 // Whether row y, the last of its chain, hard-joins the chain below it, depth and start being the group's state after row y
 static bool
 bidi_hard_joint(const BidiRows *src, int y, int depth, int start) {
     int end;
-    return depth > 0 && bidi_run_end(src, y + 1, &end) && end - start < BIDI_MAX_PARAGRAPH_ROWS &&
-           bidi_boundary_may_join(src, y, end) && !bidi_chain_holds_opener(src, end);
+    return depth > 0 && bidi_run_end(src, y + 1, &end) && end - start < BIDI_MAX_PARAGRAPH_ROWS && bidi_boundary_may_join(src, y, end) &&
+           !bidi_chain_holds_opener(src, end);
 }
 
 // The group state after row y: returns the depth bidi_row_fold() gives after it from the group's first row, stored in *start,
@@ -5735,8 +5734,7 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued) {
             else if (src->linebuf->bidi_regions)
                 a->bidi_auto = bidi_cells_have_idx(cells, src->linebuf->xnum) && bidi_row_has_isolates(cells, src->linebuf->xnum, tc);
         }
-        rtl |= a->bidi_stamp == BIDI_STAMP_RTL ||
-               (a->bidi_stamp == BIDI_STAMP_ISOLATES && bidi_cells_may_reorder(around[y - y0], src->linebuf->xnum, tc));
+        rtl |= a->bidi_stamp == BIDI_STAMP_RTL || (a->bidi_stamp == BIDI_STAMP_ISOLATES && bidi_cells_may_reorder(around[y - y0], src->linebuf->xnum, tc));
         placeholders |= a->has_image_placeholders;
     }
     const bool resolved = (rtl || lead.bidi_rtl) && !placeholders;
@@ -6111,10 +6109,8 @@ cursor_visual_in_row(Screen *self, index_type x, index_type y, CursorShape shape
             index_type p = t - 1;
             while (p && cells[p].is_multicell && cells[p].x) p--;
             const uint8_t lp = bidi_cell_level(b, render_row, p);
-            const bool skipped_after_non_letter = t < x &&
-                !FRIBIDI_IS_LETTER(fribidi_get_bidi_type(cell_first_char(cells + p, self->text_cache)));
-            if (lp != base && !skipped_after_non_letter &&
-                !bidi_cell_has_isolates(cells + p, self->text_cache)) {
+            const bool skipped_after_non_letter = t < x && !FRIBIDI_IS_LETTER(fribidi_get_bidi_type(cell_first_char(cells + p, self->text_cache)));
+            if (lp != base && !skipped_after_non_letter && !bidi_cell_has_isolates(cells + p, self->text_cache)) {
                 index_type q = p;
                 if (t < x && bidi_cell_level(b, render_row, x - 1) == lp) q = x - 1;
                 const index_type span = cell_span(cells + q);
@@ -9694,8 +9690,12 @@ test_bidi_line_record(Screen *self, PyObject *val) {
 static PyObject *
 test_bidi_state(Screen *self, PyObject *args UNUSED) {
     return Py_BuildValue(
-        "OOOOO", self->modes.mBDSM ? Py_True : Py_False, self->modes.mBIDI_AUTODETECT ? Py_True : Py_False, self->bidi.rtl ? Py_True : Py_False,
-        self->main_linebuf->bidi_stamped ? Py_True : Py_False, self->alt_linebuf->bidi_stamped ? Py_True : Py_False);
+        "OOOOO",
+        self->modes.mBDSM ? Py_True : Py_False,
+        self->modes.mBIDI_AUTODETECT ? Py_True : Py_False,
+        self->bidi.rtl ? Py_True : Py_False,
+        self->main_linebuf->bidi_stamped ? Py_True : Py_False,
+        self->alt_linebuf->bidi_stamped ? Py_True : Py_False);
 }
 
 static PyObject *

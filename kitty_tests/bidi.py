@@ -140,8 +140,15 @@ class TestBidi(BaseTest):
     def test_bidi_control_parse(self):
         # (setup, SCP sequence, direction after)
         for setup, seq, rtl in (
-            ('', '2 k', True), ('', '2;5 k', True), ('2 k', '1 k', False), ('2 k', '0 k', False), ('2 k', ' k', False),
-            ('2 k', '1;0 k', False), ('2 k', '1;2;3 k', True), ('2 k', '3 k', True), ('2 k', '?1 k', True),
+            ('', '2 k', True),
+            ('', '2;5 k', True),
+            ('2 k', '1 k', False),
+            ('2 k', '0 k', False),
+            ('2 k', ' k', False),
+            ('2 k', '1;0 k', False),
+            ('2 k', '1;2;3 k', True),
+            ('2 k', '3 k', True),
+            ('2 k', '?1 k', True),
         ):
             with self.subTest(setup=setup, seq=seq):
                 s = self.screen()
@@ -366,7 +373,7 @@ class TestBidi(BaseTest):
         self.ae(self.records(s, 0), [RTL])
 
     def test_joining_char_stamps_the_row_it_joins(self):
-        for first, joiner in (('\U0001F44D', '\U0001F3FD'), ('\U0001F1FA', '\U0001F1F8')):
+        for first, joiner in (('\U0001f44d', '\U0001f3fd'), ('\U0001f1fa', '\U0001f1f8')):
             with self.subTest(first=first):
                 s = self.screen(cols=5)
                 pb(s, 'abc' + first)
@@ -528,8 +535,7 @@ class TestBidi(BaseTest):
                     self.draw_marked(s, mark, 'c', split)
                     self.ae(self.cell_texts(s, 4), ['a', 'b' + mark, 'c', '\0'], mark)
                     self.ae(self.records(s, 0), [AUTO], mark)
-                for mark in ('\u200c', '\u200d', '\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
-                             '\u2066', '\u2067', '\u2068', '\u2069'):
+                for mark in ('\u200c', '\u200d', '\u202a', '\u202b', '\u202c', '\u202d', '\u202e', '\u2066', '\u2067', '\u2068', '\u2069'):
                     s = self.screen()
                     pb(s, IA)
                     self.draw_marked(s, mark, 'abc', split)
@@ -571,8 +577,7 @@ class TestBidi(BaseTest):
                 self.ae(self.records(s, 0), [RTL])
 
     def test_leading_mark_other_zero_width(self):
-        for ch in ('\u200b', '\u200c', '\u200d', '\u202a', '\u202b', '\u202c',
-                   '\u2066', '\u2067', '\u2068', '\u2069'):
+        for ch in ('\u200b', '\u200c', '\u200d', '\u202a', '\u202b', '\u202c', '\u2066', '\u2067', '\u2068', '\u2069'):
             for split in (False, True):
                 with self.subTest(ch=ch, split=split):
                     s = self.screen()
@@ -597,12 +602,14 @@ class TestBidi(BaseTest):
     def test_leading_mark_lifetime(self):
         for split in (False, True):
             with self.subTest(split=split):
+
                 def marked():
                     s = self.screen()
                     pb(s, IA)
                     self.draw_marked(s, RLM, 'abc', split)
                     self.ae(self.records(s, 0), [RTL])
                     return s
+
                 for el in ('0K', '1K', '2K'):
                     s = marked()
                     pb(s, CUP(1) + '\x1b[' + el)

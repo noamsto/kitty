@@ -458,7 +458,8 @@ current_sprite_index(const GPUSpriteTracker *sprite_tracker) {
 }
 
 static inline __attribute__((always_inline)) SpritePosition *
-sprite_position_for_impl(FontGroup *fg, RunFont rf, glyph_index *glyphs, unsigned glyph_count, uint8_t ligature_index, unsigned cell_count, const uint8_t key_tag) {
+sprite_position_for_impl(
+    FontGroup *fg, RunFont rf, glyph_index *glyphs, unsigned glyph_count, uint8_t ligature_index, unsigned cell_count, const uint8_t key_tag) {
     bool created;
     Font *font = fg->fonts + rf.font_idx;
     uint8_t subscale = ((rf.subscale_n & 0xf) << 4) | (rf.subscale_d & 0xf);
@@ -788,8 +789,8 @@ has_emoji_presentation(const CPUCell *c, const ListOfChars *lc) {
             (!is_text_presentation && (lc->count == 1 || lc->chars[1] != VS15)));
 }
 
-__attribute__((always_inline)) inline bool
-has_cell_text(bool (*has_codepoint)(const void *, char_type ch), const void *face, bool do_debug, const ListOfChars *lc) {
+static inline __attribute__((always_inline)) bool
+cell_text_in_face(bool (*has_codepoint)(const void *, char_type ch), const void *face, bool do_debug, const ListOfChars *lc) {
     RAII_ListOfChars(llc);
     if (!has_codepoint(face, lc->chars[0])) goto not_found;
     for (unsigned i = 1; i < lc->count; i++) {
@@ -821,6 +822,11 @@ not_found:
         debug(" but it does not actually contain glyphs for that text\n");
     }
     return false;
+}
+
+bool
+has_cell_text(bool (*has_codepoint)(const void *, char_type ch), const void *face, bool do_debug, const ListOfChars *lc) {
+    return cell_text_in_face(has_codepoint, face, do_debug, lc);
 }
 
 static void
@@ -1017,7 +1023,7 @@ font_for_cell(
                 case 3: ans = fg->bi_font_idx; break;
             }
             if (ans < 0) ans = fg->medium_font_idx;
-            if (!*is_emoji_presentation && has_cell_text((bool (*)(const void *, char_type))face_has_codepoint, (fg->fonts + ans)->face, false, lc)) {
+            if (!*is_emoji_presentation && cell_text_in_face((bool (*)(const void *, char_type))face_has_codepoint, (fg->fonts + ans)->face, false, lc)) {
                 *is_main_font = true;
                 return ans;
             }
@@ -1324,9 +1330,8 @@ render_box_cell(FontGroup *fg, RunFont rf, CPUCell *cpu_cell, GPUCell *gpu_cell,
     bool all_rendered = true;
 #define sp global_glyph_render_scratch.sprite_positions
     for (unsigned ligature_index = 0; ligature_index < num_cells; ligature_index++) {
-        sp[ligature_index] =
-            rtl_group ? sprite_position_for_rtl(fg, rf, global_glyph_render_scratch.glyphs, num_glyphs, ligature_index, num_cells) :
-                        sprite_position_for(fg, rf, global_glyph_render_scratch.glyphs, num_glyphs, ligature_index, num_cells);
+        sp[ligature_index] = rtl_group ? sprite_position_for_rtl(fg, rf, global_glyph_render_scratch.glyphs, num_glyphs, ligature_index, num_cells)
+                                       : sprite_position_for(fg, rf, global_glyph_render_scratch.glyphs, num_glyphs, ligature_index, num_cells);
         if (sp[ligature_index] == NULL) failed;
         sp[ligature_index]->colored = false;
         if (!sp[ligature_index]->rendered) all_rendered = false;
@@ -1737,7 +1742,10 @@ inked_width(const pixel *canvas, unsigned width, unsigned height) {
     unsigned ans = 0;
     for (unsigned y = 0; y < height; y++, canvas += width) {
         for (unsigned x = width; x > ans; x--) {
-            if (canvas[x - 1]) { ans = x; break; }
+            if (canvas[x - 1]) {
+                ans = x;
+                break;
+            }
         }
     }
     return ans;
@@ -1790,9 +1798,9 @@ render_group(
     for (unsigned i = 0, ligature_index = 0; i < num_cells; i++) {
         bool is_repeat_sprite =
             is_infinite_ligature && i > 1 && i + 1 < num_glyphs && glyphs[i] == glyphs[i - 1] && glyphs[i] == glyphs[i - 2] && glyphs[i] == glyphs[i + 1];
-        sp[i] = is_repeat_sprite ? sp[i - 1] :
-            rtl_group ? sprite_position_for_rtl(fg, rf, glyphs, glyph_count, ligature_index++, num_cells) :
-                        sprite_position_for(fg, rf, glyphs, glyph_count, ligature_index++, num_cells);
+        sp[i] = is_repeat_sprite ? sp[i - 1]
+                : rtl_group      ? sprite_position_for_rtl(fg, rf, glyphs, glyph_count, ligature_index++, num_cells)
+                                 : sprite_position_for(fg, rf, glyphs, glyph_count, ligature_index++, num_cells);
         if (!sp[i]) failed;
         if (!sp[i]->rendered) all_rendered = false;
     }
@@ -1988,7 +1996,13 @@ restore_shaped_run(CPUCell *first_cpu_cell, GPUCell *first_gpu_cell, index_type 
 
 static inline __attribute__((always_inline)) void
 shape_impl(
-    CPUCell *first_cpu_cell, GPUCell *first_gpu_cell, index_type num_cells, hb_font_t *font, Font *fobj, bool disable_ligature, const TextCache *tc,
+    CPUCell *first_cpu_cell,
+    GPUCell *first_gpu_cell,
+    index_type num_cells,
+    hb_font_t *font,
+    Font *fobj,
+    bool disable_ligature,
+    const TextCache *tc,
     ShapeDirection dir) {
     if (!ensure_group_capacity(num_cells, 0)) fatal("Out of memory");
     RAII_ListOfChars(lc);
@@ -2027,7 +2041,13 @@ shape(CPUCell *first_cpu_cell, GPUCell *first_gpu_cell, index_type num_cells, hb
 
 static void
 shape_directed(
-    CPUCell *first_cpu_cell, GPUCell *first_gpu_cell, index_type num_cells, hb_font_t *font, Font *fobj, bool disable_ligature, const TextCache *tc,
+    CPUCell *first_cpu_cell,
+    GPUCell *first_gpu_cell,
+    index_type num_cells,
+    hb_font_t *font,
+    Font *fobj,
+    bool disable_ligature,
+    const TextCache *tc,
     ShapeDirection dir) {
     shape_impl(first_cpu_cell, first_gpu_cell, num_cells, font, fobj, disable_ligature, tc, dir);
 }

@@ -43,10 +43,10 @@ typedef struct BidiCacheContext {
 } BidiCacheContext;
 
 typedef struct BidiMaps {
-    uint16_t *v2l;   // rows*cols, row-major by render row: the logical cell shown at each visual column
-    uint8_t *levels; // rows*cols, the embedding level of each logical cell
-    bool *active;    // rows: the row has a map
-    bool *rtl;       // rows: the paragraph that last wrote or kept the row's entry resolved right-to-left
+    uint16_t *v2l;    // rows*cols, row-major by render row: the logical cell shown at each visual column
+    uint8_t *levels;  // rows*cols, the embedding level of each logical cell
+    bool *active;     // rows: the row has a map
+    bool *rtl;        // rows: the paragraph that last wrote or kept the row's entry resolved right-to-left
     bool *region_row; // rows: the row's map was written by its isolate regions, not as a paragraph
     // The paragraph cache, per render row: the id of the line shown there when its map was last written or kept, and the ids of
     // the first and last rows, and the row count with the first row's base direction (BIDI_KEY_DIR_SHIFT), of the paragraph that

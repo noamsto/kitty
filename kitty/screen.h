@@ -26,8 +26,7 @@ typedef struct DnDCommand {
 
 typedef struct {
     bool mLNM, mIRM, mDECTCEM, mDECSCNM, mDECOM, mDECAWM, mDECCOLM, mDECARM, mDECCKM, mCOLOR_PREFERENCE_NOTIFICATION, mBRACKETED_PASTE, mFOCUS_TRACKING,
-        mDECSACE, mHANDLE_TERMIOS_SIGNALS, mINBAND_RESIZE_NOTIFICATION, mPASTE_EVENTS, mVISIBILITY_REPORTS, mWHEEL_EVENTS,
-        mBDSM, mBIDI_AUTODETECT;
+        mDECSACE, mHANDLE_TERMIOS_SIGNALS, mINBAND_RESIZE_NOTIFICATION, mPASTE_EVENTS, mVISIBILITY_REPORTS, mWHEEL_EVENTS, mBDSM, mBIDI_AUTODETECT;
     MouseTrackingMode mouse_tracking_mode;
     MouseTrackingProtocol mouse_tracking_protocol;
 } ScreenModes;
@@ -282,7 +281,9 @@ typedef struct {
         // the next draw takes the implicit copy: BDSM is on or controls are kept for column 0; may be stale true, never stale false
         bool draw_implicit;
         bool rtl; // direction set by SCP for the current buffer
-        struct { bool mBDSM, mBIDI_AUTODETECT, rtl; } main_stash; // main's controls while alt is active
+        struct {
+            bool mBDSM, mBIDI_AUTODETECT, rtl;
+        } main_stash; // main's controls while alt is active
     } bidi;
     struct BidiMaps *bidi_maps; // allocated by the first upload of a stamped buffer
 } Screen;
