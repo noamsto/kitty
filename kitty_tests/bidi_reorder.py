@@ -3851,12 +3851,12 @@ class TestBidiReorder(BaseTest):
         F, T = False, True
         BG = b'\x1b[38;2;205;214;244m\x1b[48;2;30;30;46m'
 
-        def padded(text, cols=24, lines=3, row=None, below=b'', erase=False):
-            # the prompt row replayed on screen row `row` (1-based, the last by default), `below` written before it
+        def padded(text, cols=24, lines=3, row=None, below=b'', erase=False, after=b''):
+            # the prompt row replayed on screen row `row` (1-based, the last by default), `below` written before it and `after` behind it
             row = row or lines
             s = self.create_screen(cols=cols, lines=lines, scrollback=0, options={})
             fill = b'\x1b[K' if erase else b' ' * (cols - 2)
-            parse_bytes(s, b'\x1b[?1049h\x1b[8h\x1b[?2501h' + below + b'\x1b[%d;1H' % row + self.PUA + BG + b' ' + FSI.encode() + fill)
+            parse_bytes(s, b'\x1b[?1049h\x1b[8h\x1b[?2501h' + below + b'\x1b[%d;1H' % row + self.PUA + BG + b' ' + FSI.encode() + fill + after)
             parse_bytes(s, b'\x1b[%d;3H' % row + text.encode())
             test_screen_update_cell_data(s)
             return s, row - 1
@@ -3927,6 +3927,38 @@ class TestBidiReorder(BaseTest):
                 self.ae(s.cursor.x, x)
                 self.ae(self.region_maps(s, y), (v2l + ID(len(v2l), cols), levels + (0,) * (cols - len(levels))))
                 self.assert_cursor_at_row(s, y, x, beam, block)
+        # Rows below the prompt written as spaces stand for erased rows: the prompt row is laid out and its cursor drawn as when it
+        # is the bottom row with nothing below. The oracle is that screen; 'ab שלום ' is also pinned by value.
+        def drawn_cursor(s, y):
+            test_screen_update_cell_data(s)
+            x = s.cursor.x
+            return x, s.test_cursor_visual(x, y, CURSOR_BEAM), s.test_cursor_visual(x, y, CURSOR_BLOCK)
+
+        fish_levels = (0, 0, 2, 2, 2, 3, 3, 3, 3, 3) + (0,) * 14
+        fish_v2l = (0, 1, 2, 3, 4, 9, 8, 7, 6, 5) + tuple(range(10, 24))
+        # (name, text, erase the prompt row)
+        padded_below = (
+            ('typed space after hebrew behind latin', 'ab שלום ', F),
+            ('typed space after hebrew', 'שלום ', F),
+            ('typed two spaces after hebrew', 'שלום  ', F),
+            ('latin, hebrew and a typed space', 'abc שלום ', F),
+            ('cursor back on the typed space', 'שלום \x1b[D', F),
+            ('erase idiom', 'אני\x08 \x08', F),
+            ('autosuggestion', 'אני abc\x1b[4D', F),
+            ('erased prompt row', 'ab שלום ', T),
+        )
+        for name, text, erase in padded_below:
+            with self.subTest('padded rows below, ' + name):
+                want_s, want_y = padded(text, lines=4, erase=erase)
+                s, y = padded(text, lines=4, row=2, after=below_padded(3, 24, last=4), erase=erase)
+                want_cursor = drawn_cursor(want_s, want_y)
+                self.ae(self.region_maps(s, y), self.region_maps(want_s, want_y))
+                self.ae(drawn_cursor(s, y), want_cursor)
+                self.assert_cursor_at_row(s, y, want_cursor[0], want_cursor[1], want_cursor[2][0])
+        with self.subTest('padded rows below, captured stage'):
+            s, y = padded('ab שלום ', lines=4, row=2, after=below_padded(3, 24, last=4))
+            self.ae(s.cursor.x, 10)
+            self.ae(self.region_maps(s, y), (fish_v2l, fish_levels))
         # the history row: the cursor is off it, the PDI of the next row closes nothing on this one
         with self.subTest('history row'):
             s, _ = padded('אני\r\n' + PDI + 'output text', row=1)
@@ -4456,6 +4488,63 @@ class TestBidiReorder(BaseTest):
                     for y, (v2l, levels) in enumerate(layouts):
                         self.assert_obs(self.obs(s, y), v2l, levels, False, f'row {y + 1}')
                     self.assert_cursor_at_row(s, cy, cx, beam, block)
+        # The blank row written as spaces in the pane's background, as tmux does without bce, is the row erased. Under CSI 8 l the
+        # row is written unstamped; DECSC and DECRC keep the background out of the rows after it.
+        BG = b'\x1b[48;2;30;30;46m'
+
+        def write_spaces(y, stamped):
+            bidi = b'' if stamped else b'\x1b[8l'
+            return b'\x1b7' + f'\x1b[{y + 1};1H'.encode() + bidi + BG + b' ' * n + b'\x1b[8h\x1b8'
+
+        by_name = {case[0]: case for case in cases}
+        for stamped, names in (
+            (True, ('typed space', 'typed space on a continuation row', 'blank row between two rows')),
+            (
+                False,
+                (
+                    'blank row between two rows',
+                    'typed space, unstamped row below',
+                    'typed space on a continuation row, unstamped row below',
+                ),
+            ),
+        ):
+            for name in names:
+                _, rows, blank, _, layouts, (cy, cx, beam, block) = by_name[name]
+                for form in ('plain', 'tmux'):
+                    with self.subTest(('padded ' if stamped else 'unstamped padded ') + name, form=form):
+                        s = self.replay_bytes(self.shell_rows(form, rows) + write_spaces(blank, stamped))
+                        self.ae(str(s.line(blank)).strip(), '')
+                        self.ae(bool(s.test_bidi_line_record(blank)[0]), stamped)
+                        self.ae((s.cursor.y, s.cursor.x), (cy, cx))
+                        for y, (v2l, levels) in enumerate(layouts):
+                            self.assert_obs(self.obs(s, y), v2l, levels, False, f'row {y + 1}')
+                        self.assert_cursor_at_row(s, cy, cx, beam, block)
+
+    def test_painted_continuation_row_in_prompt_isolate(self):
+        # Shift+Enter in fish moves to a fresh row; tmux, without bce, paints it with spaces in the pane's background and puts the
+        # cursor back at column 3. A row of only blanks continues no row, so it is not part of the prompt's paragraph: the prompt
+        # row lays out on its own (the Hebrew in the FSI at level 1) and the blank row is the identity, with or without the typed
+        # space. Expected values are the two rows laid out on their own, the same for the painted and the erased row.
+        n = 40
+        ident = tuple(range(n))
+        BG = b'\x1b[48;2;30;30;46m'
+        painted = b'\x1b7\x1b[2;1H' + BG + b' ' * n + b'\x1b8'
+        prompt = (ident[:2] + (4, 3, 2) + ident[5:], (0, 0, 1, 1, 1) + (0,) * (n - 5))
+        # (name, typed after the continuation, cursor x, beam, block column)
+        cases = (
+            ('no typed space', b'', 2, (2, False), 2),
+            ('typed space', b' ', 3, (3, False), 3),
+        )
+        for name, typed, x, beam, block in cases:
+            for form, paint in (('painted', painted), ('erased', b'')):
+                with self.subTest(name, form=form):
+                    s = self.replay_bytes(self.PROMPT_ROW + 'אני'.encode() + self.CONTINUE + paint + typed)
+                    if paint:
+                        self.ae(str(s.line(1)).strip(), '')
+                    self.ae((s.cursor.y, s.cursor.x), (1, x))
+                    self.assert_obs(self.obs(s, 0), *prompt, False, 'row 1')
+                    self.assert_obs(self.obs(s, 1), ident, None, False, 'row 2')
+                    self.assert_cursor_at_row(s, 1, x, beam, block)
 
     def test_output_rows_after_prompt_isolate(self):
         # What stays as it is: a row that is not a continuation of an open isolate is its own paragraph, auto-RTL when it has only
