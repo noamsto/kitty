@@ -1667,6 +1667,7 @@ static PyMemberDef members[] = {
     MEM(has_svg, T_BOOL),
     MEM(has_color, T_BOOL),
     MEM(path, T_OBJECT_EX),
+    MEM(index, T_LONG),
     {NULL} /* Sentinel */
 #undef MEM
 #undef MMEM
