@@ -207,15 +207,6 @@ cell_clear_multicell(CPUCell *c) {
     c->width = 0;
 }
 
-// A cell that is not a multicell has no use for natural_width, so a set one marks its stored isolate controls (the chars after the
-// first that are LRI, RLI, FSI or PDI) as leading: a control written with no previous cell, at column 0, is kept as a leading control
-// of the cell written next and is fed to the bidi resolver before the cell's base char. All the isolate controls of such a cell are
-// leading. Overwriting or clearing the cell clears the flag, with the whole cell.
-static inline bool
-cell_has_leading_controls(const CPUCell *c) {
-    return !c->is_multicell && c->natural_width && c->ch_is_idx;
-}
-
 static inline bool
 continues_multicell_char(const CPUCell *c, const CPUCell *ref, index_type y) {
     // Whether c is the cell in row y of the same multicell char as ref in the same column.
@@ -233,6 +224,32 @@ text_in_cell(const CPUCell *c, const TextCache *tc, ListOfChars *ans) {
         ans->count = 1;
         ans->chars[0] = c->ch_or_idx;
     }
+}
+
+// A cell whose text is only leading controls reads as an empty cell that starts with controls
+static inline bool
+chars_are_leading_controls(const char_type *chars, size_t count) {
+    if (!count) return false;
+    for (size_t i = 0; i < count; i++) {
+        if (!is_leading_control(chars[i])) return false;
+    }
+    return true;
+}
+
+// The text of a cell without the leading controls it starts with, for code that reads the char a cell shows
+static inline void
+text_in_cell_without_leading_controls(const CPUCell *c, const TextCache *tc, ListOfChars *ans) {
+    text_in_cell(c, tc, ans);
+    if (!c->ch_is_idx || ans->count < 1 || !is_leading_control(ans->chars[0])) return;
+    size_t n = 1;
+    while (n < ans->count && is_leading_control(ans->chars[n])) n++;
+    if (n == ans->count) {
+        ans->chars[0] = 0;
+        ans->count = 1;
+        return;
+    }
+    ans->count -= n;
+    memmove(ans->chars, ans->chars + n, ans->count * sizeof(ans->chars[0]));
 }
 
 static inline bool
@@ -260,7 +277,7 @@ static inline char_type
 cell_first_char(const CPUCell *c, const TextCache *tc) {
     if (c->ch_is_idx) {
         if (c->is_multicell && (c->x || c->y)) return 0;
-        return tc_first_char_at_index(tc, c->ch_or_idx);
+        return tc_base_char_at_index(tc, c->ch_or_idx);
     }
     return c->ch_or_idx;
 }

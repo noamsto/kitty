@@ -2487,6 +2487,25 @@ class TestScreen(BaseTest):
         detect_url(self)
         detect_url(self, scale=2)
 
+    def test_detect_url_after_leading_mark(self):
+        # the URL starts in the line's first cell, whose text starts with the mark, so the marked text does too, but the opened URL does not
+        for x in (0, 5):
+            s = self.create_screen(cols=30)
+            s.draw('\u200fhttp://moo.com x')
+            s.detect_url(x, 0)
+            self.ae(''.join(s.text_for_marked_url()), '\u200fhttp://moo.com')
+            self.ae(s.current_url_text(), 'http://moo.com')
+
+    def test_line_edge_colors_with_leading_mark(self):
+        # a full block at the start of a line gives the left edge its foreground, also after a leading mark
+        def edges(text):
+            s = self.create_screen()
+            parse_bytes(s, b'\x1b[31;42m' + text.encode())
+            return s.line_edge_colors()
+
+        self.assertNotEqual(edges('\u2588'), edges('a'))
+        self.ae(edges('\u200f\u2588'), edges('\u2588'))
+
     def test_detect_url_regex(self):
         file_ref = r'[[:alnum:]_./-]+\.[[:alnum:]]+:[0-9]+'
 

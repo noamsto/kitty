@@ -73,19 +73,6 @@ typedef struct {
 } Selections;
 
 #define SAVEPOINTS_SZ 256
-// Isolate controls written at column 0 that a screen keeps for the cell written next there
-#define BIDI_MAX_LEAD 8
-// Valid while the cursor is still at (0, y) of lb and cell (0, y) is as it was; a write at the cursor consumes or drops them.
-typedef struct BidiLead {
-    LineBuf *lb;
-    index_type y;
-    CPUCell cell;
-    // the linebuf's counters when the controls were written: a scroll or a row move leaves a blank row as it was
-    uint64_t generation, scrolls;
-    unsigned n;
-    char_type chars[BIDI_MAX_LEAD];
-} BidiLead;
-
 typedef struct CharsetState {
     uint32_t *zero, *one, *current, current_num;
 } CharsetState;
@@ -274,15 +261,19 @@ typedef struct {
         DnDCommand metadata;
     } dnd_chunking;
     struct {
-        BidiLead lead;
-        // the next draw takes the implicit copy: BDSM is on or controls are kept for column 0; may be stale true, never stale false
-        bool draw_implicit;
-        bool rtl; // direction set by SCP for the current buffer
+        bool draw_implicit; // the next draw takes the implicit copy, which records each line written: BDSM is on
+        bool rtl;           // direction set by SCP for the current buffer
         struct {
             bool mBDSM, mBIDI_AUTODETECT, rtl;
         } main_stash; // main's controls while alt is active
     } bidi;
     struct BidiMaps *bidi_maps; // allocated by the first upload of a stamped buffer
+    // Re-entry guard of draw_at_leading_controls(), set only while it runs, so it never outlives one draw call
+    struct {
+        bool active;
+        const uint32_t *resume;
+        size_t resume_count;
+    } leading_controls_draw;
 } Screen;
 
 #define live_pixel_scroll_enabled(screen) (OPT(pixel_scroll) && (screen)->linebuf == (screen)->main_linebuf)

@@ -109,6 +109,17 @@ tc_first_char_at_index(const TextCache *self, char_type idx) {
 }
 
 char_type
+tc_base_char_at_index(const TextCache *self, char_type idx) {
+    if (self->array.count <= idx) return 0;
+    const Chars *c = self->array.items + idx;
+    if (!is_leading_control(c->chars[0])) return c->chars[0];
+    for (size_t i = 1; i < c->count; i++) {
+        if (!is_leading_control(c->chars[i])) return c->chars[i];
+    }
+    return 0;
+}
+
+char_type
 tc_last_char_at_index(const TextCache *self, char_type idx) {
     if (self->array.count > idx) return self->array.items[idx].chars[self->array.items[idx].count - 1];
     return 0;

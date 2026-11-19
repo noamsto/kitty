@@ -136,7 +136,7 @@ fill_key(
     scratch->subscale = subscale;
     for (; num_cells; cells++, num_cells--) {
         if (cells->is_multicell && cells->x) continue;
-        text_in_cell(cells, tc, &lc);
+        text_in_cell_without_leading_controls(cells, tc, &lc);
         // the scratch buffer is sized assuming this limit, cells that exceed it
         // (only possible via the Python API) are simply not cached
         if (lc.count > MAX_NUM_CODEPOINTS_PER_CELL) return false;

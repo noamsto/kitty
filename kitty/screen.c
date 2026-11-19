@@ -17,7 +17,6 @@
         PyModule_AddIntMacro(module, WIDTH_BITS);                             \
         PyModule_AddIntMacro(module, SUBSCALE_BITS);                          \
         PyModule_AddIntMacro(module, BIDI_MAX_ISOLATES);                      \
-        PyModule_AddIntMacro(module, BIDI_MAX_LEAD);                          \
         PyModule_AddIntMacro(module, BIDI_MAX_PARAGRAPH_ROWS);                \
         if (PyModule_AddFunctions(module, module_methods) != 0) return false; \
     }
@@ -54,7 +53,7 @@ static const ScreenModes empty_modes = {0, .mDECAWM = true, .mDECTCEM = true, .m
 
 static inline void
 bidi_update_draw_dispatch(Screen *self) {
-    self->bidi.draw_implicit = self->modes.mBDSM || self->bidi.lead.n;
+    self->bidi.draw_implicit = self->modes.mBDSM;
 }
 
 #define CSI_REP_MAX_REPETITIONS 65535u
@@ -1118,12 +1117,7 @@ init_prev_cell(Screen *self, text_loop_state *s) {
 static void __attribute__((noinline))
 segment_over_cell_chars(Screen *self, text_loop_state *s) {
     text_in_cell(s->prev.cc, self->text_cache, self->lc);
-    // The leading controls of a cell come before its base char, so they do not end the cluster the cell holds
-    const bool leading = cell_has_leading_controls(s->prev.cc);
-    for (index_type i = 0; i < self->lc->count; i++) {
-        if (leading && i && self->lc->chars[i] - 0x2066u <= 0x2069u - 0x2066u) continue;
-        s->seg = grapheme_segmentation_step(s->seg, char_props_for(self->lc->chars[i]));
-    }
+    for (index_type i = 0; i < self->lc->count; i++) s->seg = grapheme_segmentation_step(s->seg, char_props_for(self->lc->chars[i]));
 }
 
 static void
@@ -1173,10 +1167,7 @@ static void __attribute__((noinline, cold))
 stamp_line_for_bidi(Screen *self, index_type y, uint8_t record) {
     // An unstamped line's bidi_auto may be a region memo, so the record replaces the bits rather than ORing into them, and no
     // record leaves them as they are.
-    if (!record) {
-        self->linebuf->bidi_stamped = true;
-        return;
-    }
+    if (!record) return;
     LineAttrs *a = self->linebuf->line_attrs + y;
     if (a->bidi_stamp) return;
     set_bidi_record(a, (LineAttrs){.val = record});
@@ -1184,109 +1175,9 @@ stamp_line_for_bidi(Screen *self, index_type y, uint8_t record) {
 }
 
 static void __attribute__((noinline, cold))
-convert_record_at_leading_mark(Screen *self, char_type ch, uint8_t record) {
-    // A leading mark fixes the direction of a line that would otherwise take it from its text. A line not yet written takes the
-    // draw call's record, as its first write would.
-    LineAttrs *a = self->linebuf->line_attrs + self->cursor->y;
-    LineAttrs r = a->bidi_stamp ? *a : (LineAttrs){.val = record};
-    if (!r.bidi_auto) return;
-    r.bidi_auto = false;
-    r.bidi_rtl = ch != 0x200e; // LRM
-    set_bidi_record(a, r);
-    self->linebuf->bidi_stamped = true;
-}
-
-// Whether the isolate controls kept for column 0 still stand for the cell at the cursor: the cursor is at (0, y) of the buffer they
-// were written in, no row has moved since (the linebuf's counters) and cell (0, y) is as it was then. An overwrite, a switch of
-// screen or a garbage collection of the text cache changes the cell, so no hook in any of them is needed; the counters are for a
-// scroll or a row move that leaves a blank row in place of a blank row, and the line and character erases drop the controls
-// themselves as they leave a blank cell as it was.
-static bool
-bidi_lead_stands(Screen *self) {
-    const BidiLead *p = &self->bidi.lead;
-    return p->lb == self->linebuf && self->cursor->x == 0 && self->cursor->y == p->y && p->y < p->lb->ynum && p->generation == p->lb->bidi_generation &&
-           p->scrolls == p->lb->bidi_scrolls && memcmp(&p->cell, linebuf_cpu_cell_at(p->lb, 0, p->y), sizeof(CPUCell)) == 0;
-}
-
-static void __attribute__((noinline, cold))
-record_leading_isolate(Screen *self, char_type ch) {
-    // An isolate control with no previous cell is kept for the cell written next at the cursor, which is at column 0
-    BidiLead *p = &self->bidi.lead;
-    if (self->cursor->x || self->cursor->y >= self->linebuf->ynum) return;
-    if (p->n && !bidi_lead_stands(self)) p->n = 0;
-    if (!p->n) {
-        p->lb = self->linebuf;
-        p->y = self->cursor->y;
-        p->cell = *linebuf_cpu_cell_at(p->lb, 0, p->y);
-        // the counters only run for a stamped buffer
-        p->lb->bidi_stamped = true;
-        p->generation = p->lb->bidi_generation;
-        p->scrolls = p->lb->bidi_scrolls;
-    }
-    if (p->n < BIDI_MAX_LEAD) p->chars[p->n++] = ch;
-}
-
-static void __attribute__((noinline, cold))
-leading_zero_width(Screen *self, char_type ch, uint8_t record) {
-    if (ch - 0x2066u <= 0x2069u - 0x2066u) record_leading_isolate(self, ch);
-    else convert_record_at_leading_mark(self, ch, record);
-}
-
-// Whether the cell about to be written at the cursor takes the kept controls. Called with some kept; drops them when they do not
-// stand for it. The first cell written after them consumes them either way.
-static bool __attribute__((noinline, cold))
-bidi_lead_applies(Screen *self) {
-    if (bidi_lead_stands(self)) return true;
-    self->bidi.lead.n = 0;
-    return false;
-}
-
-// A PDI written after a cell holding leading controls has no place of its own in the cell (all its controls are leading), so it
-// closes the last opener among them: LRI x PDI becomes x. Another control written there is dropped.
-static void __attribute__((noinline, cold))
-close_leading_control(Screen *self, CPUCell *c, char_type ch) {
-    if (ch != 0x2069) return;
-    ListOfChars *lc = self->lc;
-    text_in_cell(c, self->text_cache, lc);
-    // The last opener no PDI among the leading controls has closed
-    size_t i = lc->count;
-    for (unsigned depth = 0; --i > 0;) {
-        if (lc->chars[i] == 0x2069) depth++;
-        else if (lc->chars[i] - 0x2066u <= 0x2068u - 0x2066u) {
-            if (!depth) break;
-            depth--;
-        }
-    }
-    if (!i) return;
-    memmove(lc->chars + i, lc->chars + i + 1, (lc->count - i - 1) * sizeof(lc->chars[0]));
-    lc->count--;
-    bool controls = false;
-    for (i = 1; i < lc->count; i++) controls |= lc->chars[i] - 0x2066u <= 0x2069u - 0x2066u;
-    if (!controls) c->natural_width = false;
-    cell_set_chars(c, self->text_cache, lc);
-}
-
-static void __attribute__((noinline, cold))
 region_control_stored(Screen *self) {
     // The walker runs only for a stamped buffer, and scans unstamped rows for isolate regions only for one that stored a control
     self->linebuf->bidi_regions = self->linebuf->bidi_stamped = true;
-}
-
-// Stores the kept controls after the first chars of cell (0, y), just written, and marks them leading. A cell that is a multicell
-// (a wide char) takes none.
-static void __attribute__((noinline, cold))
-attach_leading_controls(Screen *self) {
-    BidiLead *p = &self->bidi.lead;
-    const unsigned n = p->n;
-    p->n = 0;
-    CPUCell *c = linebuf_cpu_cell_at(p->lb, 0, p->y);
-    if (c->is_multicell || !c->ch_and_idx) return;
-    text_in_cell(c, self->text_cache, self->lc);
-    if (self->lc->count + n > MAX_NUM_CODEPOINTS_PER_CELL) return;
-    ensure_space_for_chars(self->lc, self->lc->count + n);
-    for (unsigned i = 0; i < n; i++) self->lc->chars[self->lc->count++] = p->chars[i];
-    cell_set_chars(c, self->text_cache, self->lc);
-    c->natural_width = true;
 }
 
 static inline __attribute__((always_inline)) void
@@ -1324,7 +1215,6 @@ rederive_blank_bidi_records(LineBuf *lb, LineAttrs record) {
 
 static void
 bidi_controls_changed(Screen *self) {
-    self->bidi.lead.n = 0;
     rederive_blank_bidi_records(self->linebuf, current_bidi_record(self));
 }
 
@@ -1613,12 +1503,29 @@ screen_garbage_collect_style_table(Screen *self) {
     }
 }
 
+static bool __attribute__((noinline, cold))
+cell_text_is_only_leading_controls(const CPUCell *c, const TextCache *tc) {
+    char_type buf[MAX_NUM_CODEPOINTS_PER_CELL];
+    ListOfChars lc = {.chars = buf, .capacity = arraysz(buf)};
+    return tc_chars_at_index_without_alloc(tc, c->ch_or_idx, &lc) && chars_are_leading_controls(buf, lc.count);
+}
+
+// A leading control drawn with no previous cell is stored in the cell under the cursor, as a one cell multicell char whose text is
+// only such controls, see draw_at_leading_controls(). A multicell, because every writer already tests is_multicell before it
+// overwrites a cell, so the next char drawn there reaches the existing multicell code, at no cost to text drawn into other cells.
+// The text is always in the text cache, even for a single control.
+static inline bool
+cell_holds_only_leading_controls(const CPUCell *c, const TextCache *tc) {
+    return c->is_multicell && c->ch_is_idx && c->natural_width && c->width == 1 && c->scale == 1 && cell_text_is_only_leading_controls(c, tc);
+}
+
 static bool
 add_combining_chars(Screen *self, const char_type *chars, size_t num_chars, index_type x, index_type y) {
     // Adds num_chars combining chars to the cell at x, y with a single lookup in the text cache
     CPUCell *cpu_cells = linebuf_cpu_cells_for_line(self->linebuf, y);
     CPUCell *cell = cpu_cells + x;
-    if (!cell_has_text(cell) || (cell->is_multicell && cell->y)) return false; // don't allow adding combining chars to a null cell
+    // don't allow adding combining chars to a null cell, a cell holding only leading controls is shown as one
+    if (!cell_has_text(cell) || (cell->is_multicell && (cell->y || cell_holds_only_leading_controls(cell, self->text_cache)))) return false;
     text_in_cell(cell, self->text_cache, self->lc);
     if (self->lc->count >= MAX_NUM_CODEPOINTS_PER_CELL) return false; // don't allow too many combining chars to prevent DoS attacks
     // must be computed before the char is changed
@@ -1725,24 +1632,9 @@ move_widened_char_past_multiline_chars(Screen *self, text_loop_state *s, CPUCell
     else init_text_loop_line(self, s);
 }
 
-// A cell widened to a multicell, as a wide first cell does, takes no leading isolate controls: drops them
-static void __attribute__((noinline, cold))
-drop_leading_controls(Screen *self, CPUCell *c) {
-    ListOfChars *lc = self->lc;
-    text_in_cell(c, self->text_cache, lc);
-    size_t n = 1;
-    for (size_t i = 1; i < lc->count; i++) {
-        if (lc->chars[i] - 0x2066u > 0x2069u - 0x2066u) lc->chars[n++] = lc->chars[i];
-    }
-    lc->count = n;
-    cell_set_chars(c, self->text_cache, lc);
-    c->natural_width = false;
-}
-
 static void
 widen_cell_to_two(Screen *self, text_loop_state *s, CPUCell *cp, index_type xpos) {
     CPUCell *cpu_cell = cp + xpos;
-    if (UNLIKELY(cell_has_leading_controls(cpu_cell))) drop_leading_controls(self, cpu_cell);
     cpu_cell->is_multicell = true;
     cpu_cell->width = 2;
     cpu_cell->natural_width = true;
@@ -1779,10 +1671,7 @@ draw_combining_char(Screen *self, text_loop_state *s, char_type ch) {
     if (!add_combining_char(self, ch, xpos, s->prev.y) || self->lc->count < 2) return;
     unsigned base_pos = self->lc->count - 2;
     if (ch == VS16) { // emoji presentation variation marker makes default text presentation emoji (narrow emoji) into wide emoji
-        // The leading isolate controls of a cell are stored after its base char, which the marker then does not follow
-        const bool leading = cell_has_leading_controls(cp + xpos);
-        if (leading) base_pos = 0;
-        if ((leading || self->lc->chars[base_pos + 1] == VS16) && !cp[xpos].is_multicell && is_emoji_presentation_base(self->lc->chars[base_pos])) {
+        if (self->lc->chars[base_pos + 1] == VS16 && !cp[xpos].is_multicell && is_emoji_presentation_base(self->lc->chars[base_pos])) {
             widen_cell_to_two(self, s, cp, xpos);
         }
     } else if (ch == VS15) {
@@ -2099,41 +1988,41 @@ draw_non_ascii_run(Screen *self, text_loop_state *s, const uint32_t *chars, size
     return i;
 }
 
-static void draw_text_loop_implicit(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_state *s);
+static void draw_at_leading_controls(Screen *self, const uint32_t *chars, size_t num_chars);
 
 // An isolate control written with bidi mode off, kept for the region it opens or closes. Rows stamped with bidi mode on keep
-// their own handling of it. Returns true when it handed the rest of the draw to the implicit copy.
+// their own handling of it. Returns true when it handed the rest of the draw to draw_at_leading_controls().
 // The state is taken by value so the caller's does not escape, which would make GCC keep redundant stores to it in the hot
-// loop. Nothing the copy changes is needed back: an isolate control changes no state as a combining char.
+// loop. Nothing is needed back from it: an isolate control changes no state as a combining char.
 // at points to the control itself and num_from counts it, as the loop already holds that pointer while the one past it would
 // keep i * 4 live at the loop head.
 static bool __attribute__((noinline, cold))
-draw_region_control(Screen *self, text_loop_state s, char_type ch, const uint32_t *at, size_t num_from, bool hand_off) {
-    if (!self->cursor->x && !self->linebuf->line_attrs[self->cursor->y].bidi_stamp) {
-        // Regions are per row, so the control is kept for the cell written next even when a soft wrap gives this row a
-        // previous cell
-        record_leading_isolate(self, ch);
-        region_control_stored(self);
-        bidi_update_draw_dispatch(self);
-        if (!hand_off) return false;
-        // Only the implicit copy attaches kept controls; with bidi mode off its record is 0
-        draw_text_loop_implicit(self, at + 1, num_from - 1, &s);
+draw_region_control(Screen *self, text_loop_state s, char_type ch, const uint32_t *at, size_t num_from) {
+    CPUCell *pc = s.prev.cc;
+    const bool stamped = self->linebuf->line_attrs[self->cursor->y].bidi_stamp;
+    // Regions are per row, so on an unstamped row the control is stored in the cell under the cursor even when a soft wrap gives
+    // this row a previous cell
+    if (!self->cursor->x && (!stamped || !pc)) {
+        if (!stamped) region_control_stored(self);
+        draw_at_leading_controls(self, at, num_from);
         return true;
     }
-    CPUCell *pc = s.prev.cc;
-    if (!pc) return false;
     const index_type py = s.prev.y;
-    // A cell with leading controls holds only leading ones: a control after it has nowhere to go
-    if (cell_has_leading_controls(pc)) {
-        close_leading_control(self, linebuf_cpu_cell_at(self->linebuf, s.prev.x, py), ch);
-        return false;
+    if (!self->linebuf->line_attrs[py].bidi_stamp) {
+        // An empty cell takes no combining chars, so it becomes a blank to keep a control that may close a region. A cell holding
+        // only leading controls is an empty cell that starts with them, so it becomes a plain cell holding them and a blank.
+        if (!cell_has_text(pc) && !pc->is_multicell) cell_set_char(pc, ' ');
+        else if (cell_holds_only_leading_controls(pc, self->text_cache)) {
+            text_in_cell(pc, self->text_cache, self->lc);
+            ensure_space_for_chars(self->lc, self->lc->count + 1);
+            self->lc->chars[self->lc->count++] = ' ';
+            cell_clear_multicell(pc);
+            cell_set_chars(pc, self->text_cache, self->lc);
+            linebuf_mark_line_dirty(self->linebuf, py);
+        }
     }
-    // An empty cell takes no combining chars, so it becomes a blank to keep a control that may close a region
-    if (!self->linebuf->line_attrs[py].bidi_stamp && !cell_has_text(pc) && !pc->is_multicell) cell_set_char(pc, ' ');
     const char_type before = pc->ch_and_idx;
-    const bool was_multicell = pc->is_multicell;
     draw_combining_char(self, &s, ch);
-    if (!hand_off) record_combining_write(self, pc, py, before, was_multicell, current_bidi_record(self).val);
     if (pc->ch_and_idx != before) region_control_stored(self);
     return false;
 }
@@ -2191,11 +2080,9 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
         for (; j < n; j++) dest[j] = elem;                                                                 \
     }
                     size_t j;
-                    const bool lead = implicit && UNLIKELY(self->bidi.lead.n) && bidi_lead_applies(self);
                     copy_template(cp, cpu_template, cc);
 #undef copy_template
                     for (j = 0; j < n; j++) cell_set_char(cp + j, chars[i + j]);
-                    if (UNLIKELY(lead)) attach_leading_controls(self);
                     self->last_graphic_char = chars[i + n - 1];
                     s->prev.y = self->cursor->y;
                     s->prev.x = self->cursor->x + n - 1;
@@ -2215,10 +2102,8 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
             s->line_has_no_multicell = false;
             if (ch > DEL && LIKELY(!self->charset.current && !self->modes.mIRM && self->cursor->x < self->columns) &&
                 !batched_non_ascii_draw_disabled_for_tests) {
-                const bool lead = implicit && UNLIKELY(self->bidi.lead.n) && bidi_lead_applies(self);
                 const size_t n = draw_non_ascii_run(self, s, chars + i, num_chars - i);
                 if (n) {
-                    if (UNLIKELY(lead)) attach_leading_controls(self);
                     if (implicit) record_written_line(self, self->cursor->y, record);
                     i += n - 1;
                     continue;
@@ -2242,7 +2127,7 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
                     // they were not added to the prev cell by grapheme segmentation.
                     // Zero width chars can only be represented as combining chars.
                     if (UNLIKELY(ch - 0x2066u <= 0x2069u - 0x2066u) && !self->modes.mBDSM) {
-                        if (draw_region_control(self, *s, ch, chars + i, num_chars - i, !implicit)) return;
+                        if (draw_region_control(self, *s, ch, chars + i, num_chars - i)) return;
                         continue;
                     }
                     if (s->prev.cc) {
@@ -2250,16 +2135,12 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
                         const index_type py = s->prev.y;
                         const char_type before = pc->ch_and_idx;
                         const bool was_multicell = pc->is_multicell;
-                        // A cell with leading controls holds only leading ones: a control after it has nowhere to go
-                        if (implicit && ch - 0x2066u <= 0x2069u - 0x2066u && cell_has_leading_controls(pc)) {
-                            close_leading_control(self, linebuf_cpu_cell_at(self->linebuf, s->prev.x, py), ch);
-                            continue;
-                        }
                         draw_combining_char(self, s, ch);
                         if (implicit) record_combining_write(self, pc, py, before, was_multicell, record);
-                    } else if (implicit && self->modes.mBDSM && (ch == 0x200e || ch == 0x200f || ch == 0x61c || ch - 0x2066u <= 0x2069u - 0x2066u)) {
-                        // LRM, RLM, ALM, or LRI, RLI, FSI, PDI; with bidi mode off a mark here is dropped, as the other copy drops it
-                        leading_zero_width(self, ch, record);
+                    } else if (is_leading_control(ch)) {
+                        // stored in the cell under the cursor, see cell_holds_only_leading_controls()
+                        draw_at_leading_controls(self, chars + i, num_chars - i);
+                        return;
                     }
                     continue;
                 }
@@ -2271,6 +2152,12 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
             if (s->cp[self->cursor->x].y) {
                 move_cursor_past_multicell(self, 1);
                 reinit_text_loop_line(self, s);
+            } else if (UNLIKELY(!self->cursor->x && cell_holds_only_leading_controls(s->cp, self->text_cache))) {
+                // Judged from the cell alone, with or without a previous cell, so a char drawn here keeps the controls in every
+                // mode. Not after an auto wrap below, where text wrapping in from the row above would take controls written
+                // for this row.
+                draw_at_leading_controls(self, chars + i, num_chars - i);
+                return;
             } else nuke_multicell_char_at(self, self->cursor->x, self->cursor->y, s->cp[self->cursor->x].x != 0);
         }
 
@@ -2296,7 +2183,6 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
             s->image_placeholder_marked = true;
         }
         CPUCell *fc = s->cp + self->cursor->x;
-        const bool lead = implicit && UNLIKELY(self->bidi.lead.n) && bidi_lead_applies(self);
         if (char_width == 2) {
             CPUCell *second = fc + 1;
             if (second->is_multicell) {
@@ -2323,11 +2209,6 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
             self->cursor->x++;
             fc->is_multicell = false;
         }
-        if (UNLIKELY(lead)) {
-            // Past a multicell the char may have been written elsewhere than the cell the controls were kept for
-            if (s->prev.y == self->bidi.lead.y && s->prev.x == 0) attach_leading_controls(self);
-            else self->bidi.lead.n = 0;
-        }
         if (implicit) record_written_line(self, s->prev.y, record);
     }
 #undef init_line
@@ -2341,11 +2222,11 @@ draw_text_loop(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_
 
 // Text written in implicit bidi mode records each line a character is written
 // to. That has its own copy of the loop, so the copy that draws all other text
-// has no records to test for.
+// has no records to test for. draw_at_leading_controls() uses this copy too,
+// with bidi mode off its record is zero and records nothing.
 __attribute__((noinline)) static void
 draw_text_loop_implicit(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_state *s) {
     draw_text_loop_(self, chars, num_chars, s, true, current_bidi_record(self).val);
-    bidi_update_draw_dispatch(self);
 }
 
 #define PREPARE_FOR_DRAW_TEXT                                                                                         \
@@ -2363,11 +2244,153 @@ draw_text_loop_implicit(Screen *self, const uint32_t *chars, size_t num_chars, t
         .cc = (CPUCell){.hyperlink_id = self->active_hyperlink_id, .style_idx = draw_style_idx},                      \
     };
 
+// Called with the cursor at x 0, see draw_at_leading_controls()
+static void
+store_leading_control(Screen *self, char_type ch, const CPUCell *pen) {
+    const index_type x = self->cursor->x, y = self->cursor->y;
+    CPUCell *c = linebuf_cpu_cells_for_line(self->linebuf, y) + x;
+    // there is no cell the control can take without moving the cursor
+    if (c->is_multicell && c->y) return;
+    char_type buf[MAX_NUM_CODEPOINTS_PER_CELL];
+    ListOfChars lc = {.chars = buf, .capacity = arraysz(buf)};
+    if (cell_holds_only_leading_controls(c, self->text_cache)) {
+        if (!tc_chars_at_index_without_alloc(self->text_cache, c->ch_or_idx, &lc)) return;
+        // leave room for the char that is later drawn after the controls
+        if (lc.count >= MAX_NUM_CODEPOINTS_PER_CELL - 1) return;
+    } else {
+        if (c->is_multicell) nuke_multicell_char_at(self, x, y, false);
+        // In insert mode the cell taken by the controls is the one inserted for
+        // the char drawn after them, see draw_after_leading_controls(), after the
+        // multicell char under the cursor is removed, as by the draw loop.
+        if (self->modes.mIRM) insert_characters(self, x, 1, y, true);
+    }
+    buf[lc.count++] = ch;
+    *c = (CPUCell){
+        .hyperlink_id = pen->hyperlink_id,
+        .style_idx = pen->style_idx,
+        .is_multicell = true,
+        .natural_width = true,
+        .width = 1,
+        .scale = 1,
+    };
+    // not cell_set_chars(), which stores a single char in the cell itself
+    c->ch_or_idx = tc_get_or_insert_chars(self->text_cache, &lc);
+    c->ch_is_idx = true;
+    linebuf_mark_line_dirty(self->linebuf, y);
+    record_written_line(self, y, current_bidi_record(self).val);
+}
+
+static void
+prepend_leading_controls(Screen *self, index_type x, index_type y, const char_type *controls, size_t num_controls) {
+    CPUCell *cpu_cells = linebuf_cpu_cells_for_line(self->linebuf, y);
+    CPUCell *cell = cpu_cells + x;
+    text_in_cell(cell, self->text_cache, self->lc);
+    // must be computed before the char is changed
+    const MulticellRows rows = cell->is_multicell ? multicell_char_rows(self, x, y) : (MulticellRows){0};
+    // the controls were capped so that one char fits after them
+    ensure_space_for_chars(self->lc, self->lc->count + num_controls);
+    memmove(self->lc->chars + num_controls, self->lc->chars, self->lc->count * sizeof(self->lc->chars[0]));
+    memcpy(self->lc->chars, controls, num_controls * sizeof(self->lc->chars[0]));
+    self->lc->count += num_controls;
+    cell->ch_or_idx = tc_get_or_insert_chars(self->text_cache, self->lc);
+    cell->ch_is_idx = true;
+    if (cell->is_multicell) {
+        const char_type ch_and_idx = cell->ch_and_idx;
+        const index_type x_limit = MIN(x + mcd_x_limit(cell), self->columns);
+        for (int v = rows.start; v < rows.limit; v++) {
+            cpu_cells = linebuf_cpu_cells_for_line(self->linebuf, v);
+            for (index_type h = x; h < x_limit; h++) cpu_cells[h].ch_and_idx = ch_and_idx;
+            linebuf_mark_line_dirty(self->linebuf, v);
+        }
+    }
+}
+
+// Draws the char at chars[0] into the cell under the cursor, at x 0, which holds only leading controls. Returns the number of
+// chars consumed.
+static size_t
+draw_after_leading_controls(Screen *self, const uint32_t *chars, const CPUCell *pen) {
+    const index_type x = self->cursor->x, y = self->cursor->y;
+    CPUCell *cp = linebuf_cpu_cells_for_line(self->linebuf, y);
+    // Where the char goes is decided before the cell is touched, as a draw
+    // that scrolls leaves x, y naming another line. At x 0 a char no wider
+    // than the screen is drawn into this cell, except a wide char whose
+    // second cell is a lower row of a multiline char.
+    const char_type ch = map_char(self, chars[0]);
+    int width = 1;
+    if (ch > DEL) width = MAX(1, wcwidth_std(char_props_for(ch)));
+    if ((unsigned)width > self->columns) {
+        // the draw loop discards a char too wide for the screen
+        self->last_graphic_char = ch;
+        return 1;
+    }
+    // The controls are copied rather than kept as an index, as drawing can
+    // garbage collect the text cache.
+    char_type controls[MAX_NUM_CODEPOINTS_PER_CELL];
+    ListOfChars lc = {.chars = controls, .capacity = arraysz(controls)};
+    if (x + (index_type)width > self->columns || !tc_chars_at_index_without_alloc(self->text_cache, cp[x].ch_or_idx, &lc)) {
+        // dropping the controls keeps the draw loop from stopping here again
+        nuke_in_line(cp, x, x + 1, 0);
+        return 0;
+    }
+    // In insert mode this cell was already inserted for the char when the
+    // first control was stored, so a wide char needs one more cell. Inserting
+    // it nukes the multiline chars from x + 1 on, as inserting the char
+    // without controls does, so the case below cannot happen in insert mode.
+    if (self->modes.mIRM && width == 2) insert_characters(self, x + 1, 1, y, true);
+    if (width == 2 && cp[x + 1].is_multicell && cp[x + 1].y) {
+        // The char moves past the lower rows of a multiline char, as in the
+        // draw loop, so this cell keeps its controls. The cells it lands in hold
+        // no multicell char, so the draw loop then draws it there.
+        self->cursor->x++;
+        move_cursor_past_multicell(self, 2);
+        return 0;
+    }
+    nuke_in_line(cp, x, x + 1, 0);
+    text_loop_state s = {.cc = *pen};
+    // the cells for the char are already inserted
+    const bool irm = self->modes.mIRM;
+    self->modes.mIRM = false;
+    draw_text_loop_implicit(self, chars, 1, &s);
+    self->modes.mIRM = irm;
+    // A previous cell from a soft wrap can take the char into its cluster instead, leaving this cell empty: then the controls are
+    // dropped.
+    if (s.prev.cc == cp + x && cell_has_text(cp + x)) prepend_leading_controls(self, x, y, controls, lc.count);
+    return 1;
+}
+
+// A leading control drawn with no previous cell, or an isolate control drawn at x 0 of an unstamped row with bidi mode off, is not
+// discarded like other zero width chars: it is stored in the cell under the cursor, see cell_holds_only_leading_controls(), and the
+// next char drawn into that cell, at x 0, keeps the controls first in its text. The draw loop stops at either event and calls this,
+// which handles it and draws the rest of the text. That loop calls this again at the next event, which then only records where to
+// resume and returns, so that a draw of many lines with controls does not nest a call per line.
+static void __attribute__((noinline, cold))
+draw_at_leading_controls(Screen *self, const uint32_t *chars, size_t num_chars) {
+    if (self->leading_controls_draw.active) {
+        self->leading_controls_draw.resume = chars;
+        self->leading_controls_draw.resume_count = num_chars;
+        return;
+    }
+    PREPARE_FOR_DRAW_TEXT;
+    self->leading_controls_draw.active = true;
+    while (true) {
+        size_t consumed = 1;
+        // the draw loop stops at a char of width zero only to store it
+        if (is_leading_control(chars[0])) store_leading_control(self, chars[0], &s.cc);
+        else consumed = draw_after_leading_controls(self, chars, &s.cc);
+        self->leading_controls_draw.resume = NULL;
+        text_loop_state rest = {.cc = s.cc};
+        draw_text_loop_implicit(self, chars + consumed, num_chars - consumed, &rest);
+        if (!self->leading_controls_draw.resume) break;
+        chars = self->leading_controls_draw.resume;
+        num_chars = self->leading_controls_draw.resume_count;
+    }
+    self->leading_controls_draw.active = false;
+}
+
 static void
 draw_text(Screen *self, const uint32_t *chars, size_t num_chars) {
     PREPARE_FOR_DRAW_TEXT;
     self->is_dirty = true;
-    // Controls kept for column 0 are attached only by the implicit copy
     if (UNLIKELY(self->bidi.draw_implicit)) draw_text_loop_implicit(self, chars, num_chars, &s);
     else draw_text_loop(self, chars, num_chars, &s);
 }
@@ -2429,7 +2452,7 @@ handle_fixed_width_multicell_command(Screen *self, CPUCell mcd, ListOfChars *lc)
     // Tested before the writes below, which may reuse lc
     bool region_control = false;
     if (!self->modes.mBDSM)
-        for (size_t i = 1; i < lc->count; i++) region_control |= lc->chars[i] - 0x2066u <= 0x2069u - 0x2066u;
+        for (size_t i = 0; i < lc->count; i++) region_control |= lc->chars[i] - 0x2066u <= 0x2069u - 0x2066u;
     move_cursor_past_multicell(self, width);
     if (height > 1) {
         if (self->cursor->y <= self->margin_bottom) {
@@ -3779,7 +3802,6 @@ screen_erase_in_line(Screen *self, unsigned int how, bool private) {
         :param bool private: when ``True`` character attributes are left
                              unchanged.
         */
-    self->bidi.lead.n = 0; // an erase of a blank cell leaves it as it was, so bidi_lead_stands() cannot see it
     unsigned int s = 0, n = 0;
     switch (how) {
         case 0:
@@ -4069,7 +4091,6 @@ screen_delete_characters(Screen *self, unsigned int count) {
 void
 screen_erase_characters(Screen *self, unsigned int count) {
     // Delete characters clearing the cells
-    self->bidi.lead.n = 0; // as in screen_erase_in_line()
     if (count == 0) count = 1;
     unsigned int x = self->cursor->x;
     unsigned int num = MIN(self->columns - x, count);
@@ -5061,7 +5082,7 @@ screen_render_line_graphics(Screen *self, Line *line, int32_t row) {
             const CellStyle *st = style_table_get(self->style_table, cpu_cell->style_idx);
             cur_img_id_lower24bits = color_to_id(st->fg);
             cur_placement_id = color_to_id(st->decoration_fg);
-            text_in_cell(cpu_cell, self->text_cache, self->lc);
+            text_in_cell_without_leading_controls(cpu_cell, self->text_cache, self->lc);
             // If the char has diacritics, use them as row and column indices.
             if (self->lc->count > 1 && self->lc->chars[1]) cur_img_row = diacritic_to_rowcolumn(self->lc->chars[1]);
             if (self->lc->count > 2 && self->lc->chars[2]) cur_img_col = diacritic_to_rowcolumn(self->lc->chars[2]);
@@ -5881,8 +5902,11 @@ cursor_visual_in_row(Screen *self, index_type x, index_type y, CursorShape shape
     }
     if (x > lo && x <= self->columns) {
         index_type end = x;
-        // A region ends in the cell holding its PDI, which is blank when nothing else was typed in it
-        while (end < hi && (cell_is_blank(cells + end) || (region_row && cell_first_char(cells + end, self->text_cache) == ' '))) end++;
+        // A region ends in the cell holding its PDI, which is blank when nothing else was typed in it. A cell holding only
+        // leading controls is an empty cell.
+        while (end < hi && (cell_is_blank(cells + end) || (region_row && cell_first_char(cells + end, self->text_cache) == ' ') ||
+                            cell_holds_only_leading_controls(cells + end, self->text_cache)))
+            end++;
         index_type t = x;
         while (end == hi && t > lo && cell_is_char(cells + t - 1, ' ')) t--;
         if (end == hi && t > lo && cell_has_text(cells + t - 1)) {
@@ -6608,7 +6632,11 @@ current_url_text(Screen *self, PyObject *args UNUSED) {
             } else ans = Py_NewRef(text);
         }
     }
-    return Py_NewRef(ans ? ans : Py_None);
+    if (!ans) Py_RETURN_NONE;
+    // a URL in the first cell of a line comes after the leading controls that cell keeps first
+    Py_ssize_t start = 0, len = PyUnicode_GET_LENGTH(ans);
+    while (start < len && is_leading_control(PyUnicode_READ_CHAR(ans, start))) start++;
+    return PyUnicode_Substring(ans, start, len);
 }
 
 
@@ -7026,9 +7054,6 @@ screen_draw_overlay_line(Screen *self) {
     self->modes.mDECTCEM = false;
     self->modes.mIRM = false;
     self->modes.mBDSM = false;
-    // The pre-edit neither takes the program's controls kept for column 0 nor leaves its own
-    const BidiLead saved_lead = self->bidi.lead;
-    self->bidi.lead.n = 0;
     bidi_update_draw_dispatch(self);
     Cursor *orig_cursor = self->cursor;
     self->cursor = &(self->overlay_line.original_line.cursor);
@@ -7107,7 +7132,6 @@ screen_draw_overlay_line(Screen *self) {
     self->modes.mDECTCEM = orig_cursor_enable_mode;
     self->modes.mIRM = orig_insert_replace_mode;
     self->modes.mBDSM = orig_bidi_support_mode;
-    self->bidi.lead = saved_lead;
     bidi_update_draw_dispatch(self);
 }
 
