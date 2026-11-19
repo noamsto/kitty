@@ -3927,6 +3927,7 @@ class TestBidiReorder(BaseTest):
                 self.ae(s.cursor.x, x)
                 self.ae(self.region_maps(s, y), (v2l + ID(len(v2l), cols), levels + (0,) * (cols - len(levels))))
                 self.assert_cursor_at_row(s, y, x, beam, block)
+
         # Rows below the prompt written as spaces stand for erased rows: the prompt row is laid out and its cursor drawn as when it
         # is the bottom row with nothing below. The oracle is that screen; 'ab שלום ' is also pinned by value.
         def drawn_cursor(s, y):
