@@ -3959,6 +3959,7 @@ class TestBidiReorder(BaseTest):
             s, y = padded('ab שלום ', lines=4, row=2, after=below_padded(3, 24, last=4))
             self.ae(s.cursor.x, 10)
             self.ae(self.region_maps(s, y), (fish_v2l, fish_levels))
+            self.assert_cursor_at_row(s, y, 10, (4, T), 4)
         # the history row: the cursor is off it, the PDI of the next row closes nothing on this one
         with self.subTest('history row'):
             s, _ = padded('אני\r\n' + PDI + 'output text', row=1)
@@ -4521,30 +4522,49 @@ class TestBidiReorder(BaseTest):
                         self.assert_cursor_at_row(s, cy, cx, beam, block)
 
     def test_painted_continuation_row_in_prompt_isolate(self):
-        # Shift+Enter in fish moves to a fresh row; tmux, without bce, paints it with spaces in the pane's background and puts the
-        # cursor back at column 3. A row of only blanks continues no row, so it is not part of the prompt's paragraph: the prompt
-        # row lays out on its own (the Hebrew in the FSI at level 1) and the blank row is the identity, with or without the typed
-        # space. Expected values are the two rows laid out on their own, the same for the painted and the erased row.
+        # Shift+Enter in fish moves to a fresh row whose first two cells stay empty; tmux, without bce, paints a row with spaces
+        # in the pane's background. Pinned: a row padded with spaces in every cell lays out as the erased row (stamped, empty), and
+        # a row mixing empty cells and typed spaces is content, so it joins the prompt's paragraph.
         n = 40
-        ident = tuple(range(n))
         BG = b'\x1b[48;2;30;30;46m'
+        RTL_FALLBACK = b'\x1b[2 k'
+        erase = b'\x1b7\x1b[2;1Hxyz\x1b[2;1H\x1b[K\x1b8'
         painted = b'\x1b7\x1b[2;1H' + BG + b' ' * n + b'\x1b8'
-        prompt = (ident[:2] + (4, 3, 2) + ident[5:], (0, 0, 1, 1, 1) + (0,) * (n - 5))
-        # (name, typed after the continuation, cursor x, beam, block column)
-        cases = (
-            ('no typed space', b'', 2, (2, False), 2),
-            ('typed space', b' ', 3, (3, False), 3),
-        )
-        for name, typed, x, beam, block in cases:
-            for form, paint in (('painted', painted), ('erased', b'')):
-                with self.subTest(name, form=form):
-                    s = self.replay_bytes(self.PROMPT_ROW + 'אני'.encode() + self.CONTINUE + paint + typed)
-                    if paint:
-                        self.ae(str(s.line(1)).strip(), '')
-                    self.ae((s.cursor.y, s.cursor.x), (1, x))
-                    self.assert_obs(self.obs(s, 0), *prompt, False, 'row 1')
-                    self.assert_obs(self.obs(s, 1), ident, None, False, 'row 2')
-                    self.assert_cursor_at_row(s, 1, x, beam, block)
+        reversed_row = (tuple(range(n - 1, -1, -1)), True)
+        no_map = (None, False)
+
+        def drawn(s, x):
+            test_screen_update_cell_data(s)
+            return x, s.test_cursor_visual(x, 1, CURSOR_BEAM), s.test_cursor_visual(x, 1, CURSOR_BLOCK)
+
+        for mode, fallback in (('auto', b''), ('rtl fallback', RTL_FALLBACK)):
+
+            def replay(tail):
+                return self.replay_bytes(fallback + self.PROMPT_ROW + 'אני'.encode() + self.CONTINUE + tail)
+
+            def row2(s):
+                v2l, _, rtl = self.obs(s, 1)
+                return v2l, bool(rtl)
+
+            with self.subTest('typed space', mode=mode):
+                s = replay(b' ')
+                self.ae((s.cursor.y, s.cursor.x), (1, 3))
+                self.ae(row2(s), no_map)
+            with self.subTest('written and erased, typed space', mode=mode):
+                s = replay(erase + b' ')
+                self.ae((s.cursor.y, s.cursor.x), (1, 3))
+                self.ae(row2(s), no_map)
+            with self.subTest('painted', mode=mode):
+                s, oracle = replay(painted), replay(erase)
+                self.ae(str(s.line(1)).strip(), '')
+                self.ae(self.obs(s, 1), self.obs(oracle, 1))
+                self.ae(drawn(s, 2), drawn(oracle, 2))
+                self.ae(row2(s), reversed_row if fallback else no_map)
+            with self.subTest('painted, typed space', mode=mode):
+                # a typed space in a painted row cannot be told from the padding, so the row lays out as the painted one
+                s, want = replay(painted + b' '), replay(painted)
+                self.ae((s.cursor.y, s.cursor.x), (1, 3))
+                self.ae(self.obs(s, 1), self.obs(want, 1))
 
     def test_output_rows_after_prompt_isolate(self):
         # What stays as it is: a row that is not a continuation of an open isolate is its own paragraph, auto-RTL when it has only
