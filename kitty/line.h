@@ -211,6 +211,39 @@ text_in_cell(const CPUCell *c, const TextCache *tc, ListOfChars *ans) {
     }
 }
 
+// LRM, RLM, LRI, RLI, FSI and PDI, which in bidi mode a cell drawn into with no previous cell can hold before its text
+static inline bool
+is_leading_control(char_type ch) {
+    return (ch | 1) == 0x200f || ch - 0x2066u <= 0x2069u - 0x2066u;
+}
+
+// Stores in lc the text of a cell that starts with such controls, returning how many it starts with
+static inline unsigned
+cell_leading_controls(const CPUCell *c, const TextCache *tc, ListOfChars *lc) {
+    if (!c->ch_is_idx || (c->is_multicell && (c->x || c->y)) || !is_leading_control(tc_first_char_at_index(tc, c->ch_or_idx))) return 0;
+    if (!tc_chars_at_index_without_alloc(tc, c->ch_or_idx, lc)) return 0;
+    unsigned n = 0;
+    while (n < lc->count && is_leading_control(lc->chars[n])) n++;
+    return n;
+}
+
+// Removes the leading controls a cell's text starts with, a cell holding only them reads as an empty one
+static inline void
+strip_leading_controls(ListOfChars *lc) {
+    unsigned n = 0;
+    while (n < lc->count && is_leading_control(lc->chars[n])) n++;
+    if (!n) return;
+    lc->count -= n;
+    memmove(lc->chars, lc->chars + n, lc->count * sizeof(lc->chars[0]));
+    if (!lc->count) lc->chars[lc->count++] = 0;
+}
+
+static inline void
+text_in_cell_without_leading_controls(const CPUCell *c, const TextCache *tc, ListOfChars *ans) {
+    text_in_cell(c, tc, ans);
+    if (c->ch_is_idx) strip_leading_controls(ans);
+}
+
 static inline bool
 text_in_cell_without_alloc(const CPUCell *c, const TextCache *tc, ListOfChars *ans) {
     if (c->ch_is_idx) {
@@ -245,6 +278,15 @@ cell_first_char(const CPUCell *c, const TextCache *tc) {
         return tc_first_char_at_index(tc, c->ch_or_idx);
     }
     return c->ch_or_idx;
+}
+
+static inline char_type
+cell_first_char_without_leading_controls(const CPUCell *c, const TextCache *tc) {
+    const char_type ch = cell_first_char(c, tc);
+    if (!is_leading_control(ch)) return ch;
+    RAII_ListOfChars(lc);
+    text_in_cell_without_leading_controls(c, tc, &lc);
+    return lc.chars[0];
 }
 
 static inline CellStyleTable *

@@ -209,6 +209,18 @@ written after a character. Of the isolates in a paragraph the first 32 are
 honoured and later ones are treated as neutral. Embeddings and overrides (LRE,
 RLE, LRO, RLO and PDF) are treated as neutral.
 
+The :doc:`text sizing protocol </text-sizing-protocol>` discards a zero-width
+code point that has no previous cell. As a special case, only in bidi mode,
+LRM, RLM, LRI, RLI, FSI and PDI are kept instead, so that they can start a
+line: the code point is appended to the controls at the start of the current
+cell, unless that cell is not the top left cell of a multicell character or
+has no room, and the cursor does not move. A character later drawn into that
+cell while there is no previous cell is stored after them. A cell holding only
+such controls is shown empty, and copied text includes them. A character
+written into that cell with OSC 66 replaces it, controls included, so a program
+can put the control in the OSC 66 text. Insert character and insert mode move
+the controls right with their cell. Without bidi mode nothing changes.
+
 An escape code to move the contents of the screen into the scrollback
 -------------------------------------------------------------------------------------
 

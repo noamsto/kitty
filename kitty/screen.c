@@ -2009,6 +2009,39 @@ draw_non_ascii_run(Screen *self, text_loop_state *s, const uint32_t *chars, size
     return i;
 }
 
+// Stores num leading controls in the text of the first cell of line y, after the controls it already starts with, if the
+// cell then holds at most room code points
+static bool
+put_leading_controls(Screen *self, index_type y, const char_type *controls, unsigned num, unsigned room, uint8_t record) {
+    CPUCell *c = linebuf_cpu_cells_for_line(self->linebuf, y);
+    // no cell can take them without moving the cursor
+    if (c->is_multicell && (c->x || c->y)) return false;
+    text_in_cell(c, self->text_cache, self->lc);
+    const unsigned count = cell_has_text(c) ? self->lc->count : 0;
+    if (count + num > room) return false;
+    unsigned at = 0;
+    while (at < count && is_leading_control(self->lc->chars[at])) at++;
+    // Readers take the char after a tab as the number of cells it skipped
+    if (at < count && self->lc->chars[at] == '\t') return false;
+    ensure_space_for_chars(self->lc, count + num);
+    memmove(self->lc->chars + at + num, self->lc->chars + at, (count - at) * sizeof(char_type));
+    memcpy(self->lc->chars + at, controls, num * sizeof(char_type));
+    self->lc->count = count + num;
+    // must be computed before the char is changed
+    const MulticellRows rows = multicell_char_rows(self, 0, y);
+    c->ch_or_idx = tc_get_or_insert_chars_with_glyph(self->text_cache, self->lc, cell_registered_glyph(c, self->text_cache));
+    c->ch_is_idx = true;
+    const char_type ch_and_idx = c->ch_and_idx;
+    const index_type x_limit = c->is_multicell ? MIN(mcd_x_limit(c), self->columns) : 1;
+    for (int v = rows.start; v < rows.limit; v++) {
+        CPUCell *cells = linebuf_cpu_cells_for_line(self->linebuf, v);
+        for (index_type h = 0; h < x_limit; h++) cells[h].ch_and_idx = ch_and_idx;
+        linebuf_mark_line_dirty(self->linebuf, v);
+        record_written_line(self, v, record);
+    }
+    return true;
+}
+
 static inline __attribute__((always_inline)) void
 draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_state *s, const bool implicit, const uint8_t record) {
     init_text_loop_line(self, s);
@@ -2016,14 +2049,19 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
 #define TEMPLATE_CELLS 16
     CPUCell cpu_template[TEMPLATE_CELLS];
     bool templates_initialized = false;
+    char_type controls_buf[MAX_NUM_CODEPOINTS_PER_CELL];
+    ListOfChars controls = {.chars = controls_buf, .capacity = arraysz(controls_buf)};
     for (size_t i = 0; i < num_chars; i++) {
+        unsigned num_controls = 0;
+        index_type controls_y = 0;
         uint32_t ch = map_char(self, chars[i]);
         if (ch < DEL && s->seg.grapheme_break <= GBP_None) { // fast path for printable ASCII
             if (ch < ' ') {
                 draw_control_char(self, s, ch);
                 continue;
             }
-            if (LIKELY(!self->charset.current && !self->modes.mIRM && self->cursor->x < self->columns)) {
+            if (LIKELY(!self->charset.current && !self->modes.mIRM && self->cursor->x < self->columns) &&
+                !(implicit && !s->prev.cc && s->cp[self->cursor->x].ch_is_idx)) {
                 // Batched fast path: write a run of printable ASCII chars into the
                 // current line in one go, keeping all state in locals so it is not
                 // reloaded for every char. Stops at the first char needing the
@@ -2083,7 +2121,7 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
         } else {
             s->line_has_no_multicell = false;
             if (ch > DEL && LIKELY(!self->charset.current && !self->modes.mIRM && self->cursor->x < self->columns) &&
-                !batched_non_ascii_draw_disabled_for_tests) {
+                !(implicit && !s->prev.cc && s->cp[self->cursor->x].ch_is_idx) && !batched_non_ascii_draw_disabled_for_tests) {
                 const size_t n = draw_non_ascii_run(self, s, chars + i, num_chars - i);
                 if (n) {
                     if (implicit) record_written_line(self, self->cursor->y, record);
@@ -2115,6 +2153,8 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
                         const bool was_multicell = pc->is_multicell;
                         draw_combining_char(self, s, ch);
                         if (implicit) record_combining_write(self, pc, py, before, was_multicell, record);
+                    } else if (implicit && is_leading_control(ch)) {
+                        put_leading_controls(self, self->cursor->y, &ch, 1, MAX_NUM_CODEPOINTS_PER_CELL - 1, record);
                     }
                     continue;
                 }
@@ -2122,6 +2162,11 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
             }
         }
 
+        // in insert mode the cell moves right with its controls
+        if (implicit && !s->prev.cc && !self->modes.mIRM && self->cursor->x < self->columns) {
+            num_controls = cell_leading_controls(s->cp + self->cursor->x, self->text_cache, &controls);
+            controls_y = self->cursor->y;
+        }
         if (self->cursor->x < self->columns && s->cp[self->cursor->x].is_multicell) {
             if (s->cp[self->cursor->x].y) {
                 move_cursor_past_multicell(self, 1);
@@ -2178,6 +2223,8 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
             self->cursor->x++;
             fc->is_multicell = false;
         }
+        if (implicit && UNLIKELY(num_controls) && !s->prev.x && s->prev.y == controls_y)
+            put_leading_controls(self, s->prev.y, controls.chars, num_controls, MAX_NUM_CODEPOINTS_PER_CELL, record);
         if (implicit) record_written_line(self, s->prev.y, record);
     }
 #undef init_line
@@ -2206,7 +2253,7 @@ draw_text(Screen *self, const uint32_t *chars, size_t num_chars) {
     draw_text_loop_(self, chars, num_chars, &s, false, 0);
 }
 
-// Text written in implicit bidi mode records each line it is written to
+// Text written in implicit bidi mode records each line it is written to and keeps bidi controls at the start of a line
 static void
 draw_text_implicit(Screen *self, const uint32_t *chars, size_t num_chars) {
     if (OPT(force_ltr)) {
@@ -5019,6 +5066,7 @@ screen_render_line_graphics(Screen *self, Line *line, int32_t row) {
     uint32_t prev_img_id_higher8bits = 0;
     uint32_t prev_img_row = 0;
     uint32_t prev_img_col = 0;
+    const bool skip_leading_controls = line->attrs.bidi_stamp != BIDI_STAMP_NONE;
     for (i = 0; i < line->xnum; i++) {
         CPUCell *cpu_cell = line->cpu_cells + i;
         uint32_t cur_img_id_lower24bits = 0;
@@ -5026,14 +5074,17 @@ screen_render_line_graphics(Screen *self, Line *line, int32_t row) {
         uint32_t cur_img_id_higher8bits = 0;
         uint32_t cur_img_row = 0;
         uint32_t cur_img_col = 0;
-        if (cell_first_char(cpu_cell, self->text_cache) == IMAGE_PLACEHOLDER_CHAR) {
+        const char_type first_char =
+            skip_leading_controls ? cell_first_char_without_leading_controls(cpu_cell, self->text_cache) : cell_first_char(cpu_cell, self->text_cache);
+        if (first_char == IMAGE_PLACEHOLDER_CHAR) {
             line->attrs.has_image_placeholders = true;
             // The lower 24 bits of the image id are encoded in the foreground
             // color, and the placement id is (optionally) in the underline color.
             const CellStyle *st = style_table_get(self->style_table, cpu_cell->style_idx);
             cur_img_id_lower24bits = color_to_id(st->fg);
             cur_placement_id = color_to_id(st->decoration_fg);
-            text_in_cell(cpu_cell, self->text_cache, self->lc);
+            if (skip_leading_controls) text_in_cell_without_leading_controls(cpu_cell, self->text_cache, self->lc);
+            else text_in_cell(cpu_cell, self->text_cache, self->lc);
             // If the char has diacritics, use them as row and column indices.
             if (self->lc->count > 1 && self->lc->chars[1]) cur_img_row = diacritic_to_rowcolumn(self->lc->chars[1]);
             if (self->lc->count > 2 && self->lc->chars[2]) cur_img_col = diacritic_to_rowcolumn(self->lc->chars[2]);
@@ -5062,7 +5113,7 @@ screen_render_line_graphics(Screen *self, Line *line, int32_t row) {
                     self->grman, row, i - run_length, img_id, prev_placement_id, prev_img_col - run_length, prev_img_row - 1, run_length, 1, self->cell_size);
             }
             // Start a new run.
-            if (cell_first_char(cpu_cell, self->text_cache) == IMAGE_PLACEHOLDER_CHAR) {
+            if (first_char == IMAGE_PLACEHOLDER_CHAR) {
                 run_length = 1;
                 if (!cur_img_col) cur_img_col = 1;
                 if (!cur_img_row) cur_img_row = 1;
@@ -6205,7 +6256,15 @@ current_url_text(Screen *self, PyObject *args UNUSED) {
             } else ans = Py_NewRef(text);
         }
     }
-    return Py_NewRef(ans ? ans : Py_None);
+    if (!ans) Py_RETURN_NONE;
+    // a URL that starts in a cell holding leading controls on a line with a bidi record starts after them
+    const Selection *first = self->url_ranges.items;
+    while (is_selection_empty(first)) first++;
+    const Line *line = checked_range_line(self, MIN((int)first->start.y - (int)first->start_scrolled_by, (int)first->end.y - (int)first->end_scrolled_by));
+    if (!line || !line->attrs.bidi_stamp) return Py_NewRef(ans);
+    Py_ssize_t start = 0, len = PyUnicode_GET_LENGTH(ans);
+    while (start < len && is_leading_control(PyUnicode_READ_CHAR(ans, start))) start++;
+    return PyUnicode_Substring(ans, start, len);
 }
 
 
@@ -7644,7 +7703,8 @@ is_opt_word_char(char_type ch, bool forward) {
 
 static bool
 is_char_ok_for_word_extension(Line *line, index_type x, bool forward) {
-    char_type ch = cell_first_char(line->cpu_cells + x, line->text_cache);
+    const char_type ch = line->attrs.bidi_stamp ? cell_first_char_without_leading_controls(line->cpu_cells + x, line->text_cache)
+                                                : cell_first_char(line->cpu_cells + x, line->text_cache);
     if (char_props_for(ch).is_word_char || is_opt_word_char(ch, forward)) return true;
     // pass : from :// so that common URLs are matched
     return ch == ':' && x + 2 < line->xnum && cell_is_char(line->cpu_cells + x + 1, '/') && cell_is_char(line->cpu_cells + x + 2, '/');

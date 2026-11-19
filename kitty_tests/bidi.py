@@ -4,10 +4,16 @@
 import re
 from itertools import product
 
+from kitty.fast_data_types import EXTEND_WORD
+from kitty.marks import marker_from_regex
+
 from .base import BaseTest, draw_multicell, parse_bytes
+from .graphics import put_helpers
 
 NONE, LTR, RTL = (0, False, False), (1, False, False), (1, True, False)
 CUP = '\x1b[{};1H'.format  # 1-based row
+LRM, RLM = '\u200e', '\u200f'
+LRI, RLI, FSI, PDI = '\u2066', '\u2067', '\u2068', '\u2069'
 
 
 def pb(s, data):
@@ -193,3 +199,144 @@ class TestBidi(BaseTest):
             pb(s, '\x1b[8h\x1b[2 kabc\r\n')
             s.resize(lines, cols)
             self.ae(self.records(s, 0), [RTL], (lines, cols))
+
+    def cell_texts(self, s, y=0, n=4):
+        return [s.cpu_cells(y, x)['text'] for x in range(n)]
+
+    def mark_screen(self, data, cols=10, lines=5, bdsm=True):
+        s = self.screen(cols=cols, lines=lines)
+        pb(s, ('\x1b[8h' if bdsm else '') + data)
+        return s
+
+    def test_leading_mark(self):
+        # In bidi mode an LRM, RLM, LRI, RLI, FSI or PDI drawn with no previous cell goes in the text of the cell under the
+        # cursor, after the controls it already starts with, and the cursor does not move. A char drawn there with no
+        # previous cell is stored after them.
+        for data, cells, x in (
+            ('abc\r' + RLM, [RLM + 'a', 'b', 'c', ''], 0),
+            ('abc\r' + RLM + 'xyz', [RLM + 'x', 'y', 'z', ''], 3),
+            (RLM + 'a\rb', [RLM + 'b', '', '', ''], 1),
+            ('abc\r' + RLM + '\x1b[2CX', [RLM + 'a', 'b', 'X', ''], 3),
+            (RLM + '\tx', [RLM, '', '', ''], 9),
+            (LRM + RLM + 'a\r' + LRM + 'b', [LRM + RLM + LRM + 'b', '', '', ''], 1),
+            (RLM + '中x', [RLM + '中', '', 'x', ''], 3),
+            ('中x\r' + RLM + 'y', [RLM + 'y', '', 'x', ''], 1),
+            ('ab' + RLM + 'c', ['a', 'b' + RLM, 'c', ''], 3),
+            (RLI + 'ab' + PDI, [RLI + 'a', 'b' + PDI, '', ''], 2),
+            (RLI + PDI + 'ab', [RLI + PDI + 'a', 'b', '', ''], 2),
+            (FSI + LRI + LRM + 'a', [FSI + LRI + LRM + 'a', '', '', ''], 1),
+            (RLI + 'é', [RLI + 'é', '', '', ''], 1),
+            # VS16 and SARA AM widen the cell, as without the controls
+            (LRM + '✖️x', [LRM + '✖️', '', 'x', ''], 3),
+            (LRM + 'กำx', [LRM + 'กำ', '', 'x', ''], 3),
+            # in insert mode the cell moves right with its controls, as any cell content does
+            (LRM + 'abc\r\x1b[4hX', ['X', LRM + 'a', 'b', 'c'], 1),
+            (LRM + 'abc\r\x1b[4h中', ['中', '', LRM + 'a', 'b'], 2),
+            # and so does ICH
+            ('abc\r' + LRM + '\r\x1b[@', ['', LRM + 'a', 'b', 'c'], 0),
+            ('\r' + LRM + 'abc\r\x1b[2@', ['', '', LRM + 'a', 'b'], 0),
+            ('\r' + LRM + '\x1b[@', ['', LRM, '', ''], 0),
+            ('\x1b]66;w=2;a\x07bc\r' + LRM + '\r\x1b[@', ['', LRM + 'a', '', 'b'], 0),
+            ('abc\r' + LRM + '\x1b[C\x1b[@', [LRM + 'a', '', 'b', 'c'], 1),
+            # an OSC 66 char written into the cell replaces it, controls included
+            (LRM + '\x1b]66;w=1;Z\x07', ['Z', '', '', ''], 1),
+        ):
+            with self.subTest(data=data):
+                s = self.mark_screen(data)
+                self.ae((self.cell_texts(s), s.cursor.x), (cells, x))
+        # over an OSC 66 char, or a wide char, insert mode erases it, as without bidi mode
+        for data in (
+            '\x1b]66;n=1:d=2;a\x07bc\r' + LRM + '\x1b[4hX',
+            '\x1b]66;w=1;中\x07bc\r' + LRM + '\x1b[4hX',
+            '\x1b]66;w=1;ab\x07bc\r' + LRM + '\x1b[4hX',
+            '\x1b]66;;a\x07bc\r' + LRM + '\x1b[4hX',
+            LRM + '中x\r\x1b[4hX',
+        ):
+            with self.subTest(data=data):
+                s, off = self.mark_screen(data), self.mark_screen(data, bdsm=False)
+                self.ae((self.cell_texts(s), s.cursor.x), (self.cell_texts(off), off.cursor.x))
+        # the OSC 66 char that ICH shifts keeps its shape
+        self.ae(self.mark_screen('\x1b]66;n=1:d=2;a\x07\r' + LRM + '\r\x1b[@').cpu_cells(0, 1)['mcd']['subscale_d'], 2)
+        # a plain cell holding controls stays a plain cell
+        self.assertIsNone(self.mark_screen('abc\r' + RLM).cpu_cells(0, 0)['mcd'])
+        # copied text holds the controls
+        self.ae(str(self.mark_screen('abc\r' + RLM).line(0)), RLM + 'abc')
+        self.ae(str(self.mark_screen(RLM + '\tx').line(0)), RLM + ' ' * 7 + 'x')
+        # over a multiline char the mark goes into all its cells, which a char drawn there replaces
+        s = self.mark_screen('\x1b]66;s=2;a\x07' + CUP(1) + RLM, cols=4, lines=3)
+        self.ae(s.cpu_cells(0, 0)['text'], RLM + 'a')
+        pb(s, 'q')
+        self.ae((self.cell_texts(s, 0, 3), self.cell_texts(s, 1, 3), s.cpu_cells(1, 0)['mcd']), ([RLM + 'q', '', ''], ['', '', ''], None))
+        # and records every row it is written to, also for a char drawn before bidi mode
+        s = self.mark_screen('\x1b]66;s=2;a\x07\x1b[8h\r' + RLM, cols=4, lines=3, bdsm=False)
+        self.ae((s.cpu_cells(0, 0)['text'], self.records(s, 0, 1)), (RLM + 'a', [LTR, LTR]))
+
+    def test_leading_mark_dropped(self):
+        # on the lower row of a multiline char no cell can take the mark
+        s = self.mark_screen('\x1b]66;s=2;a\x07' + CUP(2) + RLM, cols=4, lines=3)
+        self.ae((self.cell_texts(s, 0, 3), self.cell_texts(s, 1, 3)), (['a', '', ''], ['', '', '']))
+        # a cell keeps room for one code point after its marks
+        marks = (LRM + RLM) * 12
+        self.ae(self.cell_texts(self.mark_screen(marks), n=2), [marks[:23], ''])
+        self.ae(self.cell_texts(self.mark_screen(marks + 'a'), n=2), [marks[:23] + 'a', ''])
+        # a tab cell takes no mark: it is dropped, as without bidi mode
+        for data in ('\tX\r' + RLM + '\t', '\x1b[3g\x1b[1;15H\x1bH\r\t\r' + LRM + '\x1b[1;15Hls'):
+            with self.subTest(data=data):
+                texts = []
+                for bdsm in (True, False):
+                    s = self.mark_screen(data, cols=20, bdsm=bdsm)
+                    text, ansi = [], []
+                    s.as_text(text.append, False)
+                    s.as_text(ansi.append, True)
+                    s.start_selection(0, 0)
+                    s.update_selection(19, 0, True)
+                    texts.append((str(s.line(0)), ''.join(text), ''.join(ansi), s.text_for_selection(False, False)))
+                self.assertIn('\t', texts[1][0])
+                self.ae(texts[0], texts[1])
+
+    def test_leading_mark_without_bidi_mode(self):
+        # as without bidi support: the mark is dropped
+        for data, text in (('abc\r' + RLM, 'abc'), ('abc\r' + RLM + '\x1b[2CX', 'abX'), (RLM + '\tx', '\tx'), (RLM, ''), (RLM + 'hello world', 'hello world')):
+            with self.subTest(data=data):
+                self.ae(str(self.mark_screen(data, cols=12, bdsm=False).line(0)), text)
+        # ICH in column 0 only shifts the cell, marks in its text included
+        s = self.mark_screen('\x1b]66;w=1;' + LRM + 'a\x07bc\r\x1b[@', bdsm=False)
+        self.ae(self.cell_texts(s), ['', LRM + 'a', 'b', 'c'])
+        # a cell written in bidi mode is overwritten as any cell is
+        self.ae(self.cell_texts(self.mark_screen(RLM + 'a\x1b[8l\rb'), n=2), ['b', ''])
+
+    def test_leading_mark_word_selection(self):
+        def word(s):
+            s.start_selection(2, 0, False, EXTEND_WORD)
+            s.update_selection(2, 0, True)
+            return s.text_for_selection(False, False)
+
+        self.ae(word(self.mark_screen(RLM + 'hello world', cols=20)), (RLM + 'hello',))
+        # without bidi mode an OSC 66 cell whose text starts with a mark is read as it is
+        self.ae(word(self.mark_screen('\x1b]66;w=1;' + RLM + 'h\x07ello world', cols=20, bdsm=False)), ('ello',))
+
+    def test_leading_mark_marker(self):
+        for bdsm, data in ((True, RLM + 'foo bar foo'), (True, RLM + RLI + 'foo bar foo'), (False, 'foo bar foo')):
+            with self.subTest(data=data):
+                s = self.mark_screen(data, cols=20, bdsm=bdsm)
+                s.set_marker(marker_from_regex('foo', 1))
+                self.ae(s.marked_cells(), [(x, 0, 1) for x in (0, 1, 2, 8, 9, 10)])
+        # a cell holding only controls
+        s = self.mark_screen(RLM + '\x1b[Cfoo', cols=20)
+        s.set_marker(marker_from_regex('foo', 1))
+        self.ae(s.marked_cells(), [(x, 0, 1) for x in (1, 2, 3)])
+
+    def test_leading_mark_image_placeholder(self):
+        def refs(marks):
+            s, dx, dy, put_image, put_ref, layers, rect_eq = put_helpers(self, 10, 20)
+            put_image(s, 20, 20, num_cols=4, num_lines=2, unicode_placeholder=1, id=42)
+            pb(s, '\x1b[8h' + marks + '\x1b[38;5;42m\U0010eeee\u0305\u0305\U0010eeee\u0305\u030d')
+            s.update_only_line_graphics_data()
+            return [(r['src_rect'], r['dest_rect']) for r in layers(s)]
+
+        # the placeholder after the controls in the first cell starts the image there
+        expected = refs('')
+        self.ae(len(expected), 1)
+        for marks in (LRM, RLM + LRI):
+            with self.subTest(marks=marks):
+                self.ae(refs(marks), expected)

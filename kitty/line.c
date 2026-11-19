@@ -260,7 +260,13 @@ prefix_matches(Line *self, index_type at, const char_type *prefix, index_type pr
     if (prefix_len > at) return false;
     while (prefix_len--) {
         at = prev_char_pos(self, at, 1);
-        if (at >= self->xnum || cell_scale(self->cpu_cells + at) != scale || !cell_is_char(self->cpu_cells + at, prefix[prefix_len])) return false;
+        if (at >= self->xnum || cell_scale(self->cpu_cells + at) != scale) return false;
+        const CPUCell *c = self->cpu_cells + at;
+        if (cell_is_char(c, prefix[prefix_len])) continue;
+        if (!self->attrs.bidi_stamp || !is_leading_control(cell_first_char(c, self->text_cache))) return false;
+        RAII_ListOfChars(lc);
+        text_in_cell_without_leading_controls(c, self->text_cache, &lc);
+        if (lc.count != 1 || lc.chars[0] != prefix[prefix_len]) return false;
     }
     return true;
 }
@@ -374,7 +380,9 @@ get_url_sentinel(Line *line, index_type url_start) {
     char_type before = 0, sentinel;
     if (url_start > 0 && url_start < line->xnum) {
         index_type n = prev_char_pos(line, url_start, 1);
-        if (n < line->xnum) before = cell_first_char(line->cpu_cells + n, line->text_cache);
+        if (n < line->xnum)
+            before = line->attrs.bidi_stamp ? cell_first_char_without_leading_controls(line->cpu_cells + n, line->text_cache)
+                                            : cell_first_char(line->cpu_cells + n, line->text_cache);
     }
     switch (before) {
         case '"':
@@ -1047,6 +1055,17 @@ report_marker_error(PyObject *marker) {
     } else PyErr_Clear();
 }
 
+// On a line holding a bidi record, the leading controls of a cell are matched as text before the cell, except the last of a
+// cell holding nothing else, so that a match of its text marks the cell
+static unsigned
+leading_controls_before_cell(const Line *line, index_type x) {
+    if (!line->attrs.bidi_stamp || x >= line->xnum) return 0;
+    char_type buf[MAX_NUM_CODEPOINTS_PER_CELL];
+    ListOfChars lc = {.chars = buf, .capacity = arraysz(buf)};
+    const unsigned n = cell_leading_controls(line->cpu_cells + x, line->text_cache, &lc);
+    return n && n == lc.count ? n - 1 : n;
+}
+
 static void
 apply_mark(Line *line, const uint16_t mark, index_type *cell_pos, unsigned int *match_pos) {
 #define MARK \
@@ -1056,6 +1075,7 @@ apply_mark(Line *line, const uint16_t mark, index_type *cell_pos, unsigned int *
     (*match_pos)++;
     RAII_ListOfChars(lc);
     text_in_cell(line->cpu_cells + x, line->text_cache, &lc);
+    lc.count -= leading_controls_before_cell(line, x);
     if (lc.chars[0]) {
         if (lc.chars[0] == '\t') {
             unsigned num_cells_to_skip_for_tab = lc.count > 1 ? lc.chars[1] : 0;
@@ -1074,6 +1094,7 @@ apply_mark(Line *line, const uint16_t mark, index_type *cell_pos, unsigned int *
         }
     }
     *cell_pos = x + 1;
+    *match_pos += leading_controls_before_cell(line, x + 1);
 #undef MARK
 }
 
@@ -1096,6 +1117,7 @@ apply_marker(PyObject *marker, Line *line, const PyObject *text) {
     }
     PyObject *match;
     index_type x = 0;
+    match_pos = leading_controls_before_cell(line, 0);
     while ((match = PyIter_Next(iter)) && x < line->xnum) {
         Py_DECREF(match);
         while (match_pos < l && x < line->xnum) { apply_mark(line, 0, &x, &match_pos); }
