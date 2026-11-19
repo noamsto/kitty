@@ -5905,7 +5905,8 @@ cursor_visual_in_row(Screen *self, index_type x, index_type y, CursorShape shape
         // A region ends in the cell holding its PDI, which is blank when nothing else was typed in it. A cell holding only
         // leading controls is an empty cell.
         while (end < hi && (cell_is_blank(cells + end) || (region_row && cell_first_char(cells + end, self->text_cache) == ' ') ||
-                            cell_holds_only_leading_controls(cells + end, self->text_cache))) end++;
+                            cell_holds_only_leading_controls(cells + end, self->text_cache)))
+            end++;
         index_type t = x;
         while (end == hi && t > lo && cell_is_char(cells + t - 1, ' ')) t--;
         if (end == hi && t > lo && cell_has_text(cells + t - 1)) {

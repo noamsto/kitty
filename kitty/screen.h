@@ -262,7 +262,7 @@ typedef struct {
     } dnd_chunking;
     struct {
         bool draw_implicit; // the next draw takes the implicit copy, which records each line written: BDSM is on
-        bool rtl; // direction set by SCP for the current buffer
+        bool rtl;           // direction set by SCP for the current buffer
         struct {
             bool mBDSM, mBIDI_AUTODETECT, rtl;
         } main_stash; // main's controls while alt is active

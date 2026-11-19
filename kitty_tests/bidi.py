@@ -823,6 +823,7 @@ class TestBidi(BaseTest):
 
     def test_marks_only_cell_marker_highlighting(self):
         from kitty.marks import marker_from_regex
+
         # the highlight stays on the matched text when copied text has the extra space of a marks-only cell
         s = self.screen()
         pb(s, RLM + '\x1b[1;4Hfoo')

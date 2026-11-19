@@ -39,8 +39,7 @@ cell_isolates(const CPUCell *c, const TextCache *tc, char_type buf[MAX_NUM_CODEP
 // holding only leading controls
 static inline unsigned
 cell_leading_controls(const CPUCell *c, const TextCache *tc, char_type buf[MAX_NUM_CODEPOINTS_PER_CELL]) {
-    if (!c->ch_is_idx || (c->is_multicell && (c->x || c->y)) || !is_leading_control(tc_first_char_at_index(tc, c->ch_or_idx)))
-        return 0;
+    if (!c->ch_is_idx || (c->is_multicell && (c->x || c->y)) || !is_leading_control(tc_first_char_at_index(tc, c->ch_or_idx))) return 0;
     ListOfChars lc = {.chars = buf, .capacity = MAX_NUM_CODEPOINTS_PER_CELL};
     if (!tc_chars_at_index_without_alloc(tc, c->ch_or_idx, &lc)) return 0;
     unsigned n = 0;
