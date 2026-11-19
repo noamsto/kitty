@@ -5515,8 +5515,7 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued) {
     uint64_t key_rows = num_rows | (uint64_t)(lead.bidi_rtl | lead.bidi_auto << 1) << BIDI_KEY_DIR_SHIFT | (uint64_t)gap << BIDI_KEY_GAP_SHIFT;
     // region_gap is a test of the cells, so a region that cannot show it (no RTL, or a rejected probe) also keys on it and
     // re-resolves when the cursor moves into or out of its gap
-    if (!gap && region_gap)
-        key_rows |= (uint64_t)region_gap << BIDI_KEY_GAP_SHIFT | (uint64_t)(src->gap_y - first) << BIDI_KEY_GAP_ROW_SHIFT;
+    if (!gap && region_gap) key_rows |= (uint64_t)region_gap << BIDI_KEY_GAP_SHIFT | (uint64_t)(src->gap_y - first) << BIDI_KEY_GAP_ROW_SHIFT;
     // A hit: the same lines with the same text and cursor gap in the same paragraph at the same render rows as when the maps were last written
     // A shortcut: the same as a hit except that dirty rows may have signatures to check, and no row is above the view
     bool hit = cacheable, shortcut = cacheable && first == y0;

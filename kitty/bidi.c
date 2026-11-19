@@ -447,8 +447,8 @@ show_typed_gap(BidiMaps *b, uint32_t first, uint32_t row_first, uint32_t gap_x, 
     b->brackets[P] = FRIBIDI_NO_BRACKET;
     // The resolved direction, so that the probe cannot flip an auto paragraph
     FriBidiParType dir = par ? FRIBIDI_PAR_RTL : FRIBIDI_PAR_LTR;
-    const FriBidiLevel max_level = fribidi_get_par_embedding_levels_ex(
-        b->types + first, b->brackets + first, (FriBidiStrIndex)(len + 1 - first), &dir, b->probe_levels + first);
+    const FriBidiLevel max_level =
+        fribidi_get_par_embedding_levels_ex(b->types + first, b->brackets + first, (FriBidiStrIndex)(len + 1 - first), &dir, b->probe_levels + first);
     memmove(b->types + P, b->types + P + 1, (n - P) * sizeof(b->types[0]));
     memmove(b->brackets + P, b->brackets + P + 1, (n - P) * sizeof(b->brackets[0]));
     if (!max_level) {
