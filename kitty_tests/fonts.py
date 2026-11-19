@@ -1339,19 +1339,20 @@ class BidiRendering(FontBaseTest):
             self.ae(self.render_text(ch, cols=2, levels=[0, 0])[1], guessed, f'{ch!r}')
 
     def test_rtl_narrow_glyph_right_aligned(self):
-        if is_macos:
-            self.skipTest(
-                'CoreText RTL narrow glyph alignment differs from the guessed path; follow-up to #68 investigates whether the oracle or the shift is wrong'
-            )
+        # Empty pixels differ in their rgb bytes across platforms (CoreText leaves them white), and the shift zero-fills
+        # the columns it vacates, so only alpha is compared.
+        def alpha(sprites):
+            return [bytes(b[0::4]) for b in sprites]
+
         # No bundled font covers Arabic, so the narrow glyph in a two cell group is a multicell 'a'. It takes the
         # same path as lam-alef: one glyph, one whole unused cell.
         s = self.create_screen(cols=2, lines=1, scrollback=0)
         draw_multicell(s, 'a', width=2)
         line = s.line(0)
         guessed_idx, guessed = self.render_cells(line)
-        self.assertNotEqual(guessed[0], guessed[1])
+        self.assertNotEqual(alpha(guessed)[0], alpha(guessed)[1])
         rtl_idx, rtl = self.render_cells(line, [1, 1])
-        self.ae(rtl, guessed)
+        self.ae(alpha(rtl), alpha(guessed))
         self.assertNotEqual(rtl_idx[0], guessed_idx[0])
         self.ae(self.render_cells(line), (guessed_idx, guessed))
 
@@ -1360,9 +1361,9 @@ class BidiRendering(FontBaseTest):
         draw_multicell(s, '\u0307', width=2)
         line = s.line(0)
         guessed_idx, guessed = self.render_cells(line)
-        self.ae([any(p) for p in guessed], [True, False])
+        self.ae([any(p) for p in alpha(guessed)], [True, False])
         rtl_idx, rtl = self.render_cells(line, [1, 1])
-        self.ae(rtl, guessed)
+        self.ae(alpha(rtl), alpha(guessed))
         self.assertNotEqual(rtl_idx[0], guessed_idx[0])
         self.ae(self.render_cells(line), (guessed_idx, guessed))
 
