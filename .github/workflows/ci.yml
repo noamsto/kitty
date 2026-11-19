@@ -129,11 +129,10 @@ jobs:
     bundle:
         name: Bundle test (${{ matrix.os }})
         runs-on: ${{ matrix.os }}
-        # Upstream's prebuilt macOS dependency bundle lacks FriBidi, which this fork requires; let that leg fail in forks without failing the run or cancelling the ubuntu leg
-        continue-on-error: ${{ matrix.os == 'macos-latest' && github.repository != 'kovidgoyal/kitty' }}
         strategy:
             matrix:
-                os: [ubuntu-latest, macos-latest]
+                # Upstream's prebuilt macOS dependency bundle lacks FriBidi, which this fork requires
+                os: ${{ fromJSON(github.repository == 'kovidgoyal/kitty' && '["ubuntu-latest", "macos-latest"]' || '["ubuntu-latest"]') }}
         env:
             KITTY_BUNDLE: 1
             KITTY_SANITIZE: 1
