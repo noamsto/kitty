@@ -81,6 +81,10 @@ Similarly for type ``4`` if the number of co-ordinates is not a multiple of
 four, the last ``1 <= n <= 3`` co-ordinates are ignored, as if they were not
 specified.
 
+In kitty, on lines reordered for :ref:`bidirectional text <bidi_support>`,
+extra cursors are drawn at the visual column of their cell, whatever their
+shape; only the main beam cursor moves past a right-to-left cell.
+
 Querying for support
 -------------------------
 

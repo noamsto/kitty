@@ -1114,6 +1114,7 @@ cell_update_uniform_block(
         }
         CursorShape cs = (cursor->is_focused || OPT(cursor_shape_unfocused) == NO_CURSOR_SHAPE) ? cursor->shape : OPT(cursor_shape_unfocused);
         rd->cursor_shape = cs;
+        rd->cursor_x1 = rd->cursor_x2 = screen_cursor_drawn_x(screen, cursor->x, cursor->y, cs);
         color_type cell_fg = rd->default_fg, cell_bg = rd->bg_colors0;
         index_type cell_color_x = cursor->x;
         bool reversed = false;
