@@ -154,6 +154,38 @@ omitted::
     10;5;0;0;2:1;2;3;1;1       momentum scrolling ends
     10;5;0;120;1:5;1;0;0;5     a wheel click downwards with ctrl pressed
 
+.. _bidi_support:
+
+Bidirectional text
+-------------------------------------------------------------------------------------
+
+By default kitty leaves the layout of bidirectional text to the program, as
+described in the :opt:`force_ltr` option. A program can instead ask kitty to
+lay out the text it writes, following the Unicode bidirectional algorithm, by
+setting the ECMA-48 *Bi-Directional Support Mode*, ``CSI 8 h``. ``CSI 8 l``
+returns to the default. Text is stored in logical order and reordered only for
+display, so selecting and copying work on the logical text. Each line keeps the
+settings in effect when its text was first written. The settings are per screen:
+the alternate screen starts with them off, and the main screen gets them back
+on return. They are not in effect when :opt:`force_ltr` is set, and mode
+queries (``CSI 8 $ p``) report them as permanently reset then.
+
+Two more controls set the direction of a paragraph, the lines joined by soft
+wraps:
+
+``CSI ? 2501 h``
+    Detect the direction of each paragraph from its first strong character.
+    ``CSI ? 2501 l`` turns this off. It has no effect unless the mode above is
+    set.
+
+``CSI Ps SP k``
+    ECMA-48 *Select Presentation Directions* (SCP), where ``Ps`` is ``0`` or
+    ``1`` for left to right (the default) and ``2`` for right to left. It sets
+    the direction of paragraphs written afterwards, when they are not detected.
+
+Mouse reports and selections use logical columns: a click on a visually
+reordered line reports the column of the logical cell shown under the pointer.
+
 An escape code to move the contents of the screen into the scrollback
 -------------------------------------------------------------------------------------
 

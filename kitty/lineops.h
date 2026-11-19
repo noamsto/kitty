@@ -144,6 +144,7 @@ void historybuf_init_line(HistoryBuf *self, index_type num, Line *l);
 bool historybuf_init_line_for_render(HistoryBuf *self, index_type lnum, Line *l, index_type num_rows);
 bool history_buf_endswith_wrap(HistoryBuf *self);
 CPUCell *historybuf_cpu_cells(HistoryBuf *self, index_type num);
+LineAttrs *historybuf_attrs(HistoryBuf *self, index_type num);
 void historybuf_mark_line_clean(HistoryBuf *self, index_type y);
 void historybuf_mark_line_dirty(HistoryBuf *self, index_type y);
 void historybuf_set_line_has_image_placeholders(HistoryBuf *self, index_type y, bool val);

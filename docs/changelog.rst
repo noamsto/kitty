@@ -127,6 +127,9 @@ Detailed list of changes
 
 - dnd kitten: Fix a malicious remote drop source being able to write files outside the staging directory by sending a directory with the same name as a previously sent symlink (follow up to :cve:`2026-54056`)
 
+- Add support for bidirectional text laid out by the terminal, enabled by programs with ``CSI 8 h`` and ``CSI ? 2501 h`` and
+  controlled with ``CSI Ps SP k``, see :ref:`bidi_support`
+
 - Fix a crash when calling :code:`Screen.hyperlink_at()` with coordinates outside the screen, such as from a watcher (:iss:`10890`)
 
 - Fix animated images stopping when switching to a tab without animations and then back (:iss:`10894`)
