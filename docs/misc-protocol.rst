@@ -211,10 +211,11 @@ on every row it covers, the text on either side of it is reordered within its
 own span, and its text is shaped in the direction guessed from the text, as
 without bidi mode. A multicell character of scale 1 is reordered as one unit,
 which the algorithm sees as its first strong character, or its first character
-when it has none (as a neutral if that is an isolate).
-Its text is shaped in the direction of that unit, so text of mixed direction
-inside it is not reordered. A paragraph that holds an image placeholder is not
-reordered, and its unscaled text is shaped left to right.
+when it has none (as a neutral if that is an isolate), followed by the isolates
+and marks after its first character. Its text is shaped in the direction of
+that unit, so text of mixed direction inside it is not reordered. A paragraph
+that holds an image placeholder is not reordered, and its unscaled text is
+shaped left to right.
 
 Right-to-left runs are shaped without contextual alternates (``calt``),
 whatever :opt:`disable_ligatures` is set to, as in a right-to-left run they can
@@ -224,6 +225,17 @@ The text cursor is drawn at the visual column of its cell. A beam cursor on a
 right-to-left cell is drawn past the cell, on its left edge in the last column.
 The input method editor is anchored at the left edge of the cursor cell, and
 the pre-edit text is drawn left to right.
+
+kitty honours isolates (LRI, RLI, FSI and PDI) and the marks LRM, RLM and ALM
+written after a character. A paragraph is laid out from its rows in view and
+up to a screen height of its rows above and below them, so the limits that
+follow count from the first of those rows, not from the start of a longer
+paragraph. Of the isolates in those rows the first 32 are honoured and later
+ones are treated as neutral. With a FriBidi older than 1.0.17, a bracket pair
+is not paired when its opening bracket is more than 32 characters after the
+previous strong character or number at its isolate level, or after the start
+of its isolate or of those rows when there is none. Embeddings and overrides
+(LRE, RLE, LRO, RLO and PDF) are treated as neutral.
 
 An escape code to move the contents of the screen into the scrollback
 -------------------------------------------------------------------------------------

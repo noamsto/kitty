@@ -30,7 +30,7 @@ typedef struct BidiScratch {
 void bidi_scratch_free(BidiScratch *s);
 // Frees the buffers when far larger than the paragraphs resolved since the last call needed
 void bidi_scratch_trim(BidiScratch *s);
-// Whether some cell may be right-to-left, or is scaled
+// Whether some cell may be right-to-left, holds an RLI, RLM or ALM, or is scaled
 bool bidi_cells_may_reorder(const CPUCell *cells, index_type num, const TextCache *tc);
 // Whether the FriBidi in use walks back from every bracket pair to the previous strong char, as before 1.0.17
 bool bidi_n0_walk_is_slow(void);
