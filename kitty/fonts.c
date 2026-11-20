@@ -2744,8 +2744,9 @@ multicell_intersects_cursor(const Line *line, index_type lnum, const Cursor *cur
     } else return lnum == cursor->y;
 }
 
-// levels is NULL or has one embedding level per cell, indexed by logical x, odd meaning RTL. The continuation cells
-// (x > 0) of a multicell character have the level of its first cell, as the bidi engine guarantees
+// levels is NULL or has one embedding level per cell, indexed by logical x, odd meaning RTL and BIDI_LEVEL_FIXED a direction
+// guessed from the text. The continuation cells (x > 0) of a multicell character have the level of its first cell, as the
+// bidi engine guarantees
 void
 render_line(
     FONTS_DATA_HANDLE fg_, Line *line, index_type lnum, Cursor *cursor, DisableLigature disable_ligature_strategy, ListOfChars *lc, const uint8_t *levels) {
@@ -2769,6 +2770,8 @@ render_line(
             dir);                                                                                                       \
     }
     if (!line->render_cells) return; // lines without render data cannot be rendered
+    const bool stamped = line->attrs.bidi_stamp != BIDI_STAMP_NONE;
+    const ShapeDirection no_level_dir = stamped ? DIRECTION_LTR : DIRECTION_GUESS;
     FontGroup *fg = (FontGroup *)fg_;
     GPUCell *gpu_cells = expanded_line_for_render(line);
     CellStyleTable *style_table = line_style_table(line);
@@ -2780,10 +2783,11 @@ render_line(
     // per cell
     while (i < line->xnum) {
         index_type end = line->xnum;
-        ShapeDirection dir = DIRECTION_GUESS;
+        ShapeDirection dir = no_level_dir;
         if (levels) {
             for (end = i + 1; end < line->xnum && levels[end] == levels[i];) end++;
-            dir = (levels[i] & 1) ? DIRECTION_RTL : DIRECTION_LTR;
+            // Testing for odd first keeps clang from spilling a register in the cell loop below
+            dir = (levels[i] & 1) ? DIRECTION_RTL : levels[i] == BIDI_LEVEL_FIXED ? DIRECTION_GUESS : DIRECTION_LTR;
         }
         for (; i < end; i++) {
             cell_font = basic_font;

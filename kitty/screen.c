@@ -46,6 +46,7 @@
 #include "keys.h"
 #include "vt-parser.h"
 #include "resize.h"
+#include "bidi.h"
 
 static const ScreenModes empty_modes = {0, .mDECAWM = true, .mDECTCEM = true, .mDECARM = true};
 
@@ -253,6 +254,8 @@ do_screen_reset(Screen *self, bool is_hard_reset) {
         historybuf_clear(self->historybuf);
         linebuf_clear(self->alt_linebuf, BLANK_CHAR);
         self->main_linebuf->bidi_stamped = self->alt_linebuf->bidi_stamped = false;
+        bidi_maps_free(self->bidi_maps);
+        self->bidi_maps = NULL;
         // all buffers are now empty
         self->multiline_chars_used = false;
         zero_at_ptr(&self->multiline_chars_cut_off_at_bottom);
@@ -541,6 +544,38 @@ last_visited_prompt_viewport(const Screen *self, index_type *y, unsigned int *sc
     }
 
 
+// Rows moved without being dirtied change the paragraphs on both sides of where they now meet, and the upload trusts the
+// stored levels of clean rows
+static void
+bidi_mark_seam(Screen *self, index_type y) {
+    LineBuf *lb = self->linebuf;
+    if (LIKELY(!lb->bidi_stamped)) return;
+    if (y && y <= lb->ynum) linebuf_mark_line_dirty(lb, y - 1);
+    if (y < lb->ynum) linebuf_mark_line_dirty(lb, y);
+}
+
+// Before the rows [top, bottom] scroll up by one. An edit to a row going into the history is no longer seen, as the upload
+// does not check rows above the view, so the row below it is marked instead. Only a stamped buffer has rows holding a record,
+// so the history learns here that it gets one.
+static inline void
+bidi_index_up_seams(Screen *self, index_type top, index_type bottom, bool to_history) {
+    LineBuf *lb = self->linebuf;
+    if (LIKELY(!lb->bidi_stamped)) return;
+    if (to_history && lb->line_attrs[top].bidi_stamp != BIDI_STAMP_NONE) self->historybuf->bidi_stamped = true;
+    if (!to_history && top) linebuf_mark_line_dirty(lb, top - 1);
+    if (top < bottom && (!to_history || lb->line_attrs[top].has_dirty_text)) linebuf_mark_line_dirty(lb, top + 1);
+    linebuf_mark_line_dirty(lb, bottom);
+    if (bottom + 1 < lb->ynum) linebuf_mark_line_dirty(lb, bottom + 1);
+}
+
+static void
+bidi_index_down_seams(Screen *self, index_type top, index_type bottom) {
+    if (LIKELY(!self->linebuf->bidi_stamped)) return;
+    bidi_mark_seam(self, top);
+    bidi_mark_seam(self, top + 1);
+    bidi_mark_seam(self, bottom + 1);
+}
+
 static void
 clear_scrolled_in_line(Screen *self, index_type y) {
     // Marks are render data that is used without rendering, so the render
@@ -552,6 +587,7 @@ clear_scrolled_in_line(Screen *self, index_type y) {
 #define INDEX_DOWN(scroll_history)                                                                      \
     linebuf_reverse_index(self->linebuf, top, bottom);                                                  \
     clear_scrolled_in_line(self, top);                                                                  \
+    bidi_index_down_seams(self, top, bottom);                                                           \
     last_visited_prompt_index(self, top, bottom, false, scroll_history);                                \
     INDEX_GRAPHICS(1, scroll_history)                                                                   \
     self->is_dirty = true;                                                                              \
@@ -996,6 +1032,7 @@ screen_resize(Screen *self, unsigned int lines, unsigned int columns) {
             if (!historybuf_pop_line(self->historybuf, self->alt_linebuf->line)) break;
             INDEX_DOWN(true);
             linebuf_copy_line_to(self->main_linebuf, self->alt_linebuf->line, 0);
+            if (self->alt_linebuf->line->attrs.bidi_stamp != BIDI_STAMP_NONE) self->main_linebuf->bidi_stamped = true;
             self->cursor->y++;
             sp->cursor.y = MIN(sp->cursor.y + 1, self->lines - 1);
         }
@@ -1020,7 +1057,7 @@ screen_resize(Screen *self, unsigned int lines, unsigned int columns) {
     }
     bidi_forget_rows_left_without_text(self->main_linebuf);
     bidi_forget_rows_left_without_text(self->alt_linebuf);
-    if (self->main_linebuf->bidi_stamped) historybuf_forget_bidi_of_rows_without_text(self->historybuf);
+    if (self->historybuf->bidi_stamped || self->main_linebuf->bidi_stamped) historybuf_forget_bidi_of_rows_without_text(self->historybuf);
     return true;
 }
 
@@ -1082,6 +1119,7 @@ dealloc(Screen *self) {
         free(self->lc);
         self->lc = NULL;
     }
+    bidi_maps_free(self->bidi_maps);
     Py_TYPE(self)->tp_free((PyObject *)self);
 } // }}}
 
@@ -1320,7 +1358,7 @@ checked_range_line(Screen *self, int y) {
     return NULL;
 }
 
-static bool
+bool
 range_line_is_continued(Screen *self, int y) {
     if (!(-(int)self->historybuf->count <= y && y < (int)self->lines)) return false;
     if (y < 0) return historybuf_is_line_continued(self->historybuf, -(y + 1));
@@ -1414,7 +1452,8 @@ screen_garbage_collect_text_cache(Screen *self) {
     if (self->overlay_line.original_line.cpu_cells)
         text_cache_gc_process_cells(self->text_cache, gc, self->overlay_line.original_line.cpu_cells, self->columns);
     tc_gc_end(self->text_cache, gc);
-    // the GC remaps all cache indices so the memoized tab indices are stale
+    // the GC remaps all cache indices so the memoized tab indices and the hashes of cells are stale
+    bidi_maps_invalidate_row_hashes(self);
     memset(&self->tab_cache, 0, sizeof(self->tab_cache));
     GlyphRegistry *gr = tc_glyph_registry(self->text_cache);
     memset(gr->bound_idx_plus_1, 0, sizeof(gr->bound_idx_plus_1));
@@ -3374,6 +3413,7 @@ screen_cursor_to_column(Screen *self, unsigned int column) {
 
 #define INDEX_UP(add_to_history)                                                                       \
     nuke_multiline_chars_torn_by_scroll(self, top, bottom, true, add_to_history);                      \
+    bidi_index_up_seams(self, top, bottom, add_to_history);                                            \
     linebuf_index(self->linebuf, top, bottom);                                                         \
     INDEX_GRAPHICS(-1, add_to_history)                                                                 \
     if (add_to_history) {                                                                              \
@@ -3463,7 +3503,11 @@ _reverse_scroll(Screen *self, unsigned int count, bool fill_from_scrollback) {
             if (copied && self->scrolled_by) self->scrolled_by--;
         }
         INDEX_DOWN(copied);
-        if (copied) linebuf_copy_line_to(self->main_linebuf, self->alt_linebuf->line, 0);
+        if (copied) {
+            linebuf_copy_line_to(self->main_linebuf, self->alt_linebuf->line, 0);
+            // A line back from the history, which can hold a record while the main buffer holds none
+            if (self->alt_linebuf->line->attrs.bidi_stamp != BIDI_STAMP_NONE) self->main_linebuf->bidi_stamped = true;
+        }
     }
 }
 
@@ -3810,6 +3854,7 @@ screen_clear_scrollback(Screen *self) {
             remove_multicell_char_at(self, x, 0, false, 0);
         }
     }
+    bidi_mark_seam(self, 0);
     self->linebuf = orig;
     reset_style_table_if_unused(self);
 }
@@ -3938,6 +3983,9 @@ screen_insert_lines(Screen *self, unsigned int count) {
         if (self->multiline_chars_used && !at_screen_bottom) nuke_multiline_chars_extending_below(self, bottom);
         screen_dirty_line_graphics(self, top, bottom, self->linebuf == self->main_linebuf);
         linebuf_insert_lines(self->linebuf, count, self->cursor->y, bottom);
+        bidi_mark_seam(self, self->cursor->y);
+        bidi_mark_seam(self, self->cursor->y + MIN(count, bottom + 1 - self->cursor->y));
+        bidi_mark_seam(self, bottom + 1);
         last_visited_prompt_insert_or_delete_lines(self, self->cursor->y, bottom, count, true);
         self->is_dirty = true;
         clear_all_selections(self);
@@ -3980,6 +4028,9 @@ screen_delete_lines_impl(Screen *self, index_type start, index_type count, index
     if (self->multiline_chars_used) nuke_multiline_chars_extending_below(self, bottom);
     screen_dirty_line_graphics(self, top, bottom, self->linebuf == self->main_linebuf);
     linebuf_delete_lines(self->linebuf, count, start, bottom);
+    bidi_mark_seam(self, start);
+    bidi_mark_seam(self, bottom + 1 - MIN(count, bottom + 1 - start));
+    bidi_mark_seam(self, bottom + 1);
     self->is_dirty = true;
     clear_all_selections(self);
 }
@@ -4836,6 +4887,8 @@ screen_pause_rendering(Screen *self, bool pause, int for_in_ms) {
             return false;
         }
     }
+    // Mapped before the copy, which takes history rows missing from the render cache without marking them dirty
+    self->paused_rendering.linebuf->bidi_stamped = bidi_live_frame_reorders(self) && bidi_prepare_live(self, false) != NULL;
     Line line = {.text_cache = self->text_cache};
     for (index_type y = 0; y < num_rows; y++) {
         index_type lnum;
@@ -4928,6 +4981,12 @@ static void
 update_line_data(Line *line, unsigned int dest_y, uint8_t *data) {
     CellGPUData *dest = (CellGPUData *)(data + sizeof(CellGPUData) * dest_y * line->xnum);
     cells_for_gpu(line->cpu_cells, line->render_cells, line->xnum, dest);
+}
+
+static void
+update_line_data_permuted(Line *line, unsigned int dest_y, uint8_t *data, const uint16_t *v2l) {
+    CellGPUData *dest = (CellGPUData *)(data + sizeof(CellGPUData) * dest_y * line->xnum);
+    cells_for_gpu_permuted(line->cpu_cells, line->render_cells, v2l, line->xnum, dest);
 }
 
 static void
@@ -5132,6 +5191,43 @@ screen_line_for_cursor(Screen *self, index_type x, index_type y, Line *overlay_l
     return overlay_line;
 }
 
+// Bidi upload {{{
+static bool
+screen_bidi_maps_usable(const Screen *self) {
+    const BidiMaps *b = self->bidi_maps;
+    const LineBuf *shown = self->paused_rendering.expires_at ? self->paused_rendering.linebuf : self->linebuf;
+    return b && b->valid && b->cols == self->columns && b->rows == render_lines_for_screen(self) && b->source == shown;
+}
+
+static void
+apply_selection_bidi(Screen *self, uint8_t *address, size_t stride) {
+    BidiMaps *b = self->bidi_maps;
+    b->changed = false;
+    if (!(b->selection_used_maps = screen_bidi_maps_usable(self))) return;
+    const size_t row_size = (size_t)self->columns * stride;
+    for (index_type r = 0; r < b->rows; r++) {
+        if (b->active[r]) bidi_permute_row_bytes(&b->scratch, b->v2l + (size_t)r * b->cols, b->cols, address + r * row_size, stride);
+    }
+}
+
+static bool
+bidi_selection_dirty(const Screen *self) {
+    const BidiMaps *b = self->bidi_maps;
+    return (b->changed || screen_bidi_maps_usable(self) != b->selection_used_maps) &&
+           (self->selections.count || self->url_ranges.count || self->extra_cursors.count);
+}
+
+void
+screen_bidi_logical_click(Screen *self, index_type *x, index_type y, bool *in_left_half) {
+    if (!screen_bidi_maps_usable(self)) return;
+    const BidiMaps *b = self->bidi_maps;
+    const index_type render_row = y + pixel_scroll_enabled(self);
+    *x = bidi_logical_x(b, render_row, *x);
+    // The left half of a right-to-left cell is drawn on its right
+    if (bidi_cell_is_rtl(b, render_row, *x)) *in_left_half = !*in_left_half;
+}
+// }}}
+
 void
 screen_update_cell_data(Screen *self, void *address, FONTS_DATA_HANDLE fonts_data, bool cursor_has_moved) {
     if (self->paused_rendering.expires_at) {
@@ -5140,17 +5236,25 @@ screen_update_cell_data(Screen *self, void *address, FONTS_DATA_HANDLE fonts_dat
             // The GPU buffer was invalidated so every row must be written. The
             // paused linebuf has exactly render_lines_for_screen() rows.
             const int row_offset = paused_snapshot_row_offset(self);
+            // The map of the pause: no upload runs while paused
+            BidiMaps *b = UNLIKELY(linebuf->bidi_stamped) ? bidi_maps_for_upload(self, linebuf, linebuf->ynum) : NULL;
+            if (!b && self->bidi_maps) self->bidi_maps->valid = false;
             for (index_type y = 0; y < linebuf->ynum; y++) {
                 linebuf_init_line(linebuf, y);
-                if (linebuf->line->attrs.has_dirty_text) {
+                const uint8_t *levels = NULL;
+                const uint16_t *v2l = NULL;
+                const bool relevel = UNLIKELY(b) && bidi_row(b, y, &levels, &v2l);
+                if (linebuf->line->attrs.has_dirty_text || relevel) {
                     // The extra leading row and scrollback rows are never the cursor row
                     const index_type lnum = (int)y < row_offset ? self->lines : y - (index_type)row_offset;
-                    render_line(fonts_data, linebuf->line, lnum, &self->paused_rendering.cursor, self->disable_ligatures, self->lc, NULL);
+                    render_line(fonts_data, linebuf->line, lnum, &self->paused_rendering.cursor, self->disable_ligatures, self->lc, levels);
+                    if (UNLIKELY(b)) bidi_store_levels(b, y, linebuf->line);
                     // Cell images are not rendered here: this would modify the live grman using snapshot row numbers
                     if (linebuf->line->attrs.has_dirty_text && screen_has_marker(self)) mark_text_in_line(self->marker, linebuf->line, &self->as_ansi_buf);
                     linebuf_mark_line_clean(linebuf, y);
                 }
-                update_line_data(linebuf->line, y, address);
+                if (UNLIKELY(v2l)) update_line_data_permuted(linebuf->line, y, address, v2l);
+                else update_line_data(linebuf->line, y, address);
             }
         }
         return;
@@ -5163,6 +5267,13 @@ screen_update_cell_data(Screen *self, void *address, FONTS_DATA_HANDLE fonts_dat
     self->scroll_changed = false;
     const unsigned int render_lines = render_lines_for_screen(self);
     const int render_row_offset = pixel_scroll_enabled(self);
+    BidiMaps *b = UNLIKELY(bidi_live_frame_reorders(self)) ? bidi_prepare_live(self, true) : NULL;
+    if (!b && self->bidi_maps) {
+        // The history rows rendered at levels are shown in logical order from now on
+        if (self->bidi_maps->live) historybuf_invalidate_render_cache(self->historybuf);
+        self->bidi_maps->live = false;
+        self->bidi_maps->valid = false;
+    }
     Line line = {.text_cache = self->text_cache};
     for (unsigned int render_row = 0; render_row < render_lines; render_row++) {
         const int virtual_y = (int)render_row - render_row_offset;
@@ -5173,25 +5284,31 @@ screen_update_cell_data(Screen *self, void *address, FONTS_DATA_HANDLE fonts_dat
             update_line_data_blank(self->columns, render_row, address);
             continue;
         }
+        const uint8_t *levels = NULL;
+        const uint16_t *v2l = NULL;
+        const bool relevel = UNLIKELY(b) && bidi_row(b, render_row, &levels, &v2l);
         if (is_history) {
             // we render line graphics even if the line is not dirty as graphics commands received after
             // the unicode placeholder was first scanned can alter it.
             screen_render_line_graphics(self, linep, virtual_y - (int)self->scrolled_by);
-            if (force_history_render || linep->attrs.has_dirty_text) {
-                render_line(fonts_data, linep, lnum, self->cursor, self->disable_ligatures, self->lc, NULL);
+            if (force_history_render || linep->attrs.has_dirty_text || relevel) {
+                render_line(fonts_data, linep, lnum, self->cursor, self->disable_ligatures, self->lc, levels);
+                if (UNLIKELY(b)) bidi_store_levels(b, render_row, linep);
                 if (screen_has_marker(self)) mark_text_in_line(self->marker, linep, &self->as_ansi_buf);
                 historybuf_mark_line_clean(self->historybuf, lnum);
             }
         } else {
-            if (linep->attrs.has_dirty_text || (cursor_has_moved && (self->cursor->y == lnum || self->last_rendered.cursor.y == lnum))) {
-                render_line(fonts_data, linep, lnum, self->cursor, self->disable_ligatures, self->lc, NULL);
+            if (linep->attrs.has_dirty_text || (cursor_has_moved && (self->cursor->y == lnum || self->last_rendered.cursor.y == lnum)) || relevel) {
+                render_line(fonts_data, linep, lnum, self->cursor, self->disable_ligatures, self->lc, levels);
+                if (UNLIKELY(b)) bidi_store_levels(b, render_row, linep);
                 screen_render_line_graphics(self, linep, virtual_y - (int)self->scrolled_by);
                 if (linep->attrs.has_dirty_text && screen_has_marker(self)) mark_text_in_line(self->marker, linep, &self->as_ansi_buf);
                 if (is_overlay_active && lnum == self->overlay_line.ynum) render_overlay_line(self, linep, fonts_data);
                 linebuf_mark_line_clean(self->linebuf, lnum);
             }
         }
-        update_line_data(linep, render_row, address);
+        if (UNLIKELY(v2l)) update_line_data_permuted(linep, render_row, address, v2l);
+        else update_line_data(linep, render_row, address);
     }
     if (is_overlay_active && self->overlay_line.ynum + self->scrolled_by < self->lines) {
         if (self->overlay_line.is_dirty) {
@@ -5508,6 +5625,7 @@ screen_apply_selection(Screen *self, void *address_, size_t num_cells, size_t st
         if (ec->locations[i].cell < num_cells) address[(size_t)ec->locations[i].cell * stride] |= (ec->locations[i].shape & 7) << 2;
     }
     ec->dirty = false;
+    if (self->bidi_maps) apply_selection_bidi(self, address_, stride);
 }
 
 static index_type
@@ -6610,7 +6728,14 @@ erase_last_command(Screen *self, PyObject *args UNUSED) {
         else *r += *r < start ? (int)num_deleted_from_history : -(int)num_lines_to_erase_in_screen;
     }
     // The line above the erased region no longer wraps into the line after it
-    if ((line = checked_range_line(self, start - 1))) line->cpu_cells[line->xnum - 1].next_char_was_wrapped = false;
+    if ((line = checked_range_line(self, start - 1))) {
+        line->cpu_cells[line->xnum - 1].next_char_was_wrapped = false;
+        // its paragraph ends there now, which a clean row in the history would not show
+        if (self->main_linebuf->bidi_stamped || self->historybuf->bidi_stamped) {
+            mark_range_line_dirty(self, start - 1);
+            self->historybuf->bidi_walked = 0;
+        }
+    }
     if (num_lines_to_erase_in_screen) {
         // Anchor the on-screen deletion at the top of the region, not at
         // cursor->y - count: a multi-line prompt or rows skipped above would
@@ -7367,6 +7492,7 @@ screen_is_selection_dirty(Screen *self) {
     IterationData q;
     if (self->paused_rendering.expires_at) return false;
     if (self->scrolled_by != self->last_rendered.scrolled_by) return true;
+    if (self->bidi_maps && bidi_selection_dirty(self)) return true;
     if (self->selections.last_rendered_count != self->selections.count || self->url_ranges.last_rendered_count != self->url_ranges.count ||
         self->extra_cursors.dirty)
         return true;
@@ -8606,6 +8732,44 @@ test_bidi_line_record(Screen *self, PyObject *val) {
 }
 
 static PyObject *
+test_bidi_v2l(Screen *self, PyObject *val) {
+    const unsigned long r = PyLong_AsUnsignedLong(val);
+    if (PyErr_Occurred()) return NULL;
+    const BidiMaps *b = self->bidi_maps;
+    // A row shaped at its levels has a map, the identity when they leave it in logical order
+    if (!screen_bidi_maps_usable(self) || r >= b->rows || !b->has_levels[r]) Py_RETURN_NONE;
+    PyObject *ans = PyTuple_New(b->cols);
+    if (!ans) return NULL;
+    for (index_type x = 0; x < b->cols; x++) PyTuple_SET_ITEM(ans, x, PyLong_FromUnsignedLong(bidi_logical_x(b, r, x)));
+    return ans;
+}
+
+static PyObject *
+test_bidi_resolved(Screen *self, PyObject *a UNUSED) {
+    if (!screen_bidi_maps_usable(self)) Py_RETURN_NONE;
+    return PyLong_FromUnsignedLong(self->bidi_maps->resolved);
+}
+
+// Uploads repeat frames without a GPU, with the font group of the given size and dpi, returning the cell data of the last
+static PyObject *
+test_update_cell_data(Screen *self, PyObject *args) {
+    double font_sz_in_pts, dpi_x, dpi_y;
+    unsigned int repeat = 1;
+    if (!PyArg_ParseTuple(args, "ddd|I", &font_sz_in_pts, &dpi_x, &dpi_y, &repeat)) return NULL;
+    FONTS_DATA_HANDLE fonts_data = load_fonts_data(font_sz_in_pts, dpi_x, dpi_y);
+    PyObject *ans = PyBytes_FromStringAndSize(NULL, (Py_ssize_t)(sizeof(CellGPUData) * render_lines_for_screen(self) * self->columns));
+    if (!ans) return NULL;
+    memset(PyBytes_AS_STRING(ans), 0, PyBytes_GET_SIZE(ans));
+    for (unsigned int i = 0; i < repeat; i++) screen_update_cell_data(self, PyBytes_AS_STRING(ans), fonts_data, false);
+    return ans;
+}
+
+static PyObject *
+test_bidi_bracket_limit(Screen *self UNUSED, PyObject *a UNUSED) {
+    return Py_BuildValue("Ns", PyBool_FromLong(bidi_n0_walk_is_slow()), fribidi_version_info);
+}
+
+static PyObject *
 test_ch_and_idx(PyObject *self UNUSED, PyObject *val) {
     CPUCell c = {0};
     if (PyLong_Check(val)) {
@@ -8628,6 +8792,10 @@ static PyMethodDef methods[] = {
     METHODB(style_table_info, METH_NOARGS),
     METHODB(test_set_style_table_limit, METH_O),
     METHODB(test_bidi_line_record, METH_O),
+    METHODB(test_bidi_v2l, METH_O),
+    METHODB(test_bidi_resolved, METH_NOARGS),
+    METHODB(test_update_cell_data, METH_VARARGS),
+    METHODB(test_bidi_bracket_limit, METH_NOARGS),
     METHODB(test_gc_style_table, METH_VARARGS),
     METHODB(test_draw_overlay_line, METH_VARARGS),
     METHODB(test_update_overlay_text, METH_VARARGS),

@@ -154,6 +154,72 @@ omitted::
     10;5;0;0;2:1;2;3;1;1       momentum scrolling ends
     10;5;0;120;1:5;1;0;0;5     a wheel click downwards with ctrl pressed
 
+.. _bidi_support:
+
+Bidirectional text
+-------------------------------------------------------------------------------------
+
+By default kitty leaves the layout of bidirectional text to the program, as
+described in the :opt:`force_ltr` option. A program can instead ask kitty to
+lay out the lines it writes afterwards, following the Unicode bidirectional
+algorithm (using FriBidi), by setting the ECMA-48 *Bi-Directional Support
+Mode* (BDSM), ``CSI 8 h``, the implicit mode. ``CSI 8 l`` returns to the
+default. Two more controls set the direction of a paragraph, the lines joined
+by soft wraps:
+
+``CSI ? 2501 h``
+    A private mode from the `BiDi in Terminal Emulators
+    <https://terminal-wg.pages.freedesktop.org/bidi/recommendation/escape-sequences.html>`__
+    recommendation, as implemented by VTE. Takes the direction of each
+    paragraph from its first strong character. ``CSI ? 2501 l`` turns this off.
+    It has no effect unless ``CSI 8 h`` is set.
+
+``CSI Ps SP k``
+    ECMA-48 *Select Character Path* (SCP), in the form ``CSI Ps ; Ps SP k``.
+    ``Ps`` of ``2`` makes paragraphs written afterwards right to left, ``1``
+    or ``0`` left to right. When ``CSI ? 2501 h`` is set it only sets the
+    direction of paragraphs that have no strong character. The second
+    parameter is accepted and ignored, as are values of ``3`` or more.
+
+A line keeps the settings in effect when its text was first written, until
+whatever removes its text leaves it holding none, which clears them; writing a
+character in place of its only character does not, unless that character took
+only the last column and was written with OSC 66, and the new one is not. A
+line cleared by writing spaces over it keeps them. The lines of a paragraph are
+laid out together when any of them holds settings, including lines written with
+bidi mode off.
+
+To detect support, query the modes (``CSI 8 $ p`` and ``CSI ? 2501 $ p``). A
+kitty without this feature answers ``0`` (unknown), and one with it ``2``
+(reset) or ``1`` (set). While the :opt:`force_ltr` option is set the answer is
+``4`` (permanently reset), as :opt:`force_ltr` turns all of this off wherever
+the modes are used. The modes keep what the program set, so after a
+configuration reload that clears :opt:`force_ltr` the answer goes back from
+``4`` to ``1`` or ``2`` and the program's settings apply again.
+
+The settings are per screen, like other per-screen modes. They are not carried
+into the alternate screen, which starts with them off, and the main screen's
+settings are restored on leaving it.
+
+Only the display is reordered. Text stays in logical order, so selecting and
+copying work on logical cells, and cell-based mouse reports carry logical
+columns. SGR-pixel mouse reports carry the pointer's pixel position as drawn.
+
+Text written with the :doc:`text sizing protocol </text-sizing-protocol>` at a
+scale (``s``) above 1 is never moved. Each scaled character keeps its columns
+on every row it covers, the text on either side of it is reordered within its
+own span, and its text is shaped in the direction guessed from the text, as
+without bidi mode. A multicell character of scale 1 is reordered as one unit,
+which the algorithm sees as its first strong character, or its first character
+when it has none (as a neutral if that is an isolate).
+Its text is shaped in the direction of that unit, so text of mixed direction
+inside it is not reordered. A paragraph that holds an image placeholder is not
+reordered, and its unscaled text is shaped left to right.
+
+Right-to-left runs are shaped without contextual alternates (``calt``),
+whatever :opt:`disable_ligatures` is set to, as in a right-to-left run they can
+turn an operator such as ``=>`` into another one.
+
 An escape code to move the contents of the screen into the scrollback
 -------------------------------------------------------------------------------------
 
