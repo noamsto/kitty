@@ -89,6 +89,17 @@ line_is_empty(const Line *line) {
     return true;
 }
 
+// A row holding no text has no bidi bits, so that the next write to it records the controls current then. Whatever clears
+// cells of a row and keeps its attrs calls this on the row, and a resize on every row. The exception is a row a char is written
+// to right after the multicell char in its place is removed, which keeps its settings.
+static inline void
+line_forget_bidi_if_emptied(LineAttrs *a, const Line *line) {
+    if (!line_has_bidi_bits(*a) || !line_is_empty(line)) return;
+    a->bidi_stamp = BIDI_STAMP_NONE;
+    a->bidi_rtl = false;
+    a->bidi_auto = false;
+}
+
 typedef Line *(get_line_func)(void *, int);
 void line_clear_text(Line *self, unsigned int at, unsigned int num, char_type ch);
 void line_apply_cursor(Line *self, const Cursor *cursor, unsigned int at, unsigned int num, bool clear_char);
@@ -144,6 +155,8 @@ void historybuf_init_line(HistoryBuf *self, index_type num, Line *l);
 bool historybuf_init_line_for_render(HistoryBuf *self, index_type lnum, Line *l, index_type num_rows);
 bool history_buf_endswith_wrap(HistoryBuf *self);
 CPUCell *historybuf_cpu_cells(HistoryBuf *self, index_type num);
+LineAttrs *historybuf_attrs(HistoryBuf *self, index_type num);
+void historybuf_forget_bidi_of_rows_without_text(HistoryBuf *self);
 void historybuf_mark_line_clean(HistoryBuf *self, index_type y);
 void historybuf_mark_line_dirty(HistoryBuf *self, index_type y);
 void historybuf_set_line_has_image_placeholders(HistoryBuf *self, index_type y, bool val);
