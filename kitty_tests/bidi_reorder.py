@@ -3851,12 +3851,12 @@ class TestBidiReorder(BaseTest):
         F, T = False, True
         BG = b'\x1b[38;2;205;214;244m\x1b[48;2;30;30;46m'
 
-        def padded(text, cols=24, lines=3, row=None, below=b'', erase=False):
-            # the prompt row replayed on screen row `row` (1-based, the last by default), `below` written before it
+        def padded(text, cols=24, lines=3, row=None, below=b'', erase=False, after=b''):
+            # the prompt row replayed on screen row `row` (1-based, the last by default), `below` written before it and `after` behind it
             row = row or lines
             s = self.create_screen(cols=cols, lines=lines, scrollback=0, options={})
             fill = b'\x1b[K' if erase else b' ' * (cols - 2)
-            parse_bytes(s, b'\x1b[?1049h\x1b[8h\x1b[?2501h' + below + b'\x1b[%d;1H' % row + self.PUA + BG + b' ' + FSI.encode() + fill)
+            parse_bytes(s, b'\x1b[?1049h\x1b[8h\x1b[?2501h' + below + b'\x1b[%d;1H' % row + self.PUA + BG + b' ' + FSI.encode() + fill + after)
             parse_bytes(s, b'\x1b[%d;3H' % row + text.encode())
             test_screen_update_cell_data(s)
             return s, row - 1
@@ -3927,6 +3927,40 @@ class TestBidiReorder(BaseTest):
                 self.ae(s.cursor.x, x)
                 self.ae(self.region_maps(s, y), (v2l + ID(len(v2l), cols), levels + (0,) * (cols - len(levels))))
                 self.assert_cursor_at_row(s, y, x, beam, block)
+
+        # Rows below the prompt written as spaces stand for erased rows: the prompt row is laid out and its cursor drawn as when it
+        # is the bottom row with nothing below. The oracle is that screen; 'ab שלום ' is also pinned by value.
+        def drawn_cursor(s, y):
+            test_screen_update_cell_data(s)
+            x = s.cursor.x
+            return x, s.test_cursor_visual(x, y, CURSOR_BEAM), s.test_cursor_visual(x, y, CURSOR_BLOCK)
+
+        fish_levels = (0, 0, 2, 2, 2, 3, 3, 3, 3, 3) + (0,) * 14
+        fish_v2l = (0, 1, 2, 3, 4, 9, 8, 7, 6, 5) + tuple(range(10, 24))
+        # (name, text, erase the prompt row)
+        padded_below = (
+            ('typed space after hebrew behind latin', 'ab שלום ', F),
+            ('typed space after hebrew', 'שלום ', F),
+            ('typed two spaces after hebrew', 'שלום  ', F),
+            ('latin, hebrew and a typed space', 'abc שלום ', F),
+            ('cursor back on the typed space', 'שלום \x1b[D', F),
+            ('erase idiom', 'אני\x08 \x08', F),
+            ('autosuggestion', 'אני abc\x1b[4D', F),
+            ('erased prompt row', 'ab שלום ', T),
+        )
+        for name, text, erase in padded_below:
+            with self.subTest('padded rows below, ' + name):
+                want_s, want_y = padded(text, lines=4, erase=erase)
+                s, y = padded(text, lines=4, row=2, after=below_padded(3, 24, last=4), erase=erase)
+                want_cursor = drawn_cursor(want_s, want_y)
+                self.ae(self.region_maps(s, y), self.region_maps(want_s, want_y))
+                self.ae(drawn_cursor(s, y), want_cursor)
+                self.assert_cursor_at_row(s, y, want_cursor[0], want_cursor[1], want_cursor[2][0])
+        with self.subTest('padded rows below, captured stage'):
+            s, y = padded('ab שלום ', lines=4, row=2, after=below_padded(3, 24, last=4))
+            self.ae(s.cursor.x, 10)
+            self.ae(self.region_maps(s, y), (fish_v2l, fish_levels))
+            self.assert_cursor_at_row(s, y, 10, (4, T), 4)
         # the history row: the cursor is off it, the PDI of the next row closes nothing on this one
         with self.subTest('history row'):
             s, _ = padded('אני\r\n' + PDI + 'output text', row=1)
@@ -4456,6 +4490,82 @@ class TestBidiReorder(BaseTest):
                     for y, (v2l, levels) in enumerate(layouts):
                         self.assert_obs(self.obs(s, y), v2l, levels, False, f'row {y + 1}')
                     self.assert_cursor_at_row(s, cy, cx, beam, block)
+        # The blank row written as spaces in the pane's background, as tmux does without bce, is the row erased. Under CSI 8 l the
+        # row is written unstamped; DECSC and DECRC keep the background out of the rows after it.
+        BG = b'\x1b[48;2;30;30;46m'
+
+        def write_spaces(y, stamped):
+            bidi = b'' if stamped else b'\x1b[8l'
+            return b'\x1b7' + f'\x1b[{y + 1};1H'.encode() + bidi + BG + b' ' * n + b'\x1b[8h\x1b8'
+
+        by_name = {case[0]: case for case in cases}
+        for stamped, names in (
+            (True, ('typed space', 'typed space on a continuation row', 'blank row between two rows')),
+            (
+                False,
+                (
+                    'blank row between two rows',
+                    'typed space, unstamped row below',
+                    'typed space on a continuation row, unstamped row below',
+                ),
+            ),
+        ):
+            for name in names:
+                _, rows, blank, _, layouts, (cy, cx, beam, block) = by_name[name]
+                for form in ('plain', 'tmux'):
+                    with self.subTest(('padded ' if stamped else 'unstamped padded ') + name, form=form):
+                        s = self.replay_bytes(self.shell_rows(form, rows) + write_spaces(blank, stamped))
+                        self.ae(str(s.line(blank)).strip(), '')
+                        self.ae(bool(s.test_bidi_line_record(blank)[0]), stamped)
+                        self.ae((s.cursor.y, s.cursor.x), (cy, cx))
+                        for y, (v2l, levels) in enumerate(layouts):
+                            self.assert_obs(self.obs(s, y), v2l, levels, False, f'row {y + 1}')
+                        self.assert_cursor_at_row(s, cy, cx, beam, block)
+
+    def test_painted_continuation_row_in_prompt_isolate(self):
+        # Shift+Enter in fish moves to a fresh row whose first two cells stay empty; tmux, without bce, paints a row with spaces
+        # in the pane's background. Pinned: a row padded with spaces in every cell lays out as the erased row (stamped, empty), and
+        # a row mixing empty cells and typed spaces is content, so it joins the prompt's paragraph.
+        n = 40
+        BG = b'\x1b[48;2;30;30;46m'
+        RTL_FALLBACK = b'\x1b[2 k'
+        erase = b'\x1b7\x1b[2;1Hxyz\x1b[2;1H\x1b[K\x1b8'
+        painted = b'\x1b7\x1b[2;1H' + BG + b' ' * n + b'\x1b8'
+        reversed_row = (tuple(range(n - 1, -1, -1)), True)
+        no_map = (None, False)
+
+        def drawn(s, x):
+            test_screen_update_cell_data(s)
+            return x, s.test_cursor_visual(x, 1, CURSOR_BEAM), s.test_cursor_visual(x, 1, CURSOR_BLOCK)
+
+        for mode, fallback in (('auto', b''), ('rtl fallback', RTL_FALLBACK)):
+
+            def replay(tail):
+                return self.replay_bytes(fallback + self.PROMPT_ROW + 'אני'.encode() + self.CONTINUE + tail)
+
+            def row2(s):
+                v2l, _, rtl = self.obs(s, 1)
+                return v2l, bool(rtl)
+
+            with self.subTest('typed space', mode=mode):
+                s = replay(b' ')
+                self.ae((s.cursor.y, s.cursor.x), (1, 3))
+                self.ae(row2(s), no_map)
+            with self.subTest('written and erased, typed space', mode=mode):
+                s = replay(erase + b' ')
+                self.ae((s.cursor.y, s.cursor.x), (1, 3))
+                self.ae(row2(s), no_map)
+            with self.subTest('painted', mode=mode):
+                s, oracle = replay(painted), replay(erase)
+                self.ae(str(s.line(1)).strip(), '')
+                self.ae(self.obs(s, 1), self.obs(oracle, 1))
+                self.ae(drawn(s, 2), drawn(oracle, 2))
+                self.ae(row2(s), reversed_row if fallback else no_map)
+            with self.subTest('painted, typed space', mode=mode):
+                # a typed space in a painted row cannot be told from the padding, so the row lays out as the painted one
+                s, want = replay(painted + b' '), replay(painted)
+                self.ae((s.cursor.y, s.cursor.x), (1, 3))
+                self.ae(self.obs(s, 1), self.obs(want, 1))
 
     def test_output_rows_after_prompt_isolate(self):
         # What stays as it is: a row that is not a continuation of an open isolate is its own paragraph, auto-RTL when it has only
@@ -5460,6 +5570,216 @@ class TestBidiReorder(BaseTest):
             self.assert_region(s, 1, (0, 1, 5, 4, 3, 2) + ID(6, 12), (0, 0, 1, 1, 1, 1) + (0,) * 6)
             # the cursor on row 1 uses row 1's region: ש (logical 2) shows at visual 5 under an RTL base
             self.ae(self.cursor_at(s, 2, CURSOR_BEAM, y=1), (5, True))
+
+    # tmux's rows: the pane's FSI rides on the glyph cell (or on the border cell beside a pane at its left), the prompt's on the
+    # space after it, and a PDI on a space in the pane's last cell and another on the cursor cell's space (written one column
+    # on, then BS leaves the cursor on that cell)
+    def tmux_row(self, s, y, prompt, typed, width, pad, off=0, border=False):
+        # the cursor cell comes `typed` blanks after the prompt text; pad is 'spaces' (real) or 'erased' for the cells after it
+        e = 2 + len(prompt)
+        c = e + typed
+        out = f'\x1b[{y + 1};{off + 1}H' + ('' if border else FSI) + '❯ ' + FSI + prompt
+        if pad == 'spaces':
+            out += ' ' * (width - 1 - e)
+        else:
+            out += '\x1b[K' + ' ' * (typed + 1) + f'\x1b[{width - c - 2}C'
+        out += ' ' + PDI
+        if border:
+            out += f'\x1b[{y + 1};{off}H│' + FSI
+        out += f'\x1b[{y + 1};{off + c + 2}H' + PDI + '\b'
+        parse_bytes(s, out.encode())
+        self.ae(s.cursor.x, off + c)
+        return off + c
+
+    def visual(self, s, y=0):
+        # the row as drawn, one char per column, controls dropped
+        cells = (s.cpu_cells(y, s.test_bidi_logical_x(vx, y))['text'] for vx in range(s.columns))
+        return ''.join(''.join(ch for ch in t if ch not in BIDI_CONTROLS) or ' ' for t in cells)
+
+    def row_layout(self, s, y, x):
+        # (beam cursor, block cursor column, visual, v2l, levels) of row y with the cursor at x
+        v2l, levels = self.region_maps(s, y)
+        return self.cursor_at(s, x, CURSOR_BEAM, y), self.cursor_at(s, x, CURSOR_BLOCK, y)[0], self.visual(s, y), v2l, levels
+
+    def tmux_oracle(self, width, prompt, typed):
+        # the pane's text laid out alone in outer bidi mode: the typed blanks are spaces, the cells after them are erased
+        s = self.screen(cols=width, lines=2)
+        parse_bytes(s, ('\x1b[?2501h❯ ' + FSI + prompt + ' ' * typed + '\x1b[K').encode())
+        x = 2 + len(prompt) + typed
+        parse_bytes(s, f'\x1b[1;{x + 1}H'.encode())
+        return self.row_layout(s, 0, x)
+
+    def assert_layout(self, got, want, label=''):
+        for what, g, w in zip(('beam', 'block', 'visual', 'v2l', 'levels'), got, want):
+            with self.subTest(what, label=label):
+                self.ae(g, w)
+
+    def test_region_typed_gap_tmux_prompt(self):
+        # on a row laid out by its isolate regions, typed blanks before a cursor that has only blanks after it take the levels the
+        # next typed char would have, so the cursor is drawn where it will land: the layout of the same pane alone in outer mode
+        cases = (
+            ('s4full: after the typed space', 'אני', 1, 'spaces', 1),
+            ('s4full: a typed', 'אני a', 0, 'spaces', 3),
+            ('s4full: one typed space', 'אני a', 1, 'spaces', 4),
+            ('s4full: two typed spaces', 'אני a', 2, 'spaces', 5),
+            ('typing stage 5', 'שלום', 1, 'erased', 1),
+            ('typing stage 9', 'שלום abc', 1, 'erased', 6),
+            ('typing stage 10', 'שלום abc d', 0, 'erased', None),
+            ('number after RTL', 'אב 12', 1, 'erased', 1),
+            ('number after RTL, two spaces', 'אב 12', 2, 'erased', 1),
+            ('bracket after RTL', 'אב (', 1, 'spaces', 1),
+        )
+        for name, prompt, typed, pad, beam in cases:
+            with self.subTest(name):
+                s = self.alt(20)
+                x = self.tmux_row(s, 0, prompt, typed, 20, pad)
+                got = self.row_layout(s, 0, x)
+                want = self.tmux_oracle(20, prompt, typed)
+                if beam is not None:
+                    with self.subTest('captured cursor', label=name):
+                        self.ae(got[0][0], beam)
+                    with self.subTest('oracle cursor', label=name):
+                        self.ae(want[0][0], beam)
+                self.assert_layout(got, want, name)
+
+    def test_region_typed_gap_split_panes(self):
+        # beside another pane: the prompt pane's slice is laid out as alone, and the other pane and the border are as before the blank
+        pw, hello = 20, 'hello עולם'
+        for shape in ('left', 'shared'):
+            for typed in (1, 2):
+                with self.subTest(shape, typed=typed):
+                    off = 0 if shape == 'left' else pw + 1
+                    border = shape == 'shared'
+                    other = slice(pw, None) if shape == 'left' else slice(0, pw + 1)
+
+                    def build(typed):
+                        s = self.alt(pw + 1 + 12 if shape == 'left' else pw + 1 + pw)
+                        parse_bytes(s, (f'\x1b[1;{pw + 2 if shape == "left" else 1}H' + hello).encode())
+                        if shape == 'left':
+                            parse_bytes(s, f'\x1b[1;{pw + 1}H│'.encode())
+                        x = self.tmux_row(s, 0, 'אני a', typed, pw, 'spaces', off, border)
+                        return s, x
+
+                    before, bx = build(0)
+                    b_v2l, b_levels = self.region_maps(before, 0)
+                    s, x = build(typed)
+                    got = self.row_layout(s, 0, x)
+                    want = self.tmux_oracle(pw, 'אני a', typed)
+                    mine = slice(off, off + pw)
+                    with self.subTest('prompt pane cursor'):
+                        self.ae((got[0][0] - off, got[0][1], got[1] - off), (want[0][0], want[0][1], want[1]))
+                    with self.subTest('prompt pane visual'):
+                        self.ae(got[2][mine], want[2])
+                    v2l, levels = self.region_maps(s, 0)
+                    with self.subTest('prompt pane maps'):
+                        self.ae(tuple(v - off for v in v2l[mine]), want[3])
+                        self.ae(levels[mine], want[4])
+                    with self.subTest('other pane and border'):
+                        self.ae((v2l[other], levels[other]), (b_v2l[other], b_levels[other]))
+                        self.ae(s.line(0)[pw], before.line(0)[pw])
+
+    def test_region_typed_gap_cursor_moves(self):
+        def build(x=None):
+            s = self.alt(20)
+            self.tmux_row(s, 0, 'אני a', 1, 20, 'spaces')
+            if x is not None:
+                s.cursor_position(1, x + 1)
+            return s
+
+        want_gap = self.tmux_oracle(20, 'אני a', 1)
+        with self.subTest('a: the cursor leaves and returns to the gap'):
+            ref = build(6)
+            no_gap = self.region_maps(ref, 0)
+            s = build()
+            test_screen_update_cell_data(s)
+            with self.subTest('gap frame'):
+                self.ae(self.row_layout(s, 0, 8), want_gap)
+            s.cursor_position(1, 7)
+            with self.subTest('move onto the letter flags the change'):
+                self.assertTrue(s.test_bidi_cursor_gap_changed())
+            with self.subTest('no-gap layout'):
+                self.ae(self.region_maps(s, 0), no_gap)
+            s.cursor_position(1, 9)
+            with self.subTest('move back flags the change'):
+                self.assertTrue(s.test_bidi_cursor_gap_changed())
+            with self.subTest('gap layout restored'):
+                self.ae(self.row_layout(s, 0, 8), want_gap)
+
+        with self.subTest('c: the cursor moves from one gap to another'):
+
+            def build_at(x):
+                s = self.alt(20)
+                self.tmux_row(s, 0, 'אני a', 2, 20, 'spaces')
+                if x is not None:
+                    s.cursor_position(1, x + 1)
+                return s
+
+            ref = build_at(8)
+            want = (self.region_maps(ref, 0), self.cursor_at(ref, 8, CURSOR_BEAM))
+            s = build_at(None)
+            test_screen_update_cell_data(s)
+            s.cursor_position(1, 9)
+            self.assertTrue(s.test_bidi_cursor_gap_changed())
+            self.ae((self.region_maps(s, 0), self.cursor_at(s, 8, CURSOR_BEAM)), want)
+
+        with self.subTest('d: the cursor row is a wrapped row of a region paragraph'):
+            seg = 'x ' + FSI + 'a אב' + '  ' + PDI
+
+            def build_wrapped(pos):
+                s = self.alt(20)
+                parse_bytes(s, (seg + 'y' * 12 + seg).encode())
+                s.cursor_position(*pos)
+                return s
+
+            s = build_wrapped((1, 8))
+            for y in (0, 1):
+                self.ae(s.cpu_cells(y, 7)['text'], ' ' + PDI, f'row {y} x=7')
+            ref = build_wrapped((2, 8))
+            want = tuple(self.region_maps(ref, y) for y in (0, 1))
+            s = build_wrapped((1, 8))
+            test_screen_update_cell_data(s)
+            s.cursor_position(2, 8)
+            self.assertTrue(s.test_bidi_cursor_gap_changed())
+            self.ae(tuple(self.region_maps(s, y) for y in (0, 1)), want)
+
+        with self.subTest('b: cursor-only moves that enter no gap resolve nothing'):
+            s = self.alt(20)
+            parse_bytes(s, ('abc def\r\nx ' + FSI + 'שלום ab' + PDI + '  \r\n').encode())
+            self.tmux_row(s, 2, 'אני a', 1, 20, 'spaces')
+            # tmux_row leaves the cursor on row 2's gap; start from a cursor on no gap
+            s.cursor_position(1, 1)
+            for _ in range(2):
+                test_screen_update_cell_data(s)
+            for name, y, x in (('plain row', 0, 1), ('plain row again', 0, 5), ('region row, inside the text', 1, 4), ('region row, further in', 1, 6)):
+                with self.subTest(name):
+                    s.cursor_position(y + 1, x + 1)
+                    self.assertFalse(s.test_bidi_cursor_gap_changed())
+                    self.ae(self.frame(s)[0], 0)
+
+    def test_region_typed_gap_rejected_probe(self):
+        # the region's base is RTL, so the typed blank after שלום is already at the base level: no gap applies and the cursor
+        # makes no difference to the layout
+        def build(x):
+            s = self.alt(16)
+            parse_bytes(s, ('x ' + RLI + 'שלום' + ' ' * 5 + PDI).encode())
+            s.cursor_position(1, x + 1)
+            return s
+
+        away = self.region_maps(build(14), 0)
+        self.assertIsNotNone(away[0])
+        with self.subTest('cursor after the typed blank'):
+            self.ae(self.region_maps(build(7), 0), away)
+
+    def test_region_typed_gap_paused(self):
+        # a paused frame uses the paused cursor's gap, whatever the live cursor does
+        s = self.alt(20)
+        x = self.tmux_row(s, 1, 'אני a', 1, 20, 'spaces')
+        s.pause_rendering(True, 1000)
+        s.cursor_position(3, 1)
+        self.assert_layout(self.row_layout(s, 1, x), self.tmux_oracle(20, 'אני a', 1))
+        with self.subTest('cursor visual'):
+            self.ae(self.cursor_at(s, x, CURSOR_BEAM, 1)[0], 4)
+        s.pause_rendering(False)
 
     def test_region_flags_survive_resize_pause_reset(self):
         with self.subTest('a: RIS clears the flags'):

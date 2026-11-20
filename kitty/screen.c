@@ -5173,6 +5173,7 @@ typedef struct BidiRows {
     // The row of the cursor and its gap column on it (see bidi_cursor_gap), 0 for none
     int gap_y;
     index_type gap_x;
+    index_type cursor_x; // the cursor's column on gap_y
 } BidiRows;
 
 static uint64_t
@@ -5295,19 +5296,21 @@ bidi_row_continues(const BidiRows *src, int y, const CPUCell *cells) {
 //    the walker starts from;
 // 6. row y + 1 does not start with a PDI written at column 0 (a leading control of its first cell): that PDI is the shell
 //    closing the isolate when the command runs, so the row below is output and starts its own paragraph.
-// A blank row, one without text that continues no row below it, such as an empty line of a multi-line command or a line
-// erased below the prompt, is passed through: a run of them joins as a whole, the nearest row above it that is not blank giving
-// the record of rule 3 and the first row below it that is not blank standing for row y + 1 in rules 2, 3 and 5, while rule 4
-// holds for every row of the run. A group then never ends in blank rows, which would keep the typed blanks of its last text
-// row at the paragraph level.
+// A blank row, one holding no text or a written space in every cell (padding written in place of an erase), that continues no row
+// below it, such as an empty line of a multi-line command or a line erased below the prompt, is passed through: a run of them joins
+// as a whole, the nearest row above it that is not blank giving the record of rule 3 and the first row below it that is not blank
+// standing for row y + 1 in rules 2, 3 and 5, while rule 4 holds for every row of the run. A group then never ends in blank rows,
+// which would keep the typed blanks of its last text row at the paragraph level.
 // Every answer comes from the rows' text alone, never from where the walker started.
 
-// Whether row y holds no text and continues no row below it
+// Whether row y holds no text, or a written space in every cell as a program's padding written in place of an erase, and continues no
+// row below it; a row mixing empty cells and spaces holds typed blanks
 static bool
 bidi_row_blank(const BidiRows *src, int y) {
     const CPUCell *cells = bidi_row_cells(src, y);
+    const char_type blank = cell_is_char(cells, ' ') ? ' ' : 0;
     for (index_type x = 0; x < src->linebuf->xnum; x++) {
-        if (cells[x].ch_and_idx) return false;
+        if (!cell_is_char(cells + x, blank)) return false;
     }
     return !bidi_row_continues(src, y, cells);
 }
@@ -5496,7 +5499,25 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued) {
     const LineAttrs lead_raw = *bidi_row_attrs(src, first), lead = line_attrs_bidi_record(lead_raw);
     // The cursor gap changes the layout of the paragraph's last row, so it is part of the key
     const index_type gap = (!*continued && src->gap_y == last && bidi_row_attrs(src, last)->bidi_stamp != BIDI_STAMP_NONE) ? src->gap_x : 0;
-    const uint64_t key_rows = num_rows | (uint64_t)(lead.bidi_rtl | lead.bidi_auto << 1) << BIDI_KEY_DIR_SHIFT | (uint64_t)gap << BIDI_KEY_GAP_SHIFT;
+    // So does the cursor gap of an isolate region on the cursor row of unstamped rows. The memo must be current before the key
+    // is compared, and a dirty row cannot hit anyway.
+    index_type region_gap = 0;
+    bool gap_row_refreshed = false;
+    if (!*continued && src->gap_y >= first && src->gap_y <= last && lead_raw.bidi_stamp == BIDI_STAMP_NONE) {
+        LineAttrs *a = bidi_row_attrs(src, src->gap_y);
+        const CPUCell *cells = around[src->gap_y - y0];
+        if (a->bidi_stamp == BIDI_STAMP_NONE) {
+            if (a->has_dirty_text && src->linebuf->bidi_regions) {
+                a->bidi_auto = bidi_cells_have_idx(cells, src->linebuf->xnum) && bidi_row_has_isolates(cells, src->linebuf->xnum, src->screen->text_cache);
+                gap_row_refreshed = true;
+            }
+            if (line_attrs_region_memo(*a)) region_gap = bidi_region_gap(b, cells, src->screen->text_cache, src->cursor_x);
+        }
+    }
+    uint64_t key_rows = num_rows | (uint64_t)(lead.bidi_rtl | lead.bidi_auto << 1) << BIDI_KEY_DIR_SHIFT | (uint64_t)gap << BIDI_KEY_GAP_SHIFT;
+    // region_gap is a test of the cells, so a region that cannot show it (no RTL, or a rejected probe) also keys on it and
+    // re-resolves when the cursor moves into or out of its gap
+    if (!gap && region_gap) key_rows |= (uint64_t)region_gap << BIDI_KEY_GAP_SHIFT | (uint64_t)(src->gap_y - first) << BIDI_KEY_GAP_ROW_SHIFT;
     // A hit: the same lines with the same text and cursor gap in the same paragraph at the same render rows as when the maps were last written
     // A shortcut: the same as a hit except that dirty rows may have signatures to check, and no row is above the view
     bool hit = cacheable, shortcut = cacheable && first == y0;
@@ -5530,7 +5551,7 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued) {
         if (a->has_dirty_text) {
             const CPUCell *cells = around[y - y0];
             if (a->bidi_stamp != BIDI_STAMP_NONE) a->bidi_stamp = bidi_row_memo(cells, src->linebuf->xnum, tc);
-            else if (src->linebuf->bidi_regions)
+            else if (src->linebuf->bidi_regions && !(gap_row_refreshed && y == src->gap_y))
                 a->bidi_auto = bidi_cells_have_idx(cells, src->linebuf->xnum) && bidi_row_has_isolates(cells, src->linebuf->xnum, tc);
         }
         rtl |= a->bidi_stamp == BIDI_STAMP_RTL || (a->bidi_stamp == BIDI_STAMP_ISOLATES && bidi_cells_may_reorder(around[y - y0], src->linebuf->xnum, tc));
@@ -5557,7 +5578,7 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int y0, bool *continued) {
         for (int r = min_render_row; r < end_render_row; r++) {
             const int y = r - src->to_render_row;
             if (regions && line_attrs_region_memo(*bidi_row_attrs(src, y))) {
-                bidi_resolve_regions(b, around[y - y0], tc, (index_type)r);
+                bidi_resolve_regions(b, around[y - y0], tc, (index_type)r, y == src->gap_y ? region_gap : 0);
                 regions_cacheable &= b->resolve_cacheable;
                 continue;
             }
@@ -5625,12 +5646,15 @@ bidi_maps_for_upload(Screen *self, const LineBuf *source) {
 }
 
 // Whether the walker could apply a gap at the live cursor (x, y): its row is a shown, stamped paragraph row, or the blank last row
-// of an active one, with a typed gap there
+// of an active one, with a typed gap there, or a shown region row with a gap in the cursor's region
 static bool
 bidi_gap_live(Screen *self, index_type x, index_type y) {
-    const BidiMaps *b = self->bidi_maps;
+    BidiMaps *b = self->bidi_maps;
     if (y >= self->lines) return false;
     const index_type r = y + self->scrolled_by + pixel_scroll_enabled(self);
+    if (r < b->rows && b->region_row[r] && b->active[r])
+        return line_attrs_region_memo(self->linebuf->line_attrs[y]) &&
+               bidi_region_gap(b, linebuf_cpu_cells_for_line(self->linebuf, y), self->text_cache, x) != 0;
     return r < b->rows && (b->active[r] || (r && b->active[r - 1] && b->para_first[r - 1] == b->para_first[r] && b->para_last[r - 1] == b->para_last[r])) &&
            !b->region_row[r] && self->linebuf->line_attrs[y].bidi_stamp != BIDI_STAMP_NONE &&
            bidi_cursor_gap(linebuf_cpu_cells_for_line(self->linebuf, y), self->columns, x, self->text_cache) != 0;
@@ -5655,7 +5679,8 @@ update_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE fonts_data,
         .end = self->lines,
         .to_render_row = to_render_row,
         .gap_y = (int)cursor_y,
-        .gap_x = cursor_y < self->lines ? bidi_cursor_gap(linebuf_cpu_cells_for_line(self->linebuf, cursor_y), self->columns, cursor_x, self->text_cache) : 0};
+        .gap_x = cursor_y < self->lines ? bidi_cursor_gap(linebuf_cpu_cells_for_line(self->linebuf, cursor_y), self->columns, cursor_x, self->text_cache) : 0,
+        .cursor_x = cursor_x};
     const index_type overlay_render_row = is_overlay_active ? self->overlay_line.ynum + src.to_render_row : UINT_MAX;
     Line line = {.text_cache = self->text_cache};
     bool continued = true;
@@ -5736,7 +5761,8 @@ update_paused_cell_data_bidi(Screen *self, void *address, FONTS_DATA_HANDLE font
         .gap_y = cursor_in_snapshot ? (int)cursor_row : -1,
         .gap_x = cursor_in_snapshot
                      ? bidi_cursor_gap(linebuf_cpu_cells_for_line(linebuf, cursor_row), self->columns, self->paused_rendering.cursor.x, self->text_cache)
-                     : 0};
+                     : 0,
+        .cursor_x = self->paused_rendering.cursor.x};
     const index_type row_offset = self->paused_rendering.pixel_scroll;
     bool continued = false;
     for (index_type y = 0; y < linebuf->ynum;) {
@@ -5866,8 +5892,8 @@ static bool cell_is_blank(const CPUCell *c);
 // cursor does too when on a blank cell or the pending wrap column. A beam on a
 // right-to-left cell is drawn at the right edge of the cell, flagged by
 // mirrored. On a row mapped by its isolate regions these rules apply within the
-// cursor cell's region, at the region's base level; a cursor outside every
-// region stays at its column.
+// cursor cell's region, at the region's base level, its cursor gap being
+// bidi_region_cursor_gap(); a cursor outside every region stays at its column.
 static index_type
 cursor_visual_in_row(Screen *self, index_type x, index_type y, CursorShape shape, bool *mirrored) {
     *mirrored = false;
@@ -5886,7 +5912,7 @@ cursor_visual_in_row(Screen *self, index_type x, index_type y, CursorShape shape
         if (x >= self->columns || !bidi_region_at(b, cells, self->text_cache, x, &lo, &hi, &rtl)) return x;
         base = rtl;
     }
-    if (!region_row && bidi_cursor_gap(cells, self->columns, x, self->text_cache)) {
+    if (region_row ? bidi_region_cursor_gap(cells, lo, hi, x, self->text_cache) : bidi_cursor_gap(cells, self->columns, x, self->text_cache)) {
         const uint8_t k = bidi_cell_level(b, render_row, x - 1);
         if (k != base) {
             const index_type q = x - 1, span = cell_span(cells + q);
