@@ -214,10 +214,11 @@ on every row it covers, the text on either side of it is reordered within its
 own span, and its text is shaped in the direction guessed from the text, as
 without bidi mode. A multicell character of scale 1 is reordered as one unit,
 which the algorithm sees as its first strong character, or its first character
-when it has none (as a neutral if that is an isolate).
-Its text is shaped in the direction of that unit, so text of mixed direction
-inside it is not reordered. A paragraph that holds an image placeholder is not
-reordered, and its text is shaped as without bidi mode.
+when it has none (as a neutral if that is an isolate), followed by the isolates
+and marks after its first character. Its text is shaped in the direction of
+that unit, so text of mixed direction inside it is not reordered. A paragraph
+that holds an image placeholder is not reordered, and its text is shaped as
+without bidi mode.
 
 Right-to-left runs are shaped without contextual alternates (``calt``),
 whatever :opt:`disable_ligatures` is set to, as in a right-to-left run they can
@@ -227,6 +228,30 @@ The text cursor is drawn at the visual column of its cell. A beam cursor on a
 right-to-left cell is drawn past the cell, on its left edge in the last column.
 The input method editor is anchored at the left edge of the cursor cell, and
 the pre-edit text is drawn as without bidi mode.
+
+kitty honours isolates (LRI, RLI, FSI and PDI) and the marks LRM, RLM and ALM
+written after a character, but a mark directly between two letters of the
+other direction does not split their run. A paragraph is laid out from its
+rows in view and up to a screen height of its rows above and below them, so
+the limits that follow count from the first of those rows, not from the start
+of a longer paragraph. With ``CSI ? 2501 h`` the direction of a paragraph
+longer than those rows is also taken from them, so it can change with the
+screen height and the scroll position. Of the isolates in those rows the first
+32 are honoured and later ones are treated as neutral. With a FriBidi older
+than 1.0.17, a bracket pair is not paired when its opening bracket is more
+than 32 characters, marks and isolates included, after the previous strong
+character or number at its isolate level, or after the start of its isolate
+or of those rows when there is none. Embeddings and overrides (LRE, RLE, LRO,
+RLO and PDF) are treated as neutral. A private-use icon followed by spaces
+takes only its own cell where the embedding level changes between it and the
+spaces.
+
+FriBidi 1.0.17 and 1.0.18 as released use the character data of Unicode 14,
+so code points added later, such as newer emoji, are treated as left-to-right
+letters. With FriBidi 1.0.16 and older, an FSI whose text holds no letter takes
+the direction of a letter in a later isolate. With FriBidi 1.0.17 and older, a
+bracket pair at the start of an isolate takes its direction from a letter in an
+earlier isolate at the same depth.
 
 In a vertically scrolling
 :doc:`smooth scroll region </smooth-scrolling-protocol>` that spans the width
