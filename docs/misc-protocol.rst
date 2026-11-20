@@ -220,6 +220,11 @@ Right-to-left runs are shaped without contextual alternates (``calt``),
 whatever :opt:`disable_ligatures` is set to, as in a right-to-left run they can
 turn an operator such as ``=>`` into another one.
 
+The text cursor is drawn at the visual column of its cell. A beam cursor on a
+right-to-left cell is drawn past the cell, on its left edge in the last column.
+The input method editor is anchored at the left edge of the cursor cell, and
+the pre-edit text is drawn left to right.
+
 An escape code to move the contents of the screen into the scrollback
 -------------------------------------------------------------------------------------
 
