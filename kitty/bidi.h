@@ -79,8 +79,10 @@ void bidi_maps_invalidate_row_hashes(Screen *self);
 BidiMaps *bidi_maps_for_upload(Screen *self, const LineBuf *source, index_type rows);
 BidiMaps *bidi_prepare_live(Screen *self, bool shown);
 void bidi_store_levels(const BidiMaps *b, index_type r, Line *line);
+index_type bidi_visual_x(const BidiMaps *b, index_type r, index_type x, index_type span);
 index_type bidi_logical_x(const BidiMaps *b, index_type r, index_type visual_x);
 bool bidi_cell_is_rtl(const BidiMaps *b, index_type r, index_type x);
+void bidi_blank_cut_half(const BidiMaps *b, const CPUCell *cells, index_type r, CellGPUData *row, index_type col, index_type inner);
 
 // Whether history line 0, the leading row of pixel scrolling, is in a recorded paragraph within the screen height above it
 // that its resolve reads
