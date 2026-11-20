@@ -252,6 +252,7 @@ do_screen_reset(Screen *self, bool is_hard_reset) {
         linebuf_clear(self->linebuf, BLANK_CHAR);
         historybuf_clear(self->historybuf);
         linebuf_clear(self->alt_linebuf, BLANK_CHAR);
+        self->main_linebuf->bidi_stamped = self->alt_linebuf->bidi_stamped = false;
         // all buffers are now empty
         self->multiline_chars_used = false;
         zero_at_ptr(&self->multiline_chars_cut_off_at_bottom);
@@ -266,6 +267,7 @@ do_screen_reset(Screen *self, bool is_hard_reset) {
     }
     self->modes = empty_modes;
     self->saved_modes = empty_modes;
+    zero_at_ptr(&self->bidi);
     self->active_hyperlink_id = 0;
     zero_at_ptr(&self->color_profile->overridden);
     reset_vt_parser(self->vt_parser);
@@ -599,8 +601,9 @@ mark_range_line_dirty(Screen *self, int y) {
     else historybuf_mark_line_dirty(self->historybuf, -(y + 1));
 }
 
-static void
-nuke_multicell_char_at(Screen *self, index_type x_, index_type y_, bool replace_with_spaces) {
+// Inlined into both removers below, so that the one the draw loop calls makes no call for it
+static inline __attribute__((always_inline)) MulticellRows
+clear_multicell_char_cells(Screen *self, index_type x_, index_type y_, bool replace_with_spaces) {
     const MulticellRows rows = multicell_char_rows(self, x_, y_);
     const CPUCell *cp = linebuf_cpu_cells_for_line(self->linebuf, y_);
     while (cp[x_].x && x_ > 0) x_--;
@@ -612,6 +615,37 @@ nuke_multicell_char_at(Screen *self, index_type x_, index_type y_, bool replace_
         mark_range_line_dirty(self, y);
     }
     self->is_dirty = true;
+    return rows;
+}
+
+// Cells were cleared from the rows [start, limit), negative rows are in the history buffer
+static void
+bidi_forget_rows_if_emptied(Screen *self, int start, int limit) {
+    for (int y = start; y < limit; y++) {
+        LineAttrs *a = y < 0 ? historybuf_attrs(self->historybuf, -(y + 1)) : self->linebuf->line_attrs + y;
+        if (line_has_bidi_bits(*a)) line_forget_bidi_if_emptied(a, range_line_(self, y));
+    }
+}
+
+// Removes the multicell char that has a cell at (x_, y_). Every row it leaves holding no text loses its bidi bits, but the rows
+// [y_, y_ + rows_written), which the caller writes next. On the screen only a stamped buffer has rows holding bits, so the
+// rows of a char reaching into the history are always checked.
+static void
+remove_multicell_char_at(Screen *self, index_type x_, index_type y_, bool replace_with_spaces, index_type rows_written) {
+    const MulticellRows rows = clear_multicell_char_cells(self, x_, y_, replace_with_spaces);
+    if (replace_with_spaces) return;
+    if (rows.start < 0) bidi_forget_rows_if_emptied(self, rows.start, 0);
+    if (!self->linebuf->bidi_stamped) return;
+    bidi_forget_rows_if_emptied(self, MAX(rows.start, 0), (int)y_);
+    bidi_forget_rows_if_emptied(self, (int)(y_ + rows_written), rows.limit);
+}
+
+// Removes the multicell char whose top row is y_, for a char written at x_. Row y_ keeps its bidi bits for that char, unless x_ is
+// the last column, where a wide char does not fit: it wraps, is discarded or is written over the column before.
+static void
+nuke_multicell_char_at(Screen *self, index_type x_, index_type y_, bool replace_with_spaces) {
+    if (UNLIKELY(self->linebuf->bidi_stamped)) remove_multicell_char_at(self, x_, y_, replace_with_spaces, x_ + 1 < self->columns);
+    else clear_multicell_char_cells(self, x_, y_, replace_with_spaces);
 }
 
 static void
@@ -620,7 +654,7 @@ nuke_multiline_char_intersecting_with(Screen *self, index_type x_start, index_ty
         CPUCell *cp;
         linebuf_init_cells(self->linebuf, y, &cp, NULL);
         for (index_type x = x_start; x < x_limit; x++) {
-            if (cp[x].is_multicell && cp[x].scale > 1) nuke_multicell_char_at(self, x, y, replace_with_spaces);
+            if (cp[x].is_multicell && cp[x].scale > 1) remove_multicell_char_at(self, x, y, replace_with_spaces, 0);
         }
     }
 }
@@ -640,7 +674,7 @@ nuke_multiline_chars_extending_below(Screen *self, index_type bottom) {
     const CPUCell *cp = linebuf_cpu_cells_for_line(self->linebuf, bottom);
     if (cells_have_multiline_chars(cp, self->columns)) {
         for (index_type x = 0; x < self->columns; x++) {
-            if (cp[x].is_multicell && cp[x].y + 1u < cp[x].scale) nuke_multicell_char_at(self, x, bottom, false);
+            if (cp[x].is_multicell && cp[x].y + 1u < cp[x].scale) remove_multicell_char_at(self, x, bottom, false, 0);
         }
     }
     if (at_screen_bottom) *cut_off = false;
@@ -681,7 +715,7 @@ nuke_multiline_chars_torn_by_scroll(Screen *self, index_type top, index_type bot
         if (!(top == 0 && history_adjoins_top) && has_multiline(top)) {
             const CPUCell *cp = linebuf_cpu_cells_for_line(self->linebuf, top);
             for (index_type x = 0; x < self->columns; x++) {
-                if (cp[x].is_multicell && cp[x].y > 0) nuke_multicell_char_at(self, x, top, false);
+                if (cp[x].is_multicell && cp[x].y > 0) remove_multicell_char_at(self, x, top, false, 0);
             }
         }
     }
@@ -723,7 +757,7 @@ nuke_multicell_char_intersecting_with(Screen *self, index_type x_start, index_ty
         linebuf_init_cells(self->linebuf, y, &cp, NULL);
         if (!has_multicell_in_range(cp, x_start, x_limit)) continue;
         for (index_type x = x_start; x < x_limit; x++) {
-            if (cp[x].is_multicell) nuke_multicell_char_at(self, x, y, replace_with_spaces);
+            if (cp[x].is_multicell) remove_multicell_char_at(self, x, y, replace_with_spaces, 0);
         }
     }
 }
@@ -733,7 +767,7 @@ static void
 nuke_split_multicell_char_at_left_boundary(Screen *self, index_type x, index_type y, bool replace_with_spaces) {
     CPUCell *cp = linebuf_cpu_cells_for_line(self->linebuf, y);
     if (cp[x].is_multicell && cp[x].x) {
-        nuke_multicell_char_at(self, x, y, replace_with_spaces); // remove split multicell char at left edge
+        remove_multicell_char_at(self, x, y, replace_with_spaces, 0); // remove split multicell char at left edge
     }
 }
 
@@ -743,7 +777,7 @@ nuke_split_multicell_char_at_right_boundary(Screen *self, index_type x, index_ty
     CPUCell *c = cp + x;
     if (c->is_multicell) {
         unsigned max_x = mcd_x_limit(c) - 1;
-        if (c->x < max_x) { nuke_multicell_char_at(self, x, y, replace_with_spaces); }
+        if (c->x < max_x) { remove_multicell_char_at(self, x, y, replace_with_spaces, 0); }
     }
 }
 
@@ -846,6 +880,17 @@ remove_blank_output_line_reservation_marker(Cursor *cursor, LineBuf *linebuf) {
         if (is_marker(x)) cell_set_char(cells + x, 0);
 #undef is_marker
         cursor->x = x;
+    }
+}
+
+// A resize can leave rows holding no text: the rewrap drops chars too wide for the new width and blank cells, also in the rows
+// it moves into the history, and the alternate screen drops the chars cut at its new edges
+static void
+bidi_forget_rows_left_without_text(LineBuf *lb) {
+    if (!lb->bidi_stamped) return;
+    for (index_type y = 0; y < lb->ynum; y++) {
+        linebuf_init_line(lb, y);
+        line_forget_bidi_if_emptied(lb->line_attrs + y, lb->line);
     }
 }
 
@@ -973,6 +1018,9 @@ screen_resize(Screen *self, unsigned int lines, unsigned int columns) {
             linebuf_copy_line_to(self->main_linebuf, src->line, y);
         }
     }
+    bidi_forget_rows_left_without_text(self->main_linebuf);
+    bidi_forget_rows_left_without_text(self->alt_linebuf);
+    if (self->main_linebuf->bidi_stamped) historybuf_forget_bidi_of_rows_without_text(self->historybuf);
     return true;
 }
 
@@ -1124,6 +1172,56 @@ init_segmentation_state(Screen *self, text_loop_state *s) {
             for (index_type i = 0; i < self->lc->count; i++) s->seg = grapheme_segmentation_step(s->seg, char_props_for(self->lc->chars[i]));
         }
     }
+}
+
+static LineAttrs
+current_bidi_record(const Screen *self) {
+    LineAttrs ans = {0};
+    if (!self->modes.mBDSM || OPT(force_ltr)) return ans;
+    ans.bidi_stamp = BIDI_STAMP_IMPLICIT;
+    ans.bidi_rtl = self->bidi.rtl;
+    ans.bidi_auto = self->modes.mBIDI_AUTODETECT;
+    return ans;
+}
+
+static inline void
+set_bidi_record(LineAttrs *a, LineAttrs r) {
+    a->bidi_stamp = r.bidi_stamp;
+    a->bidi_rtl = r.bidi_rtl;
+    a->bidi_auto = r.bidi_auto;
+}
+
+static void
+stamp_line_for_bidi(Screen *self, index_type y, uint8_t record) {
+    LineAttrs *a = self->linebuf->line_attrs + y;
+    if (!record) return;
+    a->val |= record;
+    self->linebuf->bidi_stamped = true;
+}
+
+static inline void
+record_written_line(Screen *self, index_type y, uint8_t record) {
+    if (!self->linebuf->line_attrs[y].bidi_stamp) stamp_line_for_bidi(self, y, record);
+}
+
+static inline void
+record_combining_write(Screen *self, const CPUCell *pc, index_type py, char_type before, bool was_multicell, uint8_t record) {
+    if (pc->ch_and_idx == before) return;
+    // A widened narrow char can move to the cursor row, leaving its row without text
+    if (!was_multicell && !pc->ch_and_idx) {
+        if (self->cursor->y != py) record_written_line(self, self->cursor->y, record);
+        linebuf_init_line(self->linebuf, py);
+        if (line_is_empty(self->linebuf->line)) return;
+    }
+    record_written_line(self, py, record);
+}
+
+static void
+bidi_clear_record_if_blank(Screen *self, index_type y) {
+    LineBuf *lb = self->linebuf;
+    if (LIKELY(!lb->bidi_stamped)) return;
+    linebuf_init_line(lb, y);
+    line_forget_bidi_if_emptied(lb->line_attrs + y, lb->line);
 }
 
 static void
@@ -1480,12 +1578,17 @@ has_multiline_cells_in_span(const CPUCell *cells, const index_type start, const 
 }
 
 static void
-nuke_multicell_chars_in_span(Screen *self, index_type start, index_type count) {
+nuke_multicell_chars_in_span(Screen *self, index_type start, index_type count, index_type height) {
     // Remove all multicell chars intersecting the span of count cells at start
     // in the cursor line, so that the span can be overwritten without tearing them
-    const CPUCell *cp = linebuf_cpu_cells_for_line(self->linebuf, self->cursor->y);
+    // by a char of height rows. The rows that char is written to keep their bidi bits:
+    // when it does not fit above the bottom margin, the region scrolls up and the
+    // rows below the margin stay.
+    const index_type y = self->cursor->y;
+    const index_type rows_written = height > 1 && y <= self->margin_bottom ? MIN(height, self->margin_bottom + 1 - y) : height;
+    const CPUCell *cp = linebuf_cpu_cells_for_line(self->linebuf, y);
     for (index_type x = start; x < start + count; x++) {
-        if (cp[x].is_multicell) nuke_multicell_char_at(self, x, self->cursor->y, cp[x].x != 0);
+        if (cp[x].is_multicell) remove_multicell_char_at(self, x, y, cp[x].x != 0, rows_written);
     }
 }
 
@@ -1496,17 +1599,19 @@ linefeed_moves_to_new_line(const Screen *self) {
     return self->cursor->y == self->margin_bottom || self->cursor->y + 1 < self->lines;
 }
 
-static bool
-move_cursor_past_multicell(Screen *self, index_type required_width) {
+// Inlined into both callers, so that height is a constant in move_cursor_past_multicell(), which the draw loop calls
+static inline __attribute__((always_inline)) bool
+move_cursor_past_multicell_to_write(Screen *self, index_type required_width, index_type height) {
     // Move the cursor to the first place at or after it where there are
     // required_width cells free of the lower rows of multiline chars, removing
-    // any other multicell chars in those cells.
+    // any other multicell chars in those cells. The caller writes a char of
+    // height rows there next.
     if (required_width > self->columns) return false;
     while (true) {
         CPUCell *cp = linebuf_cpu_cells_for_line(self->linebuf, self->cursor->y);
         while (self->cursor->x + required_width <= self->columns) {
             if (!has_multiline_cells_in_span(cp, self->cursor->x, required_width)) {
-                nuke_multicell_chars_in_span(self, self->cursor->x, required_width);
+                nuke_multicell_chars_in_span(self, self->cursor->x, required_width, height);
                 return true;
             }
             self->cursor->x++;
@@ -1518,10 +1623,15 @@ move_cursor_past_multicell(Screen *self, index_type required_width) {
             // as the cursor is on the last line below the bottom margin, so
             // make space at the end of the line
             self->cursor->x = self->columns - required_width;
-            nuke_multicell_chars_in_span(self, self->cursor->x, required_width);
+            nuke_multicell_chars_in_span(self, self->cursor->x, required_width, height);
             return true;
         }
     }
+}
+
+static bool
+move_cursor_past_multicell(Screen *self, index_type required_width) {
+    return move_cursor_past_multicell_to_write(self, required_width, 1);
 }
 
 static void
@@ -1532,6 +1642,7 @@ move_widened_char_past_multiline_chars(Screen *self, text_loop_state *s, CPUCell
     // can include its current cell
     const CPUCell c = *cpu_cell;
     *cpu_cell = (CPUCell){0};
+    const index_type left = self->linebuf->line_map[ypos];
     self->cursor->x = xpos;
     self->cursor->y = ypos;
     if (move_cursor_past_multicell(self, 2)) {
@@ -1543,6 +1654,13 @@ move_widened_char_past_multiline_chars(Screen *self, text_loop_state *s, CPUCell
         cp[self->cursor->x] = c;
         cp[self->cursor->x].x = 1;
         self->cursor->x++;
+    }
+    // the row the char left, which the wrap to the next line can have scrolled up
+    for (index_type y = ypos + 1; y-- > 0;) {
+        if (self->linebuf->line_map[y] == left) {
+            bidi_forget_rows_if_emptied(self, (int)y, (int)y + 1);
+            break;
+        }
     }
     if (self->cursor->y == before) init_segmentation_state(self, s);
     else init_text_loop_line(self, s);
@@ -1677,7 +1795,7 @@ is_plain_combining_char(char_type ch, GraphemeSegmentationResult seg, CharProps 
     return ch != VS15 && ch != VS16 && !(seg.grapheme_break == GBP_SpacingMark && wcwidth_std(props) > 0);
 }
 
-static size_t
+static inline size_t
 draw_combining_char_run(Screen *self, text_loop_state *s, char_type ch, CharProps props, const uint32_t *rest, size_t num_rest) {
     // ch has been through grapheme segmentation, which added it to the previous
     // cell. Plain combining chars directly following it are added along with it,
@@ -1711,6 +1829,17 @@ draw_combining_char_run(Screen *self, text_loop_state *s, char_type ch, CharProp
     add_combining_chars(self, run, n, xpos, s->prev.y);
     s->seg = seg;
     return n - 1;
+}
+
+static size_t
+draw_combining_char_run_implicit(Screen *self, text_loop_state *s, char_type ch, CharProps props, const uint32_t *rest, size_t num_rest, uint8_t record) {
+    const CPUCell *pc = s->prev.cc;
+    const index_type py = s->prev.y;
+    const char_type before = pc->ch_and_idx;
+    const bool was_multicell = pc->is_multicell;
+    const size_t n = draw_combining_char_run(self, s, ch, props, rest, num_rest);
+    record_combining_write(self, pc, py, before, was_multicell, record);
+    return n;
 }
 
 static void
@@ -1817,7 +1946,7 @@ write_wide_cells(CPUCell *dest, char_type ch, const WideCellWords *w) {
 }
 
 // Not inlined, so that it gets its own register allocation rather than competing
-// with the rest of draw_text_loop() for registers. It is called once per run.
+// with the rest of draw_text_loop_() for registers. It is called once per run.
 __attribute__((noinline)) static size_t
 draw_non_ascii_run(Screen *self, text_loop_state *s, const uint32_t *chars, size_t num_chars) {
     // Batched fast path: draw a run of non-ASCII chars each of which starts a new cell
@@ -1884,8 +2013,8 @@ draw_non_ascii_run(Screen *self, text_loop_state *s, const uint32_t *chars, size
     return i;
 }
 
-static void
-draw_text_loop(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_state *s) {
+static inline __attribute__((always_inline)) void
+draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_state *s, const bool implicit, const uint8_t record) {
     init_text_loop_line(self, s);
     int char_width;
 #define TEMPLATE_CELLS 16
@@ -1945,6 +2074,7 @@ draw_text_loop(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_
                     s->prev.x = self->cursor->x + n - 1;
                     s->prev.cc = cp + n - 1;
                     self->cursor->x += n;
+                    if (implicit) record_written_line(self, self->cursor->y, record);
                     s->seg = (GraphemeSegmentationResult){.grapheme_break = GBP_None};
                     i += n - 1;
                     continue;
@@ -1960,6 +2090,7 @@ draw_text_loop(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_
                 !batched_non_ascii_draw_disabled_for_tests) {
                 const size_t n = draw_non_ascii_run(self, s, chars + i, num_chars - i);
                 if (n) {
+                    if (implicit) record_written_line(self, self->cursor->y, record);
                     i += n - 1;
                     continue;
                 }
@@ -1971,7 +2102,8 @@ draw_text_loop(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_
             }
             s->seg = grapheme_segmentation_step(s->seg, cp);
             if (UNLIKELY(s->seg.add_to_current_cell && s->prev.cc)) {
-                i += draw_combining_char_run(self, s, ch, cp, chars + i + 1, num_chars - i - 1);
+                if (implicit) i += draw_combining_char_run_implicit(self, s, ch, cp, chars + i + 1, num_chars - i - 1, record);
+                else i += draw_combining_char_run(self, s, ch, cp, chars + i + 1, num_chars - i - 1);
                 continue;
             }
             char_width = wcwidth_std(cp);
@@ -1980,7 +2112,14 @@ draw_text_loop(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_
                     // Preserve zero width chars as combining chars even though
                     // they were not added to the prev cell by grapheme segmentation.
                     // Zero width chars can only be represented as combining chars.
-                    if (s->prev.cc) draw_combining_char(self, s, ch);
+                    if (s->prev.cc) {
+                        const CPUCell *pc = s->prev.cc;
+                        const index_type py = s->prev.y;
+                        const char_type before = pc->ch_and_idx;
+                        const bool was_multicell = pc->is_multicell;
+                        draw_combining_char(self, s, ch);
+                        if (implicit) record_combining_write(self, pc, py, before, was_multicell, record);
+                    }
                     continue;
                 }
                 char_width = 1;
@@ -2043,6 +2182,7 @@ draw_text_loop(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_
             self->cursor->x++;
             fc->is_multicell = false;
         }
+        if (implicit) record_written_line(self, s->prev.y, record);
     }
 #undef init_line
 #undef TEMPLATE_CELLS
@@ -2067,13 +2207,31 @@ static void
 draw_text(Screen *self, const uint32_t *chars, size_t num_chars) {
     PREPARE_FOR_DRAW_TEXT;
     self->is_dirty = true;
-    draw_text_loop(self, chars, num_chars, &s);
+    draw_text_loop_(self, chars, num_chars, &s, false, 0);
+}
+
+// Text written in implicit bidi mode records each line it is written to
+static void
+draw_text_implicit(Screen *self, const uint32_t *chars, size_t num_chars) {
+    if (OPT(force_ltr)) {
+        draw_text(self, chars, num_chars);
+        return;
+    }
+    PREPARE_FOR_DRAW_TEXT;
+    self->is_dirty = true;
+    draw_text_loop_(self, chars, num_chars, &s, true, current_bidi_record(self).val);
+}
+
+static void
+draw_text_in_mode(Screen *self, const uint32_t *chars, size_t num_chars) {
+    if (UNLIKELY(self->modes.mBDSM)) draw_text_implicit(self, chars, num_chars);
+    else draw_text(self, chars, num_chars);
 }
 
 void
 screen_draw_text(Screen *self, const uint32_t *chars, size_t num_chars) {
     screen_on_input(self);
-    draw_text(self, chars, num_chars);
+    draw_text_in_mode(self, chars, num_chars);
 }
 
 static void
@@ -2125,7 +2283,7 @@ handle_fixed_width_multicell_command(Screen *self, CPUCell mcd, ListOfChars *lc)
     mcd.style_idx = s.cc.style_idx;
     cell_set_chars(&mcd, self->text_cache, lc);
     if (lc->count && is_glyph_block_codepoint(lc->chars[0])) bind_registered_glyph(self, &mcd, lc->chars[0]);
-    move_cursor_past_multicell(self, width);
+    move_cursor_past_multicell_to_write(self, width, height);
     if (height > 1) {
         if (self->cursor->y <= self->margin_bottom) {
             index_type available_height = self->margin_bottom - self->cursor->y + 1;
@@ -2150,10 +2308,11 @@ handle_fixed_width_multicell_command(Screen *self, CPUCell mcd, ListOfChars *lc)
     for (index_type y = self->cursor->y; y < self->cursor->y + height; y++) {
         linebuf_init_cells(self->linebuf, y, &s.cp, NULL);
         linebuf_mark_line_dirty(self->linebuf, y);
+        if (UNLIKELY(self->modes.mBDSM) && !OPT(force_ltr)) record_written_line(self, y, current_bidi_record(self).val);
         mcd.x = 0;
         mcd.y = y - self->cursor->y;
         for (index_type x = self->cursor->x; x < self->cursor->x + width; x++, mcd.x++) {
-            if (s.cp[x].is_multicell) nuke_multicell_char_at(self, x, y, s.cp[x].x + s.cp[x].y > 0);
+            if (s.cp[x].is_multicell) remove_multicell_char_at(self, x, y, s.cp[x].x + s.cp[x].y > 0, self->cursor->y + height - y);
             s.cp[x] = mcd;
         }
     }
@@ -2654,6 +2813,10 @@ screen_toggle_screen_buffer(Screen *self, bool save_cursor, bool clear_alt_scree
             grman_clear(self->alt_grman, true, self->cell_size);
         }
         if (save_cursor) screen_save_cursor(self);
+        self->bidi.main_stash.mBDSM = self->modes.mBDSM;
+        self->bidi.main_stash.mBIDI_AUTODETECT = self->modes.mBIDI_AUTODETECT;
+        self->bidi.main_stash.rtl = self->bidi.rtl;
+        self->modes.mBDSM = self->modes.mBIDI_AUTODETECT = self->bidi.rtl = false;
         self->linebuf = self->alt_linebuf;
         self->tabstops = self->alt_tabstops;
         self->key_encoding_flags = self->alt_key_encoding_flags;
@@ -2663,6 +2826,9 @@ screen_toggle_screen_buffer(Screen *self, bool save_cursor, bool clear_alt_scree
         self->alternate_screen.entered_at = monotonic();
     } else {
         self->alternate_screen.exited_at = monotonic();
+        self->modes.mBDSM = self->bidi.main_stash.mBDSM;
+        self->modes.mBIDI_AUTODETECT = self->bidi.main_stash.mBIDI_AUTODETECT;
+        self->bidi.rtl = self->bidi.main_stash.rtl;
         self->linebuf = self->main_linebuf;
         self->tabstops = self->main_tabstops;
         self->key_encoding_flags = self->main_key_encoding_flags;
@@ -2717,6 +2883,8 @@ set_mode_from_const(Screen *self, unsigned int mode, bool val) {
 
         case DECSCLM:
         case DECNRCM: break; // we ignore these modes
+        case BDSM: self->modes.mBDSM = val; break;
+        case BIDI_AUTODETECT: self->modes.mBIDI_AUTODETECT = val; break;
         case DECCKM: self->modes.mDECCKM = val; break;
         case DECTCEM: self->modes.mDECTCEM = val; break;
         case DECSCNM:
@@ -3392,6 +3560,8 @@ copy_specific_mode(Screen *self, unsigned int mode, const ScreenModes *src, Scre
             break;
             SIDE_EFFECTS(DECOM)
             SIDE_EFFECTS(DECCOLM)
+            SIDE_EFFECTS(BDSM) // kitty extension
+            SIDE_EFFECTS(BIDI_AUTODETECT)
     }
 #undef SIMPLE_MODE
 #undef SIDE_EFFECTS
@@ -3425,6 +3595,8 @@ copy_specific_modes(Screen *self, const ScreenModes *src, ScreenModes *dest) {
     copy_specific_mode(self, MOUSE_BUTTON_TRACKING, src, dest);
     copy_specific_mode(self, MOUSE_UTF8_MODE, src, dest);
     copy_specific_mode(self, DECSCNM, src, dest);
+    copy_specific_mode(self, BDSM, src, dest);
+    copy_specific_mode(self, BIDI_AUTODETECT, src, dest);
 }
 
 void
@@ -3611,6 +3783,7 @@ screen_erase_in_line(Screen *self, unsigned int how, bool private) {
         self->is_dirty = true;
         clear_intersecting_selections(self, self->cursor->y);
         linebuf_mark_line_dirty(self->linebuf, self->cursor->y);
+        bidi_clear_record_if_blank(self, self->cursor->y);
     }
 }
 
@@ -3634,7 +3807,7 @@ screen_clear_scrollback(Screen *self) {
     for (index_type x = 0; x < self->columns; x++) {
         CPUCell *c = cells + x;
         if (c->is_multicell && c->y > 0) { // multiline char that extended into scrollback
-            nuke_multicell_char_at(self, x, 0, false);
+            remove_multicell_char_at(self, x, 0, false, 0);
         }
     }
     self->linebuf = orig;
@@ -3672,7 +3845,7 @@ nuke_multiline_chars_split_by_erase(Screen *self, unsigned int how, index_type a
         linebuf_init_cells(self->linebuf, y, &cp, NULL);
         for (index_type x = 0; x < self->columns; x++) {
             if (!cp[x].is_multicell) continue;
-            if (top ? cp[x].y > 0 : cp[x].y + 1 < cp[x].scale) nuke_multicell_char_at(self, x, y, false);
+            if (top ? cp[x].y > 0 : cp[x].y + 1 < cp[x].scale) remove_multicell_char_at(self, x, y, false, 0);
         }
     }
 }
@@ -3737,7 +3910,13 @@ screen_erase_in_display(Screen *self, unsigned int how, bool private) {
     }
     if (how < 2) {
         screen_erase_in_line(self, how, private);
-        if (how == 1) linebuf_clear_attrs_and_dirty(self->linebuf, self->cursor->y);
+        if (how == 1) {
+            // the record outlives the clear of the other attrs while the row holds text
+            LineAttrs *a = self->linebuf->line_attrs + self->cursor->y;
+            const LineAttrs record = *a;
+            linebuf_clear_attrs_and_dirty(self->linebuf, self->cursor->y);
+            if (UNLIKELY(self->linebuf->bidi_stamped)) set_bidi_record(a, record);
+        }
     }
     if (how == 3 && self->linebuf == self->main_linebuf) { screen_clear_scrollback(self); }
     if (how == 3) reset_style_table_if_unused(self);
@@ -3751,7 +3930,7 @@ screen_insert_lines(Screen *self, unsigned int count) {
         // remove split multiline chars at top edge
         CPUCell *cells = linebuf_cpu_cells_for_line(self->linebuf, self->cursor->y);
         for (index_type x = 0; x < self->columns; x++) {
-            if (cells[x].is_multicell && cells[x].y) nuke_multicell_char_at(self, x, self->cursor->y, false);
+            if (cells[x].is_multicell && cells[x].y) remove_multicell_char_at(self, x, self->cursor->y, false, 0);
         }
         const bool at_screen_bottom = bottom + 1 >= self->lines;
         // remove chars straddling the bottom margin, as the lines at the bottom
@@ -3829,6 +4008,7 @@ screen_insert_characters(Screen *self, unsigned int count) {
         linebuf_mark_line_dirty(self->linebuf, self->cursor->y);
         self->is_dirty = true;
         clear_intersecting_selections(self, self->cursor->y);
+        bidi_clear_record_if_blank(self, self->cursor->y);
     }
 }
 
@@ -3872,6 +4052,7 @@ screen_delete_characters(Screen *self, unsigned int count) {
         linebuf_mark_line_dirty(self->linebuf, self->cursor->y);
         self->is_dirty = true;
         clear_intersecting_selections(self, self->cursor->y);
+        bidi_clear_record_if_blank(self, self->cursor->y);
     }
 }
 
@@ -3887,6 +4068,7 @@ screen_erase_characters(Screen *self, unsigned int count) {
     linebuf_mark_line_dirty(self->linebuf, self->cursor->y);
     self->is_dirty = true;
     clear_intersecting_selections(self, self->cursor->y);
+    bidi_clear_record_if_blank(self, self->cursor->y);
 }
 
 // }}}
@@ -4065,6 +4247,8 @@ report_mode_status(Screen *self, unsigned int which, bool private) {
         case MOUSE_UTF8_MODE: ans = self->modes.mouse_tracking_protocol == UTF8_PROTOCOL ? 1 : 2; break;
         case MOUSE_SGR_PIXEL_MODE: ans = self->modes.mouse_tracking_protocol == SGR_PIXEL_PROTOCOL ? 1 : 2; break;
         case PENDING_UPDATE: ans = self->paused_rendering.expires_at ? 1 : 2; break;
+        case BDSM: ans = OPT(force_ltr) ? 4 : (self->modes.mBDSM ? 1 : 2); break;
+        case BIDI_AUTODETECT: ans = OPT(force_ltr) ? 4 : (self->modes.mBIDI_AUTODETECT ? 1 : 2); break;
     }
     int sz = snprintf(buf, sizeof(buf) - 1, "%s%u;%u$y", (private ? "?" : ""), which, ans);
     if (sz > 0) write_escape_code_to_child(self, ESC_CSI, buf);
@@ -4088,6 +4272,12 @@ screen_set_margins(Screen *self, unsigned int top, unsigned int bottom) {
         // bottom margins of the scrolling region (DECSTBM) changes.
         screen_cursor_position(self, 1, 1);
     }
+}
+
+void
+screen_set_bidi_direction(Screen *self, unsigned int direction, unsigned int path_extent UNUSED) {
+    if (direction > 2) return;
+    self->bidi.rtl = direction == 2;
 }
 
 void
@@ -6368,6 +6558,7 @@ remove_multicell_fragments_cut_off_above_screen(Screen *self, index_type num_lin
         }
         if (!found) break; // a multicell char cannot skip a line
         linebuf_mark_line_dirty(self->linebuf, y);
+        line_forget_bidi_if_emptied(self->linebuf->line_attrs + y, line);
     }
 }
 
@@ -6644,7 +6835,7 @@ draw(Screen *self, PyObject *src) {
     if (PyUnicode_READY(src) != 0) { return PyErr_NoMemory(); }
     Py_UCS4 *buf = PyUnicode_AsUCS4Copy(src);
     if (!buf) return NULL;
-    draw_text(self, buf, PyUnicode_GetLength(src));
+    draw_text_in_mode(self, buf, PyUnicode_GetLength(src));
     PyMem_Free(buf);
     Py_RETURN_NONE;
 }
@@ -8403,6 +8594,18 @@ test_set_style_table_limit(Screen *self, PyObject *val) {
 }
 
 static PyObject *
+test_bidi_line_record(Screen *self, PyObject *val) {
+    unsigned long y = PyLong_AsUnsignedLong(val);
+    if (PyErr_Occurred()) return NULL;
+    if (y >= self->lines) {
+        PyErr_SetString(PyExc_IndexError, "line out of range");
+        return NULL;
+    }
+    const LineAttrs a = self->linebuf->line_attrs[y];
+    return Py_BuildValue("iOO", (int)a.bidi_stamp, a.bidi_rtl ? Py_True : Py_False, a.bidi_auto ? Py_True : Py_False);
+}
+
+static PyObject *
 test_ch_and_idx(PyObject *self UNUSED, PyObject *val) {
     CPUCell c = {0};
     if (PyLong_Check(val)) {
@@ -8424,6 +8627,7 @@ static PyMethodDef methods[] = {
     METHODB(cell_style_idx, METH_VARARGS),
     METHODB(style_table_info, METH_NOARGS),
     METHODB(test_set_style_table_limit, METH_O),
+    METHODB(test_bidi_line_record, METH_O),
     METHODB(test_gc_style_table, METH_VARARGS),
     METHODB(test_draw_overlay_line, METH_VARARGS),
     METHODB(test_update_overlay_text, METH_VARARGS),

@@ -254,6 +254,21 @@ historybuf_cpu_cells(HistoryBuf *self, index_type lnum) {
     return cpu_lineptr(self, index_of(self, lnum));
 }
 
+LineAttrs *
+historybuf_attrs(HistoryBuf *self, index_type lnum) {
+    return attrptr(self, index_of(self, lnum));
+}
+
+void
+historybuf_forget_bidi_of_rows_without_text(HistoryBuf *self) {
+    for (index_type y = 0; y < self->count; y++) {
+        const index_type idx = index_of(self, y);
+        if (!line_has_bidi_bits(*attrptr(self, idx))) continue;
+        init_line(self, idx, self->line);
+        line_forget_bidi_if_emptied(attrptr(self, idx), self->line);
+    }
+}
+
 void
 historybuf_mark_line_clean(HistoryBuf *self, index_type y) {
     attrptr(self, index_of(self, y))->has_dirty_text = false;
@@ -448,6 +463,7 @@ clear_multicell_cell(HistoryBuf *self, index_type lnum, index_type x) {
     cell_set_char(c, 0);
     cell_clear_multicell(c);
     attrptr(self, idx)->has_dirty_text = true;
+    line_forget_bidi_if_emptied(attrptr(self, idx), self->line);
 }
 
 void
