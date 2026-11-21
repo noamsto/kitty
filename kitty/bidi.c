@@ -522,7 +522,9 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int first, int last, bool c
         rtl |= a->bidi_stamp == BIDI_STAMP_RTL;
         placeholders |= a->has_image_placeholders;
     }
-    const LineAttrs lead = *bidi_row_attrs(src, first);
+    LineAttrs lead = *bidi_row_attrs(src, first);
+    // A row without a record may hold the direction a leading mark set for its first text written in bidi mode
+    if (lead.bidi_stamp == BIDI_STAMP_NONE) lead.bidi_rtl = lead.bidi_auto = false;
     if (!(rtl || lead.bidi_rtl) || placeholders ||
         !bidi_resolve_paragraph(&b->scratch, b->para_rows, num_rows, cols, tc, bidi_record_base(lead), b->para_levels)) {
         memset(b->para_levels, 0, num_cells);
@@ -611,9 +613,9 @@ bidi_unstamp(LineBuf *lb) {
     }
 }
 
-// NULL for a frame shown in logical order. The buffer drops its flag once none of its rows has a record, unless the main one
-// continues a history line while the history holds a record. A frame not shown (paused) does not mark its rows on view as
-// rendered with the history rows below them.
+// NULL for a frame shown in logical order. The buffer drops its flag once none of its rows has a record or a leading mark's
+// direction, unless the main one continues a history line while the history holds a record. A frame not shown (paused) does
+// not mark its rows on view as rendered with the history rows below them.
 BidiMaps *
 bidi_prepare_live(Screen *self, bool shown) {
     if (OPT(force_ltr)) return NULL;
@@ -621,7 +623,7 @@ bidi_prepare_live(Screen *self, bool shown) {
     HistoryBuf *hb = self->historybuf;
     if (lb->bidi_stamped && !(lb == self->main_linebuf && hb->bidi_stamped && hb->count && history_buf_endswith_wrap(hb))) {
         bool stamped = false;
-        for (index_type y = 0; y < lb->ynum && !stamped; y++) stamped = lb->line_attrs[y].bidi_stamp != BIDI_STAMP_NONE;
+        for (index_type y = 0; y < lb->ynum && !stamped; y++) stamped = line_has_bidi_bits(lb->line_attrs[y]);
         if (!stamped) bidi_unstamp(lb);
     }
     // The history is the main screen's, shown above the alternate screen too when scrolled back

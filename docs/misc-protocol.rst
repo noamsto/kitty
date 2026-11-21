@@ -237,6 +237,18 @@ previous strong character or number at its isolate level, or after the start
 of its isolate or of those rows when there is none. Embeddings and overrides
 (LRE, RLE, LRO, RLO and PDF) are treated as neutral.
 
+The :doc:`text sizing protocol </text-sizing-protocol>` discards a zero-width
+code point that has no previous cell. In bidi mode with ``CSI ? 2501 h`` set,
+an LRM or RLM discarded this way still sets the direction its line takes, LRM
+left to right and RLM right to left, which the paragraph the line starts has
+instead of that of its first strong character. On a line that has no settings
+yet, it applies from the first character written to the line in bidi mode. If
+several are written, the last one wins. Like the other settings, this direction
+lasts until the line is left blank as described above, but on a line that holds
+no text yet it may be lost when the screen is resized. Without
+``CSI ? 2501 h`` such a mark has no effect. ALM and the isolates discarded this
+way have no effect either.
+
 An escape code to move the contents of the screen into the scrollback
 -------------------------------------------------------------------------------------
 
