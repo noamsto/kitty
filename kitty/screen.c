@@ -664,8 +664,8 @@ bidi_forget_rows_if_emptied(Screen *self, int start, int limit) {
 }
 
 // Removes the multicell char that has a cell at (x_, y_). Every row it leaves holding no text loses its bidi bits, but the rows
-// [y_, y_ + rows_written), which the caller writes next. On the screen only a stamped buffer has rows holding bits, so the
-// rows of a char reaching into the history are always checked.
+// [y_, y_ + rows_written), which the caller writes next. On the screen only a stamped buffer has rows holding bits, while a
+// leading mark's direction does not stamp the history, so the rows of a char reaching into the history are always checked.
 static void
 remove_multicell_char_at(Screen *self, index_type x_, index_type y_, bool replace_with_spaces, index_type rows_written) {
     const MulticellRows rows = clear_multicell_char_cells(self, x_, y_, replace_with_spaces);
@@ -1032,7 +1032,7 @@ screen_resize(Screen *self, unsigned int lines, unsigned int columns) {
             if (!historybuf_pop_line(self->historybuf, self->alt_linebuf->line)) break;
             INDEX_DOWN(true);
             linebuf_copy_line_to(self->main_linebuf, self->alt_linebuf->line, 0);
-            if (self->alt_linebuf->line->attrs.bidi_stamp != BIDI_STAMP_NONE) self->main_linebuf->bidi_stamped = true;
+            if (line_has_bidi_bits(self->alt_linebuf->line->attrs)) self->main_linebuf->bidi_stamped = true;
             self->cursor->y++;
             sp->cursor.y = MIN(sp->cursor.y + 1, self->lines - 1);
         }
@@ -1057,6 +1057,7 @@ screen_resize(Screen *self, unsigned int lines, unsigned int columns) {
     }
     bidi_forget_rows_left_without_text(self->main_linebuf);
     bidi_forget_rows_left_without_text(self->alt_linebuf);
+    // a leading mark's direction does not stamp the history
     if (self->historybuf->bidi_stamped || self->main_linebuf->bidi_stamped) historybuf_forget_bidi_of_rows_without_text(self->historybuf);
     return true;
 }
@@ -1233,13 +1234,28 @@ static void
 stamp_line_for_bidi(Screen *self, index_type y, uint8_t record) {
     LineAttrs *a = self->linebuf->line_attrs + y;
     if (!record) return;
-    a->val |= record;
+    if (a->bidi_auto) {
+        // the direction a leading mark set
+        a->bidi_stamp = BIDI_STAMP_IMPLICIT;
+        a->bidi_auto = false;
+    } else a->val |= record;
     self->linebuf->bidi_stamped = true;
 }
 
 static inline void
 record_written_line(Screen *self, index_type y, uint8_t record) {
     if (!self->linebuf->line_attrs[y].bidi_stamp) stamp_line_for_bidi(self, y, record);
+}
+
+static void __attribute__((noinline, cold))
+set_record_at_leading_mark(Screen *self, char_type ch, uint8_t record) {
+    // A leading mark fixes the direction of a line that would otherwise take it from its text. A line without a record gets
+    // none: its first text written in bidi mode takes the direction.
+    if (!((LineAttrs){.val = record}).bidi_auto) return;
+    LineAttrs *a = self->linebuf->line_attrs + self->cursor->y;
+    a->bidi_auto = a->bidi_stamp == BIDI_STAMP_NONE;
+    a->bidi_rtl = ch == 0x200f; // RLM
+    self->linebuf->bidi_stamped = true;
 }
 
 static inline void
@@ -2158,6 +2174,8 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
                         const bool was_multicell = pc->is_multicell;
                         draw_combining_char(self, s, ch);
                         if (implicit) record_combining_write(self, pc, py, before, was_multicell, record);
+                    } else if (implicit && (ch | 1) == 0x200f) { // LRM, RLM
+                        set_record_at_leading_mark(self, ch, record);
                     }
                     continue;
                 }
@@ -3506,7 +3524,7 @@ _reverse_scroll(Screen *self, unsigned int count, bool fill_from_scrollback) {
         if (copied) {
             linebuf_copy_line_to(self->main_linebuf, self->alt_linebuf->line, 0);
             // A line back from the history, which can hold a record while the main buffer holds none
-            if (self->alt_linebuf->line->attrs.bidi_stamp != BIDI_STAMP_NONE) self->main_linebuf->bidi_stamped = true;
+            if (line_has_bidi_bits(self->alt_linebuf->line->attrs)) self->main_linebuf->bidi_stamped = true;
         }
     }
 }

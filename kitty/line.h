@@ -97,7 +97,9 @@ typedef union LineAttrs {
         uint8_t has_dirty_text : 1;
         uint8_t has_image_placeholders : 1;
         uint8_t prompt_kind : 2;
-        // the bidi controls the line was first written under in implicit mode
+        // the bidi controls the line was first written under in implicit mode. On a line without a stamp the other two are
+        // zero, unless a leading mark set bidi_auto: then bidi_rtl is the direction its first text written in implicit mode
+        // takes.
         uint8_t bidi_stamp : 2;
         uint8_t bidi_rtl : 1;
         uint8_t bidi_auto : 1;
@@ -108,10 +110,10 @@ typedef union LineAttrs {
 enum { BIDI_STAMP_NONE, BIDI_STAMP_IMPLICIT, BIDI_STAMP_RTL };
 static_assert(sizeof(LineAttrs) == sizeof(uint8_t), "Fix the ordering of LineAttrs");
 
-// A record, which the line loses when it is left holding no text
+// A record, or the direction a leading mark set for the line's first text, which the line loses when it is left holding no text
 static inline bool
 line_has_bidi_bits(LineAttrs a) {
-    return a.bidi_stamp != BIDI_STAMP_NONE;
+    return a.bidi_stamp != BIDI_STAMP_NONE || a.bidi_rtl || a.bidi_auto;
 }
 
 
