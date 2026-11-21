@@ -253,6 +253,22 @@ the direction of a letter in a later isolate. With FriBidi 1.0.17 and older, a
 bracket pair at the start of an isolate takes its direction from a letter in an
 earlier isolate at the same depth.
 
+The :doc:`text sizing protocol </text-sizing-protocol>` discards a zero-width
+code point that has no previous cell. In bidi mode with ``CSI ? 2501 h`` set,
+an LRM or RLM discarded this way still sets the direction its line takes, LRM
+left to right and RLM right to left, which the paragraph the line starts has
+instead of that of its first strong character. If several are written, the
+last one wins. On a line that has settings, it changes their direction, which
+goes with them when the line is left without text. On a line that has none, it
+applies to the first text written to the line in bidi mode, and until then it
+moves with the line. It is dropped when text is written to the line with bidi
+mode off, or when the line is cleared as a whole: by ED 2 or ED 3, by ED 0 or
+ED 1 from a line above or below it, by DECALN or by RIS. Erasing within the
+still empty line, with EL, ECH, ICH, DCH, or ED 0 or ED 1 on that line, does
+not drop it, but it may be lost when the screen is resized. Without
+``CSI ? 2501 h`` such a mark has no effect. ALM and the isolates discarded this
+way have no effect either.
+
 In a vertically scrolling
 :doc:`smooth scroll region </smooth-scrolling-protocol>` that spans the width
 of the screen, lines are laid out as outside a region, and the rows the region
