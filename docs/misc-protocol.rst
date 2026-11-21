@@ -234,6 +234,17 @@ rows the first 32 are honoured and later ones are treated as neutral. A
 private-use icon followed by spaces takes only its own cell where the
 embedding level changes between it and the spaces.
 
+The :doc:`text sizing protocol </text-sizing-protocol>` discards a zero-width
+code point that has no previous cell. In bidi mode with ``CSI ? 2501 h`` set,
+an LRM or RLM discarded this way still sets the direction of the paragraph
+its line starts, LRM left to right and RLM right to left, in place of that of
+its first strong character. If several are written, the last one wins. The
+mark stays with the line until text is written to it with bidi mode off, or
+the line is cleared as a whole: by ED 2 or ED 3, by ED 0 or ED 1 from another
+line, by DECALN or by RIS. On a line that holds no text yet it may be lost
+when the screen is resized. Without ``CSI ? 2501 h`` such a mark has no
+effect. ALM and the isolates discarded this way have no effect either.
+
 In a vertically scrolling
 :doc:`smooth scroll region </smooth-scrolling-protocol>` that spans the width
 of the screen, lines are laid out as outside a region, and the rows the region
