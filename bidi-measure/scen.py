@@ -13,7 +13,6 @@
 import sys
 
 sys.path.insert(0, '.')
-from kitty.fast_data_types import test_screen_update_cell_data as frame
 from kitty.fonts.render import setup_for_testing
 from kitty_tests.base import BaseTest, parse_bytes
 
@@ -32,7 +31,13 @@ def main() -> None:
     bidi = case.endswith('_bidi')
     mode = b'\x1b[8h' if bidi else b''
     t = T()
-    with setup_for_testing():
+    fonts = setup_for_testing()
+
+    def frame(s, repeat=1):
+        # the size and dpi of the group setup_for_testing created: any other pair would load a second group
+        return s.test_update_cell_data(fonts.size, fonts.dpi, fonts.dpi, repeat)
+
+    with fonts:
         if case.startswith(('long_para_scrolled', 'long_para_bottom')):
             s = t.create_screen(cols=200, lines=60, scrollback=10000, options={'pixel_scroll': False})
             parse_bytes(s, mode + BODY.encode())

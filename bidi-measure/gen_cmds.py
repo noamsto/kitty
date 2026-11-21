@@ -4,7 +4,8 @@
 #   SET idle            idle uploads (1 and 201 frames, nothing changed) and the scrolled-back / stamped-history cases,
 #                       bidi mode off; one run each
 #   SET bidi            for trees with bidi support: the same with bidi mode on (CSI 8 h), the RTL, mixed and LRM / FSI
-#                       payloads write and frame with bidi mode on, one run each
+#                       payloads write and frame with bidi mode on, one run each; lrm_lines and its control
+#                       plain_lines also with auto direction (CSI ? 2501 h), where the leading LRM sets the direction
 #   SET off             the RTL, mixed and LRM / FSI payloads write and frame with bidi mode off (every tree), one run
 import os, sys
 art = os.path.dirname(os.path.abspath(__file__))
@@ -16,6 +17,7 @@ COUNT = {'plain_lines': (160000, 160000), 'halfblocks': (500000, 500000)}  # (wr
 EXTRA = ['hebrew', 'arabic', 'mixed_rows', 'lrm_lines', 'fsi_lines', 'isolate_prompt']
 EXTRA_COUNT = {'lrm_lines': 160000, 'fsi_lines': 160000, 'isolate_prompt': 160000}
 BIDI_ONLY_LTR = ['ascii']  # an all-LTR payload in bidi mode
+AUTO = ['lrm_lines', 'plain_lines']  # under auto direction: the leading LRM sets the direction, plain_lines the control
 
 
 def cg(mode, payload, cnt, *extra, run=1):
@@ -46,6 +48,9 @@ elif which == 'bidi':
     for p in EXTRA + BIDI_ONLY_LTR:
         for mode in ('write', 'frame'):
             print(cg(mode, p, EXTRA_COUNT.get(p, 500000 if mode == 'frame' else 1000000), '--preamble-bdsm'))
+    for p in AUTO:
+        for mode in ('write', 'frame'):
+            print(cg(mode, p, 160000, '--preamble-bdsm', '--preamble-direction', 'auto'))
 elif which == 'off':
     for p in EXTRA:
         for mode in ('write', 'frame'):

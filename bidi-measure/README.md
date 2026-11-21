@@ -8,7 +8,7 @@ file `kitty_tests` ships, fixed payload generators in `spike_payloads.py`); the 
 scenario says otherwise.
 
 The branch measured is `upstream/bidi` on the fork (`https://github.com/noamsto/kitty`); its base is upstream `gpu` at
-`c789a4a96`. `<nixpkgs>` is not pinned, so compiler versions differ between machines (here gcc 16.2.0, clang 21.1.8):
+`9945868a3` (2026-11-21). `<nixpkgs>` is not pinned, so compiler versions differ between machines (here gcc 16.2.0, clang 21.1.8):
 compare the deltas between two trees built on the same machine, not absolute counts.
 
 ## Definitions
@@ -19,7 +19,7 @@ compare the deltas between two trees built on the same machine, not absolute cou
   the root.
 - **write**: parse the payload into an alternate screen, no rendering.
 - **frame**: parse the payload in frames of at most 49 rows at 120x50 and render each frame with
-  `test_screen_update_cell_data`.
+  `Screen.test_update_cell_data`.
 - **per frame**: Ir divided by the number of rendered frames (the driver log prints `frames:`).
 - **idle upload**: an upload with nothing changed: Ir(201 uploads) - Ir(1 upload), divided by 200, after the screen is
   filled and rendered once.
@@ -30,12 +30,13 @@ Root Ir includes CPython allocator and string-decoding work whose cost depends o
 ## Build a tree
 
 A tree is a plain source directory in this directory (no git needed). The frame driver needs a hook the base does not
-have (`test_screen_update_cell_data` in `kitty/fonts.c`, which the bidi branch carries), so a base tree gets
-`u-shim.patch`.
+have (the `Screen` method `test_update_cell_data(font_sz_in_pts, dpi_x, dpi_y, repeat=1)` in `kitty/screen.c`, which
+the bidi branch carries), so a base tree gets `u-shim.patch`, which adds the same method. The drivers pass the size and
+dpi of the font group `setup_for_testing` creates; any other pair would render with a second group.
 
     ./mktree.sh <REPO> <REF> $PWD/<NAME> [$PWD/u-shim.patch]   # git archive of REF from the checkout REPO, patch -p1
     git -C $REPO fetch https://github.com/noamsto/kitty upstream/bidi   # then FETCH_HEAD is the branch tip
-    ./mktree.sh $REPO c789a4a96 $PWD/B $PWD/u-shim.patch; and ./mktree.sh $REPO FETCH_HEAD $PWD/G   # base and branch
+    ./mktree.sh $REPO 9945868a3 $PWD/B $PWD/u-shim.patch; and ./mktree.sh $REPO FETCH_HEAD $PWD/G   # base and branch
     ./build.sh <NAME> lto gcc                                  # LTO build with gcc
     ./build.sh <NAME> lto clang                                # LTO build with clang, via shell-m-clang.nix
     ./build.sh <NAME> nolto                                    # -g, no LTO, for symbol-level work
@@ -57,8 +58,11 @@ not run.
 Bidi payloads: `hebrew`, `arabic`, `mixed_rows`, `mixed_wrapped`, `nested_brackets`, `para_screen`, `zw_marks`,
 `isolate_prompt`, `isolate_lri`, `lrm_lines` (each line starts with LRM: the column-0 LRM path), `fsi_lines` (each line
 is FSI at column 0, 80 plain characters, PDI), with `plain_lines` as their control. The driver option `--preamble-bdsm` sends `CSI 8 h`
-(bidi mode on) before the payload. In bidi mode only LRM and RLM are kept at column 0, so `fsi_lines` and `isolate_prompt` measure isolates that are
-dropped there. `scen.py` builds the idle scenarios: a 1 MB paragraph scrolled back 500 rows with
+(bidi mode on) before the payload; `--preamble-direction auto` adds `CSI ? 2501 h` (direction from the text). A control
+with no previous cell is dropped, so `fsi_lines` and `isolate_prompt` measure isolates that are dropped at column 0. In
+bidi mode a leading LRM or RLM is dropped too and, only under `CSI ? 2501 h`, sets its line's direction: `lrm_lines`
+with `--preamble-bdsm` alone measures the drop, and `lrm_lines` with `--preamble-direction auto` measures the mark
+setting the direction, against `plain_lines` with the same options. `scen.py` builds the idle scenarios: a 1 MB paragraph scrolled back 500 rows with
 output below it (200x60), and a bidi line scrolled into the history with 300 plain lines after it (120x50, with
 `pixel_scroll` on and off).
 
@@ -75,7 +79,7 @@ A set of runs for a tree is a command list, run 12 at a time:
     python3 gen_cmds.py <NAME> base > cmds     # 12 payloads x write/frame x 2 runs (48 runs)
     python3 gen_cmds.py <NAME> idle >> cmds    # idle uploads and the scrolled-back / stamped-history cases, bidi mode off
     python3 gen_cmds.py <NAME> off >> cmds     # RTL, mixed, LRM and FSI payloads with bidi mode off
-    python3 gen_cmds.py <NAME> bidi >> cmds    # the same with bidi mode on (a tree with bidi support only)
+    python3 gen_cmds.py <NAME> bidi >> cmds    # the same with bidi mode on, and lrm_lines / plain_lines under auto direction (a tree with bidi support only)
     nice -n 10 nix-shell shell-m.nix --run "bash $PWD/_runset.sh $PWD/cmds $PWD/out"
     test -s out/fail.log; and cat out/fail.log     # must not exist or be empty
 
@@ -87,7 +91,7 @@ A "symbols missing" warning in `out/stderr.log` is expected under LTO (an inline
 Two trees, one payload, write mode (inside `nix-shell shell-m.nix` for the runs and `obj_ir.py`; `$REPO` is a checkout
 with the branch):
 
-    ./mktree.sh $REPO c789a4a96 $PWD/B $PWD/u-shim.patch; and ./mktree.sh $REPO FETCH_HEAD $PWD/G
+    ./mktree.sh $REPO 9945868a3 $PWD/B $PWD/u-shim.patch; and ./mktree.sh $REPO FETCH_HEAD $PWD/G
     ./build.sh B lto gcc; and ./build.sh G lto gcc; cat B.build.exit G.build.exit      # both 0
     nix-shell shell-m.nix --run "RUN=1 ./run_callgrind_lto.sh B $PWD/B write ascii 1000000; RUN=1 ./run_callgrind_lto.sh G $PWD/G write ascii 1000000"
     nix-shell shell-m.nix --run "python3 obj_ir.py out/B.write.ascii.1000000.1.cg out/G.write.ascii.1000000.1.cg"
@@ -109,12 +113,34 @@ Own Ir per `.cg` is cached in `out/own_ir.json`. Function-level diffs (inside `n
     python3 fn_diff.py out/<BASE>.write.ascii.1000000.1.cg out/<NEW>.write.ascii.1000000.1.cg 15 fast_data_types
     python3 fn_per_upload.py out/<NEW>.scen.<case>.1.1.cg out/<NEW>.scen.<case>.201.1.cg 8   # Ir per idle upload
 
+## Overwrite and resize
+
+Two more drivers, run from a build tree's root under callgrind like the others (inside `nix-shell shell-m.nix`):
+
+    cd <NAME>; PYTHONHASHSEED=0 valgrind --tool=callgrind --callgrind-out-file=../out/<NAME>.ow.wide.50.1.cg python3 ../ow_driver.py wide 50 ..
+    cd <NAME>; PYTHONHASHSEED=0 valgrind --tool=callgrind --callgrind-out-file=../out/<NAME>.rs.plain.20.1.cg python3 ../rs_driver.py plain 20 ..
+
+`ow_driver.py <wide|narrow> <passes> <kit dir>` rewrites a 120x50 alternate screen of wide characters in place, so that
+from the second page on every character is drawn over the first cell of a wide one. Run it at 50 and 25 passes; the
+difference of the own Ir over 150,000 is the cost per overwritten character. `rs_driver.py <plain|stamped> <N> <kit dir>`
+fills a 120x50 screen and a 2,000-line scrollback with ASCII and resizes it N times between 100x40 and 120x50; run it
+at 20 and 40 and divide the difference by 20. `stamped` writes one line under `CSI 8 h` first.
+`fn_per_resize.py OLD20.cg OLD40.cg NEW20.cg NEW40.cg` gives the difference per function.
+
+## Variant trees
+
+Patches for the three alternatives the figures are compared with, each given to `mktree.sh` as its one patch:
+
+- `BI.patch`, on the base in place of `u-shim.patch`, which it contains: only `always_inline` on `render_group`.
+- `SR.patch`, on the branch: one `render_groups` body instead of two.
+- `L.patch`, on the branch: one draw loop instead of two.
+
 ## Output identity
 
     nix-shell shell-m.nix --run "./crc_frames.sh B" > crc-B.txt; nix-shell shell-m.nix --run "./crc_frames.sh G" > crc-G.txt
     diff crc-B.txt crc-G.txt                    # no output: the rendered cells of 18 payloads are identical, bidi mode off
 
-`crc_frames.sh` prints, per payload, the crc32 of every frame's `test_screen_update_cell_data` bytes, the frame count and
+`crc_frames.sh` prints, per payload, the crc32 of every frame's `test_update_cell_data` bytes, the frame count and
 the number of non-blank cells.
 
 ## Disassemble and diff

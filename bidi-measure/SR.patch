@@ -1,0 +1,61 @@
+--- a/kitty/fonts.c
++++ b/kitty/fonts.c
+@@ -1754,7 +1754,7 @@
+     return ans;
+ }
+ 
+-static inline __attribute__((always_inline)) void
++static inline void
+ render_group(
+     FontGroup *fg,
+     unsigned num_cells,
+@@ -2426,8 +2426,8 @@
+     }
+ }
+ 
+-static inline __attribute__((always_inline)) void
+-render_groups_(FontGroup *fg, RunFont rf, bool center_glyph, const TextCache *tc, const bool rtl) {
++static void
++render_groups(FontGroup *fg, RunFont rf, bool center_glyph, const TextCache *tc, bool rtl) {
+     unsigned idx = 0;
+     const FontCellMetrics unscaled_metrics = fg->fcm;
+     float scale = apply_scale_to_font_group(fg, &rf);
+@@ -2457,20 +2457,19 @@
+         scale,                                     \
+         unscaled_metrics,                          \
+         rtl)
++            hb_glyph_info_t *info = G(info) + group->first_glyph_idx;
++            hb_glyph_position_t *positions = G(positions) + group->first_glyph_idx;
+             if (rtl) {
+-                hb_glyph_info_t *info = G(info) + group->first_glyph_idx;
+-                hb_glyph_position_t *positions = G(positions) + group->first_glyph_idx;
+                 // A group of one glyph is in visual order already
+                 if (group->num_glyphs > 1) {
+                     copy_rtl_glyphs_in_visual_order(info, positions, group->num_glyphs);
+                     info = global_glyph_render_scratch.info;
+                     positions = global_glyph_render_scratch.positions;
+                 } else global_glyph_render_scratch.glyphs[0] = info->codepoint;
+-                render(info, positions);
+             } else {
+-                for (unsigned i = 0; i < group->num_glyphs; i++) global_glyph_render_scratch.glyphs[i] = G(info)[group->first_glyph_idx + i].codepoint;
+-                render(G(info) + group->first_glyph_idx, G(positions) + group->first_glyph_idx);
++                for (unsigned i = 0; i < group->num_glyphs; i++) global_glyph_render_scratch.glyphs[i] = info[i].codepoint;
+             }
++            render(info, positions);
+ #undef render
+         }
+         idx++;
+@@ -2481,13 +2480,6 @@
+     }
+ }
+ 
+-// LTR runs, nearly all of them, get a copy of the group loop with the RTL handling compiled out
+-static void
+-render_groups(FontGroup *fg, RunFont rf, bool center_glyph, const TextCache *tc, bool rtl) {
+-    if (rtl) render_groups_(fg, rf, center_glyph, tc, true);
+-    else render_groups_(fg, rf, center_glyph, tc, false);
+-}
+-
+ static PyObject *
+ shaped_groups_as_python(void) {
+     PyObject *ans = PyList_New(0);

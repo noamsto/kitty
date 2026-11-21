@@ -1,0 +1,42 @@
+--- a/kitty/fonts.c
++++ b/kitty/fonts.c
+@@ -1698,7 +1698,7 @@
+ }
+ 
+ 
+-static void
++static inline __attribute__((always_inline)) void
+ render_group(
+     FontGroup *fg,
+     unsigned num_cells,
+--- a/kitty/screen.c
++++ b/kitty/screen.c
+@@ -8416,6 +8416,20 @@
+     return Py_BuildValue("kkk", is_idx, idx, ca);
+ }
+ 
++// Uploads repeat frames without a GPU, with the font group of the given size and dpi, returning the cell data of the last
++static PyObject *
++test_update_cell_data(Screen *self, PyObject *args) {
++    double font_sz_in_pts, dpi_x, dpi_y;
++    unsigned int repeat = 1;
++    if (!PyArg_ParseTuple(args, "ddd|I", &font_sz_in_pts, &dpi_x, &dpi_y, &repeat)) return NULL;
++    FONTS_DATA_HANDLE fonts_data = load_fonts_data(font_sz_in_pts, dpi_x, dpi_y);
++    PyObject *ans = PyBytes_FromStringAndSize(NULL, (Py_ssize_t)(sizeof(CellGPUData) * render_lines_for_screen(self) * self->columns));
++    if (!ans) return NULL;
++    memset(PyBytes_AS_STRING(ans), 0, PyBytes_GET_SIZE(ans));
++    for (unsigned int i = 0; i < repeat; i++) screen_update_cell_data(self, PyBytes_AS_STRING(ans), fonts_data, false);
++    return ans;
++}
++
+ static PyMethodDef methods[] = {
+     METHODB(test_create_write_buffer, METH_NOARGS),
+     METHODB(test_commit_write_buffer, METH_VARARGS),
+@@ -8423,6 +8437,7 @@
+     METHODB(test_verify_styles, METH_NOARGS),
+     METHODB(cell_style_idx, METH_VARARGS),
+     METHODB(style_table_info, METH_NOARGS),
++    METHODB(test_update_cell_data, METH_VARARGS),
+     METHODB(test_set_style_table_limit, METH_O),
+     METHODB(test_gc_style_table, METH_VARARGS),
+     METHODB(test_draw_overlay_line, METH_VARARGS),

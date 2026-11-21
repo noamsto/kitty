@@ -134,5 +134,7 @@ if __name__ == '__main__':
             specs.append((p, F, 'off', mode, p, n, ''))
             if p != 'plain_lines':
                 specs.append((p, F, 'on', mode, p, n, BD.strip()))
+            if p in ('plain_lines', 'lrm_lines'):
+                specs.append((p, F, 'on, auto direction', mode, p, n, BD.strip() + ' --preamble-direction auto'))
     payload_table('LRM- and FSI-prefixed lines', specs)
     json.dump(cache, open(cache_path, 'w'), indent=1, sort_keys=True)

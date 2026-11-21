@@ -12,7 +12,7 @@
 # Modes (payloads are the generators in spike_payloads.py, --count their size):
 #   write   parse the payload through the parser only, no rendering
 #   frame   parse the payload in frames of at most LINES-1 rows and render each
-#           frame with test_screen_update_cell_data, timing parse and render
+#           frame with Screen.test_update_cell_data, timing parse and render
 #           separately; crc32 is over the bytes of all rendered frames
 #   idle    fill the screen, render once, then time frames with nothing changed
 #           and frames in which one cell changed
@@ -65,10 +65,6 @@ def main() -> None:
     sys.path.insert(0, os.getcwd())
 
     from kitty.fast_data_types import VT_PARSER_BUFFER_SIZE, Screen
-    try:
-        from kitty.fast_data_types import test_screen_update_cell_data
-    except ImportError:
-        test_screen_update_cell_data = None
     from kitty.fonts.render import setup_for_testing
     from kitty_tests.base import Callbacks
     from spike_payloads import GENERATORS, set_screen
@@ -139,7 +135,8 @@ def main() -> None:
         'cols': cols, 'lines': lines, 'preamble_bdsm': args.preamble_bdsm, 'preamble_direction': args.preamble_direction, 'alt_screen': use_alt, 'font': args.font,
     }  # fmt: skip
 
-    with setup_for_testing(main_face_path=args.font) as (_, cell_width, cell_height):
+    fonts = setup_for_testing(main_face_path=args.font)
+    with fonts as (_, cell_width, cell_height):
         result['cell'] = f'{cell_width}x{cell_height}'
 
         def new_screen(num_lines: int = lines, scrollback: int = args.scrollback) -> Screen:
@@ -150,7 +147,8 @@ def main() -> None:
             return s
 
         def render(s: Screen) -> bytes:
-            return test_screen_update_cell_data(s)
+            # the size and dpi of the group setup_for_testing created: any other pair would load a second group
+            return s.test_update_cell_data(fonts.size, fonts.dpi, fonts.dpi)
 
         def make_frames() -> 'tuple[list[bytes], int]':
             # A frame holds at most lines - 1 screen rows: with the row the

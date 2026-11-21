@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# crc_frames.sh TREE: crc32 of the cell data of every rendered frame (test_screen_update_cell_data), per payload, bidi mode off.
+# crc_frames.sh TREE: crc32 of the cell data of every rendered frame (Screen.test_update_cell_data), per payload, bidi mode off.
 # Run inside nix-shell shell-m.nix; the output of two trees is equal when the rendered cells are identical.
 set -u
 M=$(dirname "$(readlink -f "$0")")

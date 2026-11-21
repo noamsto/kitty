@@ -1,0 +1,67 @@
+--- a/kitty/screen.c
++++ b/kitty/screen.c
+@@ -1934,7 +1934,7 @@
+ }
+ 
+ // Not inlined, so that it gets its own register allocation rather than competing
+-// with the rest of draw_text_loop_() for registers. It is called once per run.
++// with the rest of draw_text_loop() for registers. It is called once per run.
+ __attribute__((noinline)) static size_t
+ draw_non_ascii_run(Screen *self, text_loop_state *s, const uint32_t *chars, size_t num_chars) {
+     // Batched fast path: draw a run of non-ASCII chars each of which starts a new cell
+@@ -2001,8 +2001,8 @@
+     return i;
+ }
+ 
+-static inline __attribute__((always_inline)) void
+-draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_state *s, const bool implicit, const uint8_t record) {
++static void
++draw_text_loop(Screen *self, const uint32_t *chars, size_t num_chars, text_loop_state *s, const bool implicit, const uint8_t record) {
+     init_text_loop_line(self, s);
+     int char_width;
+ #define TEMPLATE_CELLS 16
+@@ -2197,31 +2197,15 @@
+ draw_text(Screen *self, const uint32_t *chars, size_t num_chars) {
+     PREPARE_FOR_DRAW_TEXT;
+     self->is_dirty = true;
+-    draw_text_loop_(self, chars, num_chars, &s, false, 0);
+-}
+-
+-// Text written in implicit bidi mode records each line it is written to
+-static void
+-draw_text_implicit(Screen *self, const uint32_t *chars, size_t num_chars) {
+-    if (OPT(force_ltr)) {
+-        draw_text(self, chars, num_chars);
+-        return;
+-    }
+-    PREPARE_FOR_DRAW_TEXT;
+-    self->is_dirty = true;
+-    draw_text_loop_(self, chars, num_chars, &s, true, current_bidi_record(self).val);
+-}
+-
+-static void
+-draw_text_in_mode(Screen *self, const uint32_t *chars, size_t num_chars) {
+-    if (UNLIKELY(self->modes.mBDSM)) draw_text_implicit(self, chars, num_chars);
+-    else draw_text(self, chars, num_chars);
++    const bool implicit = self->modes.mBDSM && !OPT(force_ltr);
++    const uint8_t record = implicit ? current_bidi_record(self).val : 0;
++    draw_text_loop(self, chars, num_chars, &s, implicit, record);
+ }
+ 
+ void
+ screen_draw_text(Screen *self, const uint32_t *chars, size_t num_chars) {
+     screen_on_input(self);
+-    draw_text_in_mode(self, chars, num_chars);
++    draw_text(self, chars, num_chars);
+ }
+ 
+ static void
+@@ -6977,7 +6961,7 @@
+     if (PyUnicode_READY(src) != 0) { return PyErr_NoMemory(); }
+     Py_UCS4 *buf = PyUnicode_AsUCS4Copy(src);
+     if (!buf) return NULL;
+-    draw_text_in_mode(self, buf, PyUnicode_GetLength(src));
++    draw_text(self, buf, PyUnicode_GetLength(src));
+     PyMem_Free(buf);
+     Py_RETURN_NONE;
+ }
