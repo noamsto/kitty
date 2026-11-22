@@ -7,8 +7,8 @@ deterministic to a few parts per million (`PYTHONHASHSEED=0`, fixed font `Libera
 file `kitty_tests` ships, fixed payload generators in `spike_payloads.py`); the screen is 120x50 cells unless a
 scenario says otherwise.
 
-The branch measured is `review3/upstream-bidi` on the fork (`https://github.com/noamsto/kitty`); its base is upstream
-`gpu` at `892868d2e` (with smooth scroll regions). `<nixpkgs>` is not pinned, so compiler versions differ between machines (here gcc 16.2.0, clang 21.1.8):
+The branch measured is `upstream/bidi` on the fork (`https://github.com/noamsto/kitty`), the branch of kovidgoyal/kitty#10907; its base is upstream
+`gpu` at `7ff8d1e2e` (with smooth scroll regions). The figures in the PR were taken on the same six commits on `892868d2e`; the two bases differ only outside the measured paths. `<nixpkgs>` is not pinned, so compiler versions differ between machines (here gcc 16.2.0, clang 21.1.8):
 compare the deltas between two trees built on the same machine, not absolute counts.
 
 ## Definitions
@@ -36,8 +36,8 @@ the bidi branch carries, with its buffer sized for the strips of smooth scroll r
 dpi of the font group `setup_for_testing` creates; any other pair would render with a second group.
 
     ./mktree.sh <REPO> <REF> $PWD/<NAME> [$PWD/u-shim.patch]   # git archive of REF from the checkout REPO, patch -p1
-    git -C $REPO fetch https://github.com/noamsto/kitty review3/upstream-bidi   # then FETCH_HEAD is the branch tip
-    ./mktree.sh $REPO 892868d2e $PWD/B $PWD/u-shim.patch; and ./mktree.sh $REPO FETCH_HEAD $PWD/G   # base and branch
+    git -C $REPO fetch https://github.com/noamsto/kitty upstream/bidi   # then FETCH_HEAD is the branch tip
+    ./mktree.sh $REPO 7ff8d1e2e $PWD/B $PWD/u-shim.patch; and ./mktree.sh $REPO FETCH_HEAD $PWD/G   # base and branch
     ./build.sh <NAME> lto gcc                                  # LTO build with gcc
     ./build.sh <NAME> lto clang                                # LTO build with clang, via shell-m-clang.nix
     ./build.sh <NAME> nolto                                    # -g, no LTO, for symbol-level work
@@ -97,7 +97,7 @@ A "symbols missing" warning in `out/stderr.log` is expected under LTO (an inline
 Two trees, one payload, write mode (inside `nix-shell shell-m.nix` for the runs and `obj_ir.py`; `$REPO` is a checkout
 with the branch):
 
-    ./mktree.sh $REPO 892868d2e $PWD/B $PWD/u-shim.patch; and ./mktree.sh $REPO FETCH_HEAD $PWD/G
+    ./mktree.sh $REPO 7ff8d1e2e $PWD/B $PWD/u-shim.patch; and ./mktree.sh $REPO FETCH_HEAD $PWD/G
     ./build.sh B lto gcc; and ./build.sh G lto gcc; cat B.build.exit G.build.exit      # both 0
     nix-shell shell-m.nix --run "RUN=1 ./run_callgrind_lto.sh B $PWD/B write ascii 1000000; RUN=1 ./run_callgrind_lto.sh G $PWD/G write ascii 1000000"
     nix-shell shell-m.nix --run "python3 obj_ir.py out/B.write.ascii.1000000.1.cg out/G.write.ascii.1000000.1.cg"
@@ -160,7 +160,7 @@ difference over 3000 is the cost per call.
 Patches for the three alternatives the figures are compared with, each given to `mktree.sh` as its one patch:
 
 - `BI.patch`, on the base in place of `u-shim.patch`, which it contains: only `always_inline` on `render_group`. It was
-  made for the previous base and has the previous shim: regenerate it for `892868d2e` before use.
+  made for the previous base and has the previous shim: regenerate it for `7ff8d1e2e` before use.
 - `SR.patch`, on the branch: one `render_groups` body instead of two.
 - `L.patch`, on the branch: one draw loop instead of two.
 
