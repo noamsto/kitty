@@ -7,6 +7,10 @@
 #                       payloads write and frame with bidi mode on, one run each; lrm_lines and its control
 #                       plain_lines also with auto direction (CSI ? 2501 h), where the leading LRM sets the direction
 #   SET off             the RTL, mixed and LRM / FSI payloads write and frame with bidi mode off (every tree), one run
+#   SET sticky          the 12 payloads write and frame after CSI 8 h CSI 8 l (--preamble-bdsm-off), RUN=1,2; on a tree
+#                       without bidi support the sequences are ignored
+#   SET regions         region_driver.py, every mode write and frame, N and 2N scrolls, RUN=1,2
+#   SET edits           edit_driver.py, every operation, N and 2N calls, RUN=1,2
 import os, sys
 art = os.path.dirname(os.path.abspath(__file__))
 v = sys.argv[1]
@@ -18,6 +22,10 @@ EXTRA = ['hebrew', 'arabic', 'mixed_rows', 'lrm_lines', 'fsi_lines', 'isolate_pr
 EXTRA_COUNT = {'lrm_lines': 160000, 'fsi_lines': 160000, 'isolate_prompt': 160000}
 BIDI_ONLY_LTR = ['ascii']  # an all-LTR payload in bidi mode
 AUTO = ['lrm_lines', 'plain_lines']  # under auto direction: the leading LRM sets the direction, plain_lines the control
+REGIONS = ['vtop', 'vfull', 'vnarrow', 'horizontal']
+REGION_N = (400, 800)
+EDITS = ['el', 'el2', 'ich', 'dch', 'ech', 'il', 'dl', 'osc66w', 'osc66s', 'ht', 'cht', 'htb']
+EDIT_N = (3000, 6000)
 
 
 def cg(mode, payload, cnt, *extra, run=1):
@@ -28,12 +36,28 @@ def scen(case, frames):
     return f'RUN=1 {art}/run_scen.sh {v} {art}/{v} {case} {frames}'
 
 
-if which == 'base':
+def drv(driver, tag, kind, n, run):
+    return f'RUN={run} {art}/run_drv.sh {v} {art}/{v} {driver} {tag} {kind} {n}'
+
+
+if which in ('base', 'sticky'):
+    extra = ('--preamble-bdsm-off',) if which == 'sticky' else ()
     for p in P:
         w, f = COUNT.get(p, (1000000, 500000))
         for mode, cnt in (('write', w), ('frame', f)):
             for run in (1, 2):
-                print(cg(mode, p, cnt, run=run))
+                print(cg(mode, p, cnt, *extra, run=run))
+elif which == 'regions':
+    for m in REGIONS:
+        for variant in ('write', 'frame'):
+            for n in REGION_N:
+                for run in (1, 2):
+                    print(drv('region_driver.py', 'region', f'{m}_{variant}', n, run))
+elif which == 'edits':
+    for k in EDITS:
+        for n in EDIT_N:
+            for run in (1, 2):
+                print(drv('edit_driver.py', 'edit', k, n, run))
 elif which == 'idle':
     for n in (1, 201):
         print(cg('idle', 'ascii', 6000, '--only', 'unchanged', '--frames', str(n)))

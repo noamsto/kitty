@@ -30,7 +30,8 @@
 #
 # --preamble-bdsm sends CSI 8 h before the payload, after CSI ? 1049 h when the
 # alternate screen is in use. A build that does not know the mode logs and
-# ignores it. --preamble-direction sends, right after that (so after any alternate
+# ignores it. --preamble-bdsm-off sends CSI 8 h CSI 8 l there instead, so the
+# payload is written with bidi mode off on a screen that had it on. --preamble-direction sends, right after that (so after any alternate
 # screen switch), CSI 2 SPACE k (rtl), CSI ? 2501 h (auto) or both (autortl); it needs
 # --preamble-bdsm. --no-timing runs a mode once, with no warmup and no clock or
 # checksum calls, for use under callgrind.
@@ -87,6 +88,7 @@ def main() -> None:
     ap.add_argument('--only', choices=('unchanged', 'onecell'), help='idle mode: run only this frame type')
     ap.add_argument('--edit', choices=('latin', 'same', 'diff', 'flipfirst'), default='latin', help='idle onecell: latin writes a-z, same writes Hebrew letters (class R each frame), diff alternates a Hebrew and a Latin letter, flipfirst alternates a Hebrew alef and an x in the first strong (Hebrew or Latin letter) cell found scanning the screen from the top-left after the fill, so under ?2501 the direction of that paragraph flips every frame')
     ap.add_argument('--preamble-bdsm', action='store_true')
+    ap.add_argument('--preamble-bdsm-off', action='store_true', help='send CSI 8 h CSI 8 l before the payload')
     ap.add_argument('--preamble-direction', choices=('ltr', 'rtl', 'auto', 'autortl'), default='ltr', help='sent after the BDSM preamble: rtl CSI 2 SPACE k, auto CSI ? 2501 h, autortl both; needs --preamble-bdsm')
     ap.add_argument('--no-timing', action='store_true')
     ap.add_argument('--json', action='store_true')
@@ -97,6 +99,8 @@ def main() -> None:
 
     if args.preamble_direction != 'ltr' and not args.preamble_bdsm:
         raise SystemExit('error: --preamble-direction needs --preamble-bdsm')
+    if args.preamble_bdsm and args.preamble_bdsm_off:
+        raise SystemExit('error: --preamble-bdsm and --preamble-bdsm-off exclude each other')
     if args.edit == 'flipfirst' and (args.mode != 'idle' or args.only != 'onecell'):
         raise SystemExit('error: --edit flipfirst needs idle --only onecell')
 
@@ -105,7 +109,7 @@ def main() -> None:
     set_screen(cols, lines)
     payload = GENERATORS[args.payload](count)
     use_alt = args.screen == 'alt' or (args.screen == 'auto' and args.mode == 'write' and not payload.main_screen)
-    preamble = (b'\x1b[?1049h' if use_alt else b'') + (b'\x1b[8h' if args.preamble_bdsm else b'')
+    preamble = (b'\x1b[?1049h' if use_alt else b'') + (b'\x1b[8h' if args.preamble_bdsm else b'') + (b'\x1b[8h\x1b[8l' if args.preamble_bdsm_off else b'')
     preamble += {'ltr': b'', 'rtl': b'\x1b[2 k', 'auto': b'\x1b[?2501h', 'autortl': b'\x1b[2 k\x1b[?2501h'}[args.preamble_direction]
     timed = not args.no_timing
     clock = time.perf_counter_ns
@@ -132,7 +136,7 @@ def main() -> None:
 
     result: 'dict[str, Any]' = {
         'mode': args.mode, 'payload': args.payload, 'count': count, 'cells': payload.cells, 'bytes': sum(map(len, payload.pieces)),
-        'cols': cols, 'lines': lines, 'preamble_bdsm': args.preamble_bdsm, 'preamble_direction': args.preamble_direction, 'alt_screen': use_alt, 'font': args.font,
+        'cols': cols, 'lines': lines, 'preamble_bdsm': args.preamble_bdsm, 'preamble_bdsm_off': args.preamble_bdsm_off, 'preamble_direction': args.preamble_direction, 'alt_screen': use_alt, 'font': args.font,
     }  # fmt: skip
 
     fonts = setup_for_testing(main_face_path=args.font)

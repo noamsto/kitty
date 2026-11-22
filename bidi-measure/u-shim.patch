@@ -1,6 +1,6 @@
 --- a/kitty/screen.c
 +++ b/kitty/screen.c
-@@ -8416,6 +8416,20 @@
+@@ -9732,6 +9732,22 @@
      return Py_BuildValue("kkk", is_idx, idx, ca);
  }
  
@@ -11,7 +11,9 @@
 +    unsigned int repeat = 1;
 +    if (!PyArg_ParseTuple(args, "ddd|I", &font_sz_in_pts, &dpi_x, &dpi_y, &repeat)) return NULL;
 +    FONTS_DATA_HANDLE fonts_data = load_fonts_data(font_sz_in_pts, dpi_x, dpi_y);
-+    PyObject *ans = PyBytes_FromStringAndSize(NULL, (Py_ssize_t)(sizeof(CellGPUData) * render_lines_for_screen(self) * self->columns));
++    screen_prepare_smooth_scroll_render(self); // mimic what the renderer does
++    PyObject *ans = PyBytes_FromStringAndSize(
++        NULL, (Py_ssize_t)(sizeof(CellGPUData) * (render_lines_for_screen(self) * self->columns + self->smooth_scroll_render.num_strip_cells)));
 +    if (!ans) return NULL;
 +    memset(PyBytes_AS_STRING(ans), 0, PyBytes_GET_SIZE(ans));
 +    for (unsigned int i = 0; i < repeat; i++) screen_update_cell_data(self, PyBytes_AS_STRING(ans), fonts_data, false);
@@ -21,11 +23,21 @@
  static PyMethodDef methods[] = {
      METHODB(test_create_write_buffer, METH_NOARGS),
      METHODB(test_commit_write_buffer, METH_VARARGS),
-@@ -8423,6 +8437,7 @@
-     METHODB(test_verify_styles, METH_NOARGS),
+@@ -9740,6 +9756,7 @@
      METHODB(cell_style_idx, METH_VARARGS),
      METHODB(style_table_info, METH_NOARGS),
-+    METHODB(test_update_cell_data, METH_VARARGS),
      METHODB(test_set_style_table_limit, METH_O),
++    METHODB(test_update_cell_data, METH_VARARGS),
      METHODB(test_gc_style_table, METH_VARARGS),
      METHODB(test_draw_overlay_line, METH_VARARGS),
+     METHODB(test_update_overlay_text, METH_VARARGS),
+--- a/kitty/fast_data_types.pyi
++++ b/kitty/fast_data_types.pyi
+@@ -1211,6 +1211,7 @@
+     def style_table_info(self) -> dict[str, int]: ...
+     def test_gc_style_table(self, quantize_bits: int = 0) -> None: ...
+     def test_set_style_table_limit(self, limit: int) -> None: ...
++    def test_update_cell_data(self, font_sz_in_pts: float, dpi_x: float, dpi_y: float, repeat: int = 1) -> bytes: ...
+     def test_draw_overlay_line(self, text: str, xstart: int, ynum: int, preedit_cursor: int = -1) -> int: ...
+     def test_update_overlay_text(self, text: str, preedit_cursor: int = -1) -> int: ...
+     def hyperlink_for_id(self, hyperlink_id: int) -> str: ...
