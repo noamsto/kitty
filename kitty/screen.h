@@ -383,7 +383,13 @@ typedef struct {
         } main_stash; // main's controls while alt is active
     } bidi;
     struct BidiMaps *bidi_maps; // allocated by the first upload of a stamped buffer
+    uint64_t bidi_layout_generation; // bumped where rows move or the inputs of their layout change, which reused maps would miss
 } Screen;
+
+static inline void
+bidi_layout_moved(Screen *self) {
+    self->bidi_layout_generation++;
+}
 
 #define live_pixel_scroll_enabled(screen) (OPT(pixel_scroll) && (screen)->linebuf == (screen)->main_linebuf)
 // While rendering is paused the pixel scroll state captured at pause time is used so that pausing does not change what is rendered

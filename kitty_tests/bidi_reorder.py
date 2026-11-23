@@ -946,6 +946,28 @@ class TestBidiReorder(BaseTest):
         pb(s, '\x1b[8hאבגדהab\x1b[8l\r\x1b[2K12 34')
         self.ae((s.historybuf.count, s.test_bidi_line_record(0)[0], visual(s)), (1, 0, '34 12'))
 
+    def test_unchanged_frames_reuse_the_maps(self):
+        # a frame with nothing changed since the last maps no paragraph again and leaves the maps and the rendered levels as they
+        # were; an edit of one row maps only its paragraph again
+        s = self.screen('אבג def\r\nxyz\r\nab גדה 12', cols=10, lines=3, pixel_scroll=False)
+
+        def maps():
+            return [order(s, y) for y in range(s.lines)], [s.test_render_levels(y) for y in range(s.lines)]
+
+        frame(s)
+        self.ae(s.test_bidi_resolved(), 3)
+        before = maps()
+        frame(s)
+        self.ae(s.test_bidi_resolved(), 0)
+        self.ae(maps(), before)
+        self.assertTrue(s.test_bidi_walk_matches_full())
+        pb(s, '\x1b[3;1Hאב')
+        frame(s)
+        self.ae(s.test_bidi_resolved(), 1)
+        self.ae(maps()[0][:2], before[0][:2])
+        self.assertNotEqual(order(s, 2), before[0][2])
+        self.assertTrue(s.test_bidi_walk_matches_full())
+
     def test_idle_uploads_with_output_below_the_view(self):
         # scrolled back, the rows below the view stay dirty, as they are not rendered: the paragraph they continue is resolved
         # again only when one of them changes, and each frame is what a new screen given the same input shows
@@ -1875,10 +1897,21 @@ class TestBidiReorder(BaseTest):
             steps.append((f'{kind} remove', lambda s: s.smooth_scroll_remove(3)))
         return steps
 
+    # Operations after which the framed screen is uploaded: a second frame with no change, a cursor move, an edit within a row
+    BETWEEN_FRAMES_KINDS = {'again': 6, 'cursor': 4, 'row edit': 6}
+
+    def between_frames_op(self, rng, s, kind):
+        y, x = rng.randrange(s.lines) + 1, rng.randrange(s.columns) + 1
+        if kind == 'again':
+            return kind, lambda s: None
+        if kind == 'cursor':
+            return kind, f'\x1b[{y};{x}H'
+        return kind, f'\x1b[{y};{x}H' + ''.join(rng.choices('אבab1 ', k=rng.randrange(1, s.columns - x + 2)))
+
     def test_frames_do_not_change_the_result(self):
         # a seeded random stream given to a screen uploaded after random operations and to one uploaded only at the end leaves
-        # the same records and the same final frame
-        kinds = {**self.DIFF_KINDS, **self.WRITER_KINDS, **self.REGION_KINDS, **self.RUN_KINDS}
+        # the same records and the same final frame. Every frame of the first leaves maps a full walk would leave.
+        kinds = {**self.DIFF_KINDS, **self.WRITER_KINDS, **self.REGION_KINDS, **self.RUN_KINDS, **self.BETWEEN_FRAMES_KINDS}
         for seed in range(40):
             rng = random.Random(seed)
             framed, unframed = self.screen(cols=8, lines=6, scrollback=50), self.screen(cols=8, lines=6, scrollback=50)
@@ -1890,13 +1923,17 @@ class TestBidiReorder(BaseTest):
                 kind = rng.choices(tuple(kinds), tuple(kinds.values()))[0]
                 if kind in self.REGION_KINDS or kind in self.RUN_KINDS:
                     steps = self.region_steps(rng, framed, kind)
+                elif kind in self.BETWEEN_FRAMES_KINDS:
+                    steps = [self.between_frames_op(rng, framed, kind)]
                 else:
                     steps = [self.diff_op(rng, framed, {kind: 1})]
                 for name, op in steps:
                     apply(framed, op)
                     apply(unframed, op)
-                    if rng.random() < (0.5 if len(steps) > 1 else 0.3):
-                        frame(framed)
+                    if kind in self.BETWEEN_FRAMES_KINDS or rng.random() < (0.5 if len(steps) > 1 else 0.3):
+                        for _ in range(1 + (kind == 'again')):
+                            frame(framed)
+                            self.assertTrue(framed.test_bidi_walk_matches_full(), f'seed {seed}: {done + [name]}')
                         name += ' frame'
                     done.append(name)
             records = [list(map(x.test_bidi_line_record, range(x.lines))) for x in (framed, unframed)]

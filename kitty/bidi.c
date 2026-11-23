@@ -442,9 +442,11 @@ bidi_maps_for_upload(Screen *self, const LineBuf *source, index_type rows) {
         b->rows = rows;
         b->cols = cols;
         b->changed = true;
+        b->reusable = false;
     }
     ensure_space_for(b, row_levels, uint8_t, cols, row_levels_cap, cols, false);
     ensure_space_for(b, row_v2l, uint16_t, cols, row_v2l_cap, cols, false);
+    if (b->source != source) b->reusable = false;
     b->source = source;
     return b;
 }
@@ -642,9 +644,16 @@ bidi_resolve_rows(BidiMaps *b, const BidiRows *src, int first, int last) {
 // view of history rows only, which evicted the others from the history render cache, nor screen rows below the view unchanged
 // since the last shown resolve read them.
 static void
-bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int first, int last, bool cut_by_moved_edge, bool shown) {
+bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int first, int last, bool cut_by_moved_edge, bool shown, bool reuse) {
     const index_type cols = b->cols;
     const int top = src->top, end = top + (int)b->rows;
+    bool dirty = cut_by_moved_edge;
+    for (int y = MAX(first > src->lowest ? first - 1 : first, top); y <= last && !dirty; y++) dirty = bidi_row_changed(b, src, y, end);
+    // The maps of its rows on view are those the last walk left, for the same rows and text
+    if (!dirty && reuse) {
+        for (int y = MAX(first, top); y <= last && y < end; y++) b->relevel[y - top] = false;
+        return;
+    }
     // Without a stamp the paragraph has no levels, and the bits of its rows may be stale. With one but no row holding a cell
     // that may reorder, nor a right-to-left base, its levels are zero too; a raw stamp on a row without text only makes this
     // stricter.
@@ -661,8 +670,6 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int first, int last, bool c
             fatal("bidi: row %d of a paragraph without bidi_may_reorder holds a cell that may reorder", y);
     }
 #endif
-    bool dirty = cut_by_moved_edge;
-    for (int y = MAX(first > src->lowest ? first - 1 : first, top); y <= last && !dirty; y++) dirty = bidi_row_changed(b, src, y, end);
     if (!dirty) {
         // Its stored levels came from the same text, so they are zero too
         if (!reorders) {
@@ -725,14 +732,15 @@ bidi_paragraph_of(const BidiRows *src, int y, int lo, int hi, int *first, int *l
 }
 
 // Sets the levels of every render row, each paragraph bounded by bidi_window(). A walk not shown leaves the window of the last
-// shown one, which the rendered levels are for.
+// shown one, which the rendered levels are for. With reuse, the walk the maps are from showed the same rows, which cannot have
+// moved, so only the dirty paragraphs are mapped again.
 static void
-bidi_map_rows(BidiMaps *b, const BidiRows *src, bool shown) {
+bidi_map_rows(BidiMaps *b, const BidiRows *src, bool shown, bool reuse) {
     const int top = src->top, end = top + (int)b->rows;
     int lo, hi;
     bidi_window(src, end, &lo, &hi);
     const int64_t origin = (int64_t)src->screen->historybuf->num_pushed;
-    const bool lo_moved = origin + lo != b->window_lo, hi_moved = origin + hi != b->window_hi;
+    const bool lo_moved = !reuse && origin + lo != b->window_lo, hi_moved = !reuse && origin + hi != b->window_hi;
     if (shown) {
         b->window_lo = origin + lo;
         b->window_hi = origin + hi;
@@ -743,22 +751,24 @@ bidi_map_rows(BidiMaps *b, const BidiRows *src, bool shown) {
     // the levels alone would keep the spans of the row shown there before
     if (top != b->walk_top && src->screen->smooth_scroll.count) b->edges_changed = true;
     b->walk_top = top;
-    // A row on view is read and rendered without its hash being kept
-    const int on_view = src->screen->linebuf == b->below_source ? MIN(end, src->end) : src->end;
-    if (on_view > 0) memset(b->below_valid, 0, on_view * sizeof(b->below_valid[0]));
-    b->below_source = src->screen->linebuf;
-    memset(b->row_levels, 0, b->cols);
-    for (int y = top; y < end; y++) {
-        if (src->lowest <= y && y < src->end) continue;
-        bidi_set_row_levels(b, y - top, b->row_levels);
-        b->relevel[y - top] = false;
+    if (!reuse) {
+        // A row on view is read and rendered without its hash being kept
+        const int on_view = src->screen->linebuf == b->below_source ? MIN(end, src->end) : src->end;
+        if (on_view > 0) memset(b->below_valid, 0, on_view * sizeof(b->below_valid[0]));
+        b->below_source = src->screen->linebuf;
+        memset(b->row_levels, 0, b->cols);
+        for (int y = top; y < end; y++) {
+            if (src->lowest <= y && y < src->end) continue;
+            bidi_set_row_levels(b, y - top, b->row_levels);
+            b->relevel[y - top] = false;
+        }
     }
     for (int y = MAX(top, src->lowest); y < MIN(end, src->end);) {
         int first, last;
         bidi_paragraph_of(src, y, lo, hi, &first, &last);
         const bool cut = (lo_moved && first == lo && range_line_is_continued(src->screen, first)) ||
                          (hi_moved && last + 1 == hi && range_line_is_continued(src->screen, hi));
-        bidi_map_paragraph(b, src, first, last, cut, shown);
+        bidi_map_paragraph(b, src, first, last, cut, shown, reuse);
         y = last + 1;
     }
     // A dirty row's soft wrap can change the paragraph of the row below it, which is checked only once shown
@@ -771,6 +781,131 @@ bidi_map_rows(BidiMaps *b, const BidiRows *src, bool shown) {
     b->walk = NULL;
     b->edges_changed = false;
     b->valid = true;
+}
+
+// The state of the maps a walk reads or writes
+typedef struct BidiMapsSnapshot {
+    uint8_t *levels;
+    uint16_t *v2l;
+    bool *active, *has_levels, *relevel, *below_valid;
+    uint64_t *below_hash;
+    int64_t window_lo, window_hi;
+    int walk_top;
+    const LineBuf *below_source;
+    unsigned resolved;
+    bool valid, changed, edges_changed;
+} BidiMapsSnapshot;
+
+static void *
+bidi_copy(const void *src, size_t sz) {
+    void *ans = malloc(sz);
+    if (!ans) fatal("Out of memory copying bidi maps");
+    return memcpy(ans, src, sz);
+}
+
+static void
+bidi_maps_snapshot(const BidiMaps *b, BidiMapsSnapshot *s) {
+    const size_t rows = b->rows, cells = rows * b->cols;
+    *s = (BidiMapsSnapshot){
+        .levels = bidi_copy(b->levels, cells * sizeof(b->levels[0])),
+        .v2l = bidi_copy(b->v2l, cells * sizeof(b->v2l[0])),
+        .active = bidi_copy(b->active, rows * sizeof(b->active[0])),
+        .has_levels = bidi_copy(b->has_levels, rows * sizeof(b->has_levels[0])),
+        .relevel = bidi_copy(b->relevel, rows * sizeof(b->relevel[0])),
+        .below_valid = bidi_copy(b->below_valid, rows * sizeof(b->below_valid[0])),
+        .below_hash = bidi_copy(b->below_hash, rows * sizeof(b->below_hash[0])),
+        .window_lo = b->window_lo,
+        .window_hi = b->window_hi,
+        .walk_top = b->walk_top,
+        .below_source = b->below_source,
+        .resolved = b->resolved,
+        .valid = b->valid,
+        .changed = b->changed,
+        .edges_changed = b->edges_changed};
+}
+
+static void
+bidi_maps_restore(BidiMaps *b, const BidiMapsSnapshot *s) {
+    const size_t rows = b->rows, cells = rows * b->cols;
+    memcpy(b->levels, s->levels, cells * sizeof(b->levels[0]));
+    memcpy(b->v2l, s->v2l, cells * sizeof(b->v2l[0]));
+    memcpy(b->active, s->active, rows * sizeof(b->active[0]));
+    memcpy(b->has_levels, s->has_levels, rows * sizeof(b->has_levels[0]));
+    memcpy(b->relevel, s->relevel, rows * sizeof(b->relevel[0]));
+    memcpy(b->below_valid, s->below_valid, rows * sizeof(b->below_valid[0]));
+    memcpy(b->below_hash, s->below_hash, rows * sizeof(b->below_hash[0]));
+    b->window_lo = s->window_lo;
+    b->window_hi = s->window_hi;
+    b->walk_top = s->walk_top;
+    b->below_source = s->below_source;
+    b->resolved = s->resolved;
+    b->valid = s->valid;
+    b->changed = s->changed;
+    b->edges_changed = s->edges_changed;
+}
+
+static void
+bidi_maps_snapshot_free(BidiMapsSnapshot *s) {
+    free(s->levels);
+    free(s->v2l);
+    free(s->active);
+    free(s->has_levels);
+    free(s->relevel);
+    free(s->below_valid);
+    free(s->below_hash);
+}
+
+static bool
+bidi_maps_match(const BidiMaps *b, const BidiMapsSnapshot *s, bool with_relevel) {
+    const size_t rows = b->rows, cols = b->cols;
+    if (memcmp(b->levels, s->levels, rows * cols) || memcmp(b->active, s->active, rows * sizeof(b->active[0])) ||
+        memcmp(b->has_levels, s->has_levels, rows * sizeof(b->has_levels[0])))
+        return false;
+    if (with_relevel && memcmp(b->relevel, s->relevel, rows * sizeof(b->relevel[0]))) return false;
+    for (size_t r = 0; r < rows; r++) {
+        if (b->active[r] && memcmp(b->v2l + r * cols, s->v2l + r * cols, cols * sizeof(b->v2l[0]))) return false;
+    }
+    return true;
+}
+
+// Whether a full walk from the state before, the current one when NULL, leaves the maps the walk that ran left. The maps are left
+// as that walk left them. A full walk run again marks dirty only rows of the paragraphs that walk resolved, which it marked.
+static bool
+bidi_walk_matches(BidiMaps *b, const BidiRows *src, bool shown, const BidiMapsSnapshot *before, bool with_relevel) {
+    BidiMapsSnapshot after;
+    bidi_maps_snapshot(b, &after);
+    if (before) bidi_maps_restore(b, before);
+    bidi_map_rows(b, src, shown, false);
+    const bool ans = bidi_maps_match(b, &after, with_relevel);
+    bidi_maps_restore(b, &after);
+    bidi_maps_snapshot_free(&after);
+    return ans;
+}
+
+static BidiRows
+bidi_live_rows(Screen *self) {
+    const HistoryBuf *hb = self->historybuf;
+    return (BidiRows){
+        .screen = self,
+        .lowest = -(int)hb->count,
+        .end = (int)self->lines,
+        .top = -(int)(self->scrolled_by + pixel_scroll_enabled(self)),
+        .pushed = -(int)MIN(hb->num_pushed - hb->bidi_walked, (uint64_t)hb->count)};
+}
+
+static bool
+bidi_walk_reusable(const BidiMaps *b, const BidiRows *src) {
+    const HistoryBuf *hb = src->screen->historybuf;
+    return b->reusable && b->walk_generation == src->screen->bidi_layout_generation && b->walk_top == src->top &&
+           b->walk_pushed == hb->num_pushed && b->walk_count == hb->count && !b->edges_changed;
+}
+
+bool
+bidi_walk_matches_full(Screen *self) {
+    BidiMaps *b = self->bidi_maps;
+    if (!b || !b->reusable || b->rows != render_lines_for_screen(self)) return true;
+    const BidiRows src = bidi_live_rows(self);
+    return !bidi_walk_reusable(b, &src) || bidi_walk_matches(b, &src, true, NULL, false);
 }
 
 // Levels left in the render cells would be trusted if the buffer were stamped again, so its rows holding any are rendered again
@@ -826,17 +961,27 @@ bidi_prepare_live(Screen *self, bool shown) {
     // History rows rendered without the walk hold stale levels, which it would trust
     if (!b->live) historybuf_invalidate_render_cache(hb);
     b->live = true;
-    const BidiRows src = {
-        .screen = self,
-        .lowest = -(int)hb->count,
-        .end = (int)self->lines,
-        .top = -(int)(self->scrolled_by + pixel_scroll_enabled(self)),
-        .pushed = -(int)MIN(hb->num_pushed - hb->bidi_walked, (uint64_t)hb->count)};
+    const BidiRows src = bidi_live_rows(self);
     Line line;
     for (int y = MAX(src.top, src.lowest); y < MIN(src.top + (int)rows, 0); y++) {
         if (historybuf_init_line_for_render(hb, -(y + 1), &line, rows)) historybuf_mark_line_dirty(hb, -(y + 1));
     }
-    bidi_map_rows(b, &src, shown);
+    const bool reuse = bidi_walk_reusable(b, &src);
+#ifdef DEBUG
+    BidiMapsSnapshot before;
+    if (reuse) bidi_maps_snapshot(b, &before);
+#endif
+    bidi_map_rows(b, &src, shown, reuse);
+#ifdef DEBUG
+    if (reuse) {
+        if (!bidi_walk_matches(b, &src, shown, &before, true)) fatal("bidi: the maps of a walk reusing them differ from a full walk");
+        bidi_maps_snapshot_free(&before);
+    }
+#endif
+    b->reusable = shown;
+    b->walk_generation = self->bidi_layout_generation;
+    b->walk_pushed = hb->num_pushed;
+    b->walk_count = hb->count;
     if (shown && src.top >= src.lowest && src.top + (int)rows <= 0) hb->bidi_walked = hb->num_pushed;
     return b;
 }

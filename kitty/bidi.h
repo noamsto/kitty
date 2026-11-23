@@ -69,6 +69,11 @@ typedef struct BidiMaps {
     bool selection_used_maps;
     bool edges_changed;          // the edges of a region narrower than the screen moved: the next walk orders every row again
     int walk_top;                // the row shown in render row 0 by the last walk
+    // The last walk was a shown live walk, after which no upload marked rows clean without one: the next walk keeps the maps of
+    // its clean paragraphs when the layout generation, the history and walk_top are as it left them
+    bool reusable;
+    uint64_t walk_generation, walk_pushed;
+    index_type walk_count;
     const struct BidiRows *walk; // the rows of the walk in progress
     unsigned resolved;           // paragraphs mapped from their text by the walk of the last upload
     // The rows resolved by the last shown walk, numbered as history lines are
@@ -93,6 +98,9 @@ void bidi_maps_free(BidiMaps *b);
 void bidi_maps_invalidate_row_hashes(Screen *self);
 BidiMaps *bidi_maps_for_upload(Screen *self, const LineBuf *source, index_type rows);
 BidiMaps *bidi_prepare_live(Screen *self, bool shown);
+// Whether a full walk would leave the maps the next walk reuses as they are, true when it would not reuse them. Leaves the maps
+// as they were.
+bool bidi_walk_matches_full(Screen *self);
 void bidi_store_levels(const BidiMaps *b, index_type r, Line *line);
 index_type bidi_visual_x(const BidiMaps *b, index_type r, index_type x, index_type span);
 index_type bidi_logical_x(const BidiMaps *b, index_type r, index_type visual_x);
