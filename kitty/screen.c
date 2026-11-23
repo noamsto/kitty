@@ -3214,7 +3214,7 @@ is_plain_combining_char(char_type ch, GraphemeSegmentationResult seg, CharProps 
 }
 
 static inline __attribute__((always_inline)) size_t
-draw_combining_char_run(Screen *self, text_loop_state *s, char_type ch, CharProps props, const uint32_t *rest, size_t num_rest) {
+draw_combining_char_run_(Screen *self, text_loop_state *s, char_type ch, CharProps props, const uint32_t *rest, size_t num_rest) {
     // ch has been through grapheme segmentation, which added it to the previous
     // cell. Plain combining chars directly following it are added along with it,
     // with a single lookup in the text cache, rather than one for each char.
@@ -3248,9 +3248,14 @@ draw_combining_char_run(Screen *self, text_loop_state *s, char_type ch, CharProp
 }
 
 static size_t
+draw_combining_char_run(Screen *self, text_loop_state *s, char_type ch, CharProps props, const uint32_t *rest, size_t num_rest) {
+    return draw_combining_char_run_(self, s, ch, props, rest, num_rest);
+}
+
+static size_t
 draw_combining_char_run_implicit(Screen *self, text_loop_state *s, char_type ch, CharProps props, const uint32_t *rest, size_t num_rest, uint8_t record) {
     const char_type before = s->prev.cc->ch_and_idx;
-    const size_t n = draw_combining_char_run(self, s, ch, props, rest, num_rest);
+    const size_t n = draw_combining_char_run_(self, s, ch, props, rest, num_rest);
     bool may_reorder = bidi_char_sets_may_reorder(ch);
     for (size_t i = 0; i < n && !may_reorder; i++) may_reorder = bidi_char_sets_may_reorder(map_char(self, rest[i]));
     record_combining_write(self, s, before, record, may_reorder);
