@@ -3690,7 +3690,9 @@ decode_utf8_safe_string(const uint8_t *src, size_t sz, uint32_t *dest) {
 static bool __attribute__((noinline))
 multicell_may_reorder(unsigned scale, const ListOfChars *lc) {
     if (scale > 1) return true;
-    for (size_t i = 0; i < lc->count; i++) if (bidi_char_sets_may_reorder(lc->chars[i])) return true;
+    for (size_t i = 0; i < lc->count; i++) {
+        if (bidi_char_sets_may_reorder(lc->chars[i])) return true;
+    }
     return false;
 }
 
