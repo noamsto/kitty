@@ -89,11 +89,12 @@ func benchmark_data(description string, data string, settings run_settings) (dur
 		}
 	}
 
-	start := time.Now()
 	end_of_loop_reset := desc
 	if settings.bidi {
+		data = "\x1b[8h" + data
 		end_of_loop_reset += "\x1b[8l"
 	}
+	start := time.Now()
 	if !settings.render {
 		end_of_loop_reset += resume_rendering + pause_rendering
 	}
@@ -239,7 +240,7 @@ func ascii_with_bidi() (r result, err error) {
 	s := default_settings()
 	s.render = true
 	s.bidi = true
-	return text_benchmark("ASCII text with rendering in bidi mode", "\x1b[8h"+data, cells, s)
+	return text_benchmark("ASCII text with rendering in bidi mode", data, cells, s)
 }
 
 func unicode_text() (string, int) {
@@ -530,7 +531,7 @@ func main(args []string) (err error) {
 	fmt.Print(reset)
 	fmt.Println(
 		"These results measure the time it takes the terminal to fully parse all the data sent to it.")
-	fmt.Println("Note that \x1b[31mrendering is suppressed\x1b[m (if the terminal supports the synchronized output escape code) to better benchmark parser performance, except in the render benchmark.")
+	fmt.Println("Note that \x1b[31mrendering is suppressed\x1b[m (if the terminal supports the synchronized output escape code) to better benchmark parser performance, except in the render and bidi benchmarks.")
 	fmt.Println()
 	fmt.Println("Results:")
 	mlen := 10
@@ -579,7 +580,7 @@ func write_results(path string, results []result) error {
 func help_text() string {
 	var b strings.Builder
 	b.WriteString("Benchmarking works by sending large amounts of data to the TTY device and waiting for the terminal to process the data and respond to queries sent to it in the data. ")
-	b.WriteString("Rendering is suppressed during benchmarking to focus on parser performance, using the synchronized output escape code, except in the render benchmark. ")
+	b.WriteString("Rendering is suppressed during benchmarking to focus on parser performance, using the synchronized output escape code, except in the render and bidi benchmarks. ")
 	b.WriteString("Note that rendering in modern terminals is typically asynchronous so it wont be properly benchmarked by this kitten. ")
 	b.WriteString("All benchmarks use the alternate screen, except the scrollback benchmark.\n\n")
 	b.WriteString("To run only particular benchmarks, specify them on the command line. The available benchmarks are:\n\n")
