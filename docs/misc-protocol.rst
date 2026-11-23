@@ -241,11 +241,12 @@ code point that has no previous cell. In bidi mode with ``CSI ? 2501 h`` set,
 an LRM or RLM discarded this way still sets the direction of the paragraph
 its line starts, LRM left to right and RLM right to left, in place of that of
 its first strong character. If several are written, the last one wins. On a
-line that holds no text, the mark stays until text is written to it with bidi
-mode off, or the line is cleared as a whole: by ED 2 or ED 3, by ED 0 or ED 1
-from another line, by DECALN or by RIS. Once text is written in bidi mode, the
-direction is part of the line's settings. It ends with them when an erase
-blanks the line: EL 0 from column 1, EL 2, ED 0 from column 1, ECH or DCH. On
+line with no settings, that is, none of whose text was written in bidi mode,
+the mark stays until text is written to it with bidi mode off, or the line is
+cleared as a whole: by ED 2 or ED 3, by ED 0 or ED 1 from another line, by
+DECALN or by RIS. Once text is written in bidi mode, the direction is part of
+the line's settings. It ends with them when an erase leaves the line without
+text, such as EL 0 from column 1, EL 2, ED 0 from column 1, ECH or DCH. On
 a line that holds no text yet it may be lost when the screen is resized. The
 mode when the mark is written decides: a mark written under ``CSI ? 2501 h``
 still applies if ``CSI ? 2501 l`` comes before its text, and a mark written
