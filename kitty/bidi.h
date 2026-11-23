@@ -32,6 +32,23 @@ typedef struct BidiFixedColumns {
     index_type at[2 * MAX_SMOOTH_SCROLL_REGIONS], edges[2 * MAX_SMOOTH_SCROLL_REGIONS];
 } BidiFixedColumns;
 
+// False for codepoints outside the blocks with right-to-left or Arabic letters
+static inline bool
+bidi_codepoint_may_reorder(char_type ch) {
+    if (ch < 0x590) return false;
+    if (ch < 0xfb1d) return ch <= 0x8ff;
+    if (ch >= 0x1f000) return false;
+    return ch <= 0xfdff || ch - 0xfe70 <= 0xfefe - 0xfe70 || ch - 0x10800 <= 0x10fff - 0x10800 || ch - 0x1e800 <= 0x1efff - 0x1e800;
+}
+
+// For a char added to a cell: false when it cannot make bidi_cells_may_reorder() hold for the cell's row
+static inline bool
+bidi_char_sets_may_reorder(char_type ch) {
+    return bidi_codepoint_may_reorder(ch) || ch == 0x200f || ch == 0x2067 || ch == 0x61c;
+}
+
+bool bidi_cells_may_reorder(const CPUCell *cells, index_type num, const TextCache *tc);
+
 // Whether the FriBidi in use walks back from every bracket pair to the previous strong char, as before 1.0.17
 bool bidi_n0_walk_is_slow(void);
 // Writes the cols cells of dest, stride bytes each, in visual order: cell v is the cell v2l[v] of src, which is in logical order

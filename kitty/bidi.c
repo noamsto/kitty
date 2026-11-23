@@ -17,15 +17,6 @@
 #define BIDI_EXTRA_CHAR (1u << 31)
 #define BIDI_FIXED_CELL (1u << 30)
 
-// False for codepoints outside the blocks with right-to-left or Arabic letters
-static inline bool
-bidi_codepoint_may_reorder(char_type ch) {
-    if (ch < 0x590) return false;
-    if (ch < 0xfb1d) return ch <= 0x8ff;
-    if (ch >= 0x1f000) return false;
-    return ch <= 0xfdff || ch - 0xfe70 <= 0xfefe - 0xfe70 || ch - 0x10800 <= 0x10fff - 0x10800 || ch - 0x1e800 <= 0x1efff - 0x1e800;
-}
-
 static inline bool
 is_bidi_mark(char_type ch) {
     return (ch | 1) == 0x200f || ch == 0x61c;
@@ -89,7 +80,7 @@ bidi_scratch_trim(BidiScratch *s) {
 }
 
 // Whether some cell may be right-to-left, holds an RLI, RLM or ALM, or is scaled
-static bool
+bool
 bidi_cells_may_reorder(const CPUCell *cells, index_type num, const TextCache *tc) {
     char_type buf[MAX_NUM_CODEPOINTS_PER_CELL];
     for (const CPUCell *c = cells, *end = cells + num; c < end; c++) {
@@ -541,6 +532,15 @@ bidi_set_row_levels(BidiMaps *b, index_type r, const uint8_t *levels) {
     b->changed = true;
 }
 
+// What bidi_set_row_levels() does for a row of zero levels, which is in logical order whatever the edges
+static void
+bidi_set_row_no_levels(BidiMaps *b, index_type r) {
+    if (!b->has_levels[r]) return;
+    memset(b->levels + (size_t)r * b->cols, 0, b->cols);
+    b->has_levels[r] = b->active[r] = false;
+    b->changed = true;
+}
+
 void
 bidi_maps_edges_changed(BidiMaps *b) {
     b->edges_changed = true;
@@ -554,7 +554,7 @@ bidi_record_base(LineAttrs a) {
 static uint64_t
 bidi_row_hash(const BidiRows *src, int y, index_type cols) {
     const LineAttrs a = *bidi_row_attrs(src, y);
-    // Without the upload's memo, which follows from the cells
+    // Without bidi_may_reorder, which follows from the cells
     const uint64_t seed = (a.bidi_stamp != BIDI_STAMP_NONE) | a.bidi_rtl << 1 | a.bidi_auto << 2;
     return XXH3_64bits_withSeed(bidi_row_cells(src, y), cols * sizeof(CPUCell), seed);
 }
@@ -613,17 +613,14 @@ bidi_resolve_rows(BidiMaps *b, const BidiRows *src, int first, int last) {
         b->para_rows[y - first] = cells;
         // A row left without text while no walk ran, under force_ltr, is clean and may still hold its record. The record test
         // comes first: it drops a record left on a row without text, which the reads below must not see.
-        if (bidi_row_has_record(src, y, cols) && a->has_dirty_text)
-            a->bidi_stamp = bidi_cells_may_reorder(cells, cols, tc) ? BIDI_STAMP_RTL : BIDI_STAMP_IMPLICIT;
-        rtl |= a->bidi_stamp == BIDI_STAMP_RTL;
+        bidi_row_has_record(src, y, cols);
+        // A row whose right-to-left text was overwritten drops its bit
+        if (a->bidi_may_reorder && a->has_dirty_text) a->bidi_may_reorder = bidi_cells_may_reorder(cells, cols, tc);
+        rtl |= a->bidi_may_reorder;
         if (lead.bidi_stamp == BIDI_STAMP_NONE) lead = *a;
     }
     if (lead.bidi_stamp == BIDI_STAMP_NONE) lead.bidi_rtl = lead.bidi_auto = false;
-    // A row without a record is laid out with the recorded rows of its paragraph, and no memo says whether its text needs it
-    for (int y = first; lead.bidi_stamp != BIDI_STAMP_NONE && !(rtl || lead.bidi_rtl) && y <= last; y++) {
-        if (bidi_row_attrs(src, y)->bidi_stamp == BIDI_STAMP_NONE) rtl = bidi_cells_may_reorder(b->para_rows[y - first], cols, tc);
-    }
-    if (!(rtl || lead.bidi_rtl)) memset(b->para_levels, 0, num_cells);
+    if (lead.bidi_stamp == BIDI_STAMP_NONE || !(rtl || lead.bidi_rtl)) memset(b->para_levels, 0, num_cells);
     else if (bidi_rows_hold_placeholder(src, first, last, b->para_rows, cols, tc)) {
         // Not laid out, its text shaped as with bidi mode off, in the direction guessed from it: at BIDI_LEVEL_FIXED on a row
         // with a record, without levels on the others
@@ -648,9 +645,33 @@ static void
 bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int first, int last, bool cut_by_moved_edge, bool shown) {
     const index_type cols = b->cols;
     const int top = src->top, end = top + (int)b->rows;
+    // Without a stamp the paragraph has no levels, and the bits of its rows may be stale. With one but no row holding a cell
+    // that may reorder, nor a right-to-left base, its levels are zero too; a raw stamp on a row without text only makes this
+    // stricter.
+    bool stamped = false, reorders = false;
+    for (int y = first; y <= last; y++) {
+        const LineAttrs a = *bidi_row_attrs(src, y);
+        stamped |= a.bidi_stamp != BIDI_STAMP_NONE;
+        reorders |= a.bidi_may_reorder || (a.bidi_stamp != BIDI_STAMP_NONE && a.bidi_rtl);
+    }
+    reorders &= stamped;
+#ifdef DEBUG
+    for (int y = first; stamped && !reorders && y <= last; y++) {
+        if (bidi_cells_may_reorder(bidi_row_cells(src, y), cols, src->screen->text_cache))
+            fatal("bidi: row %d of a paragraph without bidi_may_reorder holds a cell that may reorder", y);
+    }
+#endif
     bool dirty = cut_by_moved_edge;
     for (int y = MAX(first > src->lowest ? first - 1 : first, top); y <= last && !dirty; y++) dirty = bidi_row_changed(b, src, y, end);
     if (!dirty) {
+        // Its stored levels came from the same text, so they are zero too
+        if (!reorders) {
+            for (int y = MAX(first, top); y <= last && y < end; y++) {
+                bidi_set_row_no_levels(b, y - top);
+                b->relevel[y - top] = false;
+            }
+            return;
+        }
         for (int y = MAX(first, top); y <= last && y < end; y++) {
             const RenderCell *rc = bidi_row_render_cells(src, y);
             for (index_type x = 0; x < cols; x++) b->row_levels[x] = rc[x].level;
@@ -660,7 +681,12 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int first, int last, bool c
         return;
     }
     b->resolved++;
-    bidi_resolve_rows(b, src, first, last);
+    if (reorders) bidi_resolve_rows(b, src, first, last);
+    else {
+        const size_t num_cells = (size_t)(last - first + 1) * cols;
+        ensure_space_for(b, para_levels, uint8_t, num_cells, para_levels_cap, num_cells, false);
+        memset(b->para_levels, 0, num_cells);
+    }
     for (int y = first; y <= last; y++) {
         const uint8_t *levels = b->para_levels + (size_t)(y - first) * cols;
         if (top <= y && y < end) {

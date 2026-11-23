@@ -102,6 +102,11 @@ init_src_line(Rewrap *r) {
     r->dest.lb->line_attrs[dest_y] = r->src.line.attrs; \
     r->src.line.attrs.prompt_kind = UNKNOWN_PROMPT_KIND;
 
+static LineAttrs *
+dest_row_attrs(Rewrap *r) {
+    return r->dest_line_from_linebuf ? r->dest.lb->line_attrs + r->dest.y : historybuf_attrs(r->dest.hb, 0);
+}
+
 static void
 first_dest_line(Rewrap *r) {
     if (r->src.hb_count) {
@@ -161,6 +166,7 @@ next_dest_line(Rewrap *r, bool continued) {
         CPUCell *cpu_cells;
         linebuf_init_cells(r->sb, 0, &cpu_cells, NULL);
         memcpy(r->dest.line.cpu_cells, cpu_cells, dest_xnum * sizeof(cpu_cells[0]));
+        if (r->sb->line_attrs[0].bidi_may_reorder) dest_row_attrs(r)->bidi_may_reorder = true;
         r->current_dest_line_has_multiline_cells = true;
     }
     linebuf_index(r->sb, 0, r->sb->ynum - 1);
@@ -231,10 +237,16 @@ copy_range(Line *src, index_type src_at, Line *dest, index_type dest_at, index_t
 static void
 join_bidi_record(Rewrap *r) {
     r->join_bidi_record = false;
-    LineAttrs *a = r->dest_line_from_linebuf ? r->dest.lb->line_attrs + r->dest.y : historybuf_attrs(r->dest.hb, 0);
+    LineAttrs *a = dest_row_attrs(r);
     if (a->bidi_stamp != BIDI_STAMP_NONE) return;
     line_attrs_set_bidi(a, r->src.line.attrs);
     if (!r->dest_line_from_linebuf) r->dest.hb->bidi_stamped = true;
+}
+
+// A row joined from several lines may reorder if any of them may
+static inline void
+carry_bidi_bit(Rewrap *r) {
+    if (r->src.line.attrs.bidi_may_reorder) dest_row_attrs(r)->bidi_may_reorder = true;
 }
 
 static void
@@ -247,6 +259,7 @@ copy_multiline_extra_lines(Rewrap *r, CPUCell *src_cell, index_type mc_width) {
         linebuf_init_line_at(r->sb, i - 1, &r->dest.scratch_line);
         linebuf_mark_line_dirty(r->sb, i - 1);
         copy_range(&r->src.scratch_line, r->src.x, &r->dest.scratch_line, r->dest.x, mc_width);
+        r->sb->line_attrs[i - 1].bidi_may_reorder |= r->src.scratch_line.attrs.bidi_may_reorder;
         update_tracked_cursors(r, mc_width, r->src.y + i, r->dest.y + i, src_xnum + 10000 /* ensure cursor is moved only if in region being copied */);
     }
 }
@@ -301,6 +314,7 @@ multiline_copy_src_to_dest(Rewrap *r) {
         find_space_in_dest(r, mc_width);
         copy_range(&r->src.line, r->src.x, &r->dest.line, r->dest.x, mc_width);
         if (UNLIKELY(r->join_bidi_record)) join_bidi_record(r);
+        carry_bidi_bit(r);
         update_tracked_cursors(r, mc_width, r->src.y, r->dest.y, r->src_x_limit);
         if (c->is_multicell && c->scale > 1) copy_multiline_extra_lines(r, c, mc_width);
         r->src.x += mc_width;
@@ -328,6 +342,7 @@ fast_copy_src_to_dest(Rewrap *r) {
         }
         copy_range(&r->src.line, r->src.x, &r->dest.line, r->dest.x, num);
         if (UNLIKELY(r->join_bidi_record)) join_bidi_record(r);
+        carry_bidi_bit(r);
         update_tracked_cursors(r, num, r->src.y, r->dest.y, r->src_x_limit);
         r->src.x += num;
         r->dest.x += num;

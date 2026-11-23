@@ -101,14 +101,17 @@ typedef union LineAttrs {
         // the bidi controls the line was first written under in implicit mode. On a line without a stamp the other two are
         // zero, unless a leading mark set bidi_auto: then bidi_rtl is the direction its first text written in implicit mode
         // takes.
-        uint8_t bidi_stamp : 2;
+        uint8_t bidi_stamp : 1;
+        // Clear only when no cell of the line may reorder, see bidi_cells_may_reorder(); a stale set bit costs only work. It is
+        // valid on every row of a paragraph holding a stamp, as writes to a stamped buffer set it and a buffer becoming stamped
+        // recomputes it, and may be stale elsewhere.
+        uint8_t bidi_may_reorder : 1;
         uint8_t bidi_rtl : 1;
         uint8_t bidi_auto : 1;
     };
     uint8_t val;
 } LineAttrs;
-// BIDI_STAMP_RTL is the upload's memo of an implicit line that holds right-to-left text
-enum { BIDI_STAMP_NONE, BIDI_STAMP_IMPLICIT, BIDI_STAMP_RTL };
+enum { BIDI_STAMP_NONE, BIDI_STAMP_IMPLICIT };
 static_assert(sizeof(LineAttrs) == sizeof(uint8_t), "Fix the ordering of LineAttrs");
 
 // A record, or the direction a leading mark set for the line's first text

@@ -96,6 +96,7 @@ line_has_bidi_record(LineAttrs *a, const Line *line) {
     if (a->bidi_stamp == BIDI_STAMP_NONE) return false;
     if (!line_is_empty(line)) return true;
     line_attrs_set_bidi(a, (LineAttrs){0});
+    a->bidi_may_reorder = false;
     return false;
 }
 

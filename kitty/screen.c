@@ -348,6 +348,30 @@ typedef struct CursorTrack {
     } temp;
 } CursorTrack;
 
+// Writes to a buffer without a stamp do not keep bidi_may_reorder, so it is recomputed for every row when the buffer gets one, and
+// for the main buffer also for the history rows its row 0 continues, which its first paragraph takes in
+static void
+bidi_buffer_stamped(Screen *self, LineBuf *lb) {
+    if (lb->bidi_stamped) return;
+    for (index_type y = 0; y < lb->ynum; y++)
+        lb->line_attrs[y].bidi_may_reorder = bidi_cells_may_reorder(linebuf_cpu_cells_for_line(lb, y), lb->xnum, self->text_cache);
+    if (lb == self->main_linebuf) {
+        HistoryBuf *hb = self->historybuf;
+        for (index_type l = 0; l < hb->count && l < self->lines && (l ? historybuf_is_line_continued(hb, l - 1) : history_buf_endswith_wrap(hb)); l++)
+            historybuf_attrs(hb, l)->bidi_may_reorder = bidi_cells_may_reorder(historybuf_cpu_cells(hb, l), hb->xnum, self->text_cache);
+    }
+    lb->bidi_stamped = true;
+}
+
+// A rewrap can pull rows holding a record from the history into a buffer without a stamp
+static void
+bidi_buffer_rewrapped(Screen *self, LineBuf *lb) {
+    if (lb->bidi_stamped) return;
+    bool stamped = lb == self->main_linebuf && self->historybuf->bidi_stamped && self->historybuf->count && history_buf_endswith_wrap(self->historybuf);
+    for (index_type y = 0; y < lb->ynum && !stamped; y++) stamped = line_has_bidi_bits(lb->line_attrs[y]);
+    if (stamped) bidi_buffer_stamped(self, lb);
+}
+
 static bool history_reuse_disabled_for_tests = false;
 
 static bool
@@ -410,6 +434,8 @@ rewrap(
     screen->historybuf = mr.hb;
     screen->alt_linebuf = ar.lb;
     screen->linebuf = main_is_active ? screen->main_linebuf : screen->alt_linebuf;
+    bidi_buffer_rewrapped(screen, screen->main_linebuf);
+    bidi_buffer_rewrapped(screen, screen->alt_linebuf);
     if (main_is_active) {
         *nclb = mr.num_content_lines_before;
         *ncla = mr.num_content_lines_after;
@@ -593,7 +619,7 @@ bidi_index_up_seams(Screen *self, index_type top, index_type bottom, bool to_his
 // A line back from the history can hold a record, or continue a history line that holds one, while the main buffer holds none
 static void
 bidi_note_line_from_history(Screen *self, LineAttrs a) {
-    if (line_has_bidi_bits(a) || (self->historybuf->bidi_stamped && history_buf_endswith_wrap(self->historybuf))) self->main_linebuf->bidi_stamped = true;
+    if (line_has_bidi_bits(a) || (self->historybuf->bidi_stamped && history_buf_endswith_wrap(self->historybuf))) bidi_buffer_stamped(self, self->main_linebuf);
 }
 
 static void
@@ -910,6 +936,7 @@ ssr_copy_row_to_slot(Screen *self, SmoothScrollRegion *r, index_type y, index_ty
     // The kept row carries the line's settings, as that layout left them, and the frames keep their bidi maps while it is drawn
     const LineAttrs laid_out = self->linebuf->line_attrs[y];
     line_attrs_set_bidi(dest, laid_out);
+    // Kept rows are drawn at their stored levels, never resolved, so their bits need no recompute
     if (line_has_bidi_bits(laid_out)) r->overflow->bidi_stamped = true;
 }
 
@@ -919,6 +946,7 @@ ssr_copy_row_to_slot(Screen *self, SmoothScrollRegion *r, index_type y, index_ty
 // as before.
 static void
 ssr_carry_bidi_record(Screen *self, const SmoothScrollRegion *r, index_type y, const CPUCell *moved, LineAttrs src) {
+    self->linebuf->line_attrs[y].bidi_may_reorder |= src.bidi_may_reorder;
     const CPUCell *c = linebuf_cpu_cells_for_line(self->linebuf, y);
     for (index_type x = 0; x < r->left; x++)
         if (c[x].ch_and_idx) return;
@@ -929,7 +957,7 @@ ssr_carry_bidi_record(Screen *self, const SmoothScrollRegion *r, index_type y, c
     LineAttrs *a = self->linebuf->line_attrs + y;
     if (has_text && src.bidi_stamp != BIDI_STAMP_NONE) {
         line_attrs_set_bidi(a, src);
-        self->linebuf->bidi_stamped = true;
+        bidi_buffer_stamped(self, self->linebuf);
     } else if (has_text || a->bidi_stamp != BIDI_STAMP_NONE) line_attrs_set_bidi(a, (LineAttrs){0});
 }
 
@@ -949,6 +977,8 @@ ssr_copy_slot_to_row(Screen *self, SmoothScrollRegion *r, index_type slot, index
         dest->has_image_placeholders |= src.has_image_placeholders;
         if (UNLIKELY(self->linebuf->bidi_stamped || line_has_bidi_bits(src))) ssr_carry_bidi_record(self, r, y, sc, src);
     }
+    // The slot's bit is stale when the row was kept while the buffer held no stamp
+    if (UNLIKELY(self->linebuf->bidi_stamped) && !dest->bidi_may_reorder) dest->bidi_may_reorder = bidi_cells_may_reorder(sc, w, self->text_cache);
     ssr_mark_row_dirty(self, y);
 }
 
@@ -1351,6 +1381,13 @@ ssr_shift_by_one_row(Screen *self, SmoothScrollRegion *r, bool up) {
 
 static void bidi_line_gets_text(Screen *self, index_type y);
 
+// The walk recomputes the bit of a dirty row from the cells it holds, which left out those shifted onto the overflow
+static void
+ssr_bidi_cell_entered(Screen *self, index_type y, const CPUCell *c) {
+    LineAttrs *a = self->linebuf->line_attrs + y;
+    if (!a->bidi_may_reorder) a->bidi_may_reorder = bidi_cells_may_reorder(c, 1, self->text_cache);
+}
+
 static void
 ssr_shift_by_one_column(Screen *self, SmoothScrollRegion *r, bool left) {
     // Move the cells of the rectangle by one column, left when left is true
@@ -1386,6 +1423,7 @@ ssr_shift_by_one_column(Screen *self, SmoothScrollRegion *r, bool left) {
             } else {
                 if (UNLIKELY(stamped) && ca[0].ch_and_idx) bidi_line_gets_text(self, y);
                 c[last] = ca[0], rc[last] = rca[0];
+                if (UNLIKELY(stamped)) ssr_bidi_cell_entered(self, y, c + last);
                 if (k > 1) {
                     memmove(ca, ca + 1, (k - 1) * sizeof(ca[0]));
                     memmove(rca, rca + 1, (k - 1) * sizeof(rca[0]));
@@ -1409,6 +1447,7 @@ ssr_shift_by_one_column(Screen *self, SmoothScrollRegion *r, bool left) {
             } else {
                 if (UNLIKELY(stamped) && cb[k - 1].ch_and_idx) bidi_line_gets_text(self, y);
                 c[first] = cb[k - 1], rc[first] = rcb[k - 1];
+                if (UNLIKELY(stamped)) ssr_bidi_cell_entered(self, y, c + first);
                 if (k > 1) {
                     memmove(cb + 1, cb, (k - 1) * sizeof(cb[0]));
                     memmove(rcb + 1, rcb, (k - 1) * sizeof(rcb[0]));
@@ -2468,12 +2507,28 @@ stamp_line_for_bidi(Screen *self, index_type y, uint8_t record) {
         a->bidi_stamp = BIDI_STAMP_IMPLICIT;
         a->bidi_auto = false;
     } else a->val |= record;
-    self->linebuf->bidi_stamped = true;
+    bidi_buffer_stamped(self, self->linebuf);
 }
 
 static inline void
 record_written_line(Screen *self, index_type y, uint8_t record) {
     if (!self->linebuf->line_attrs[y].bidi_stamp) stamp_line_for_bidi(self, y, record);
+}
+
+static inline void
+bidi_note_may_reorder(Screen *self, index_type y, bool may_reorder) {
+    if (may_reorder) self->linebuf->line_attrs[y].bidi_may_reorder = true;
+}
+
+// After a batched run of n chars drawn on row y
+static void
+bidi_note_run(Screen *self, index_type y, const uint32_t *chars, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        if (bidi_codepoint_may_reorder(chars[i])) {
+            self->linebuf->line_attrs[y].bidi_may_reorder = true;
+            return;
+        }
+    }
 }
 
 // Called before text is stored on line y: a record the line kept while it held no text is not the record of that text
@@ -2504,9 +2559,10 @@ set_record_at_leading_mark(Screen *self, char_type ch, uint8_t record) {
 // After a combining char was drawn, before is the text its cell held: the cell is the loop's previous cell now, which a widening
 // can have moved to another row
 static inline void
-record_combining_write(Screen *self, const text_loop_state *s, char_type before, uint8_t record) {
+record_combining_write(Screen *self, const text_loop_state *s, char_type before, uint8_t record, bool may_reorder) {
     if (!s->prev.cc || s->prev.cc->ch_and_idx == before) return;
     record_written_line(self, s->prev.y, record);
+    bidi_note_may_reorder(self, s->prev.y, may_reorder);
     // A zero width char at the start of a continuation row goes to the last cell of the row above
     if (s->prev.y != self->cursor->y) linebuf_mark_line_dirty(self->linebuf, s->prev.y);
 }
@@ -2954,7 +3010,10 @@ move_widened_char_past_multiline_chars(Screen *self, text_loop_state *s, CPUCell
         CPUCell *cp;
         linebuf_init_cells(self->linebuf, self->cursor->y, &cp, NULL);
         linebuf_mark_line_dirty(self->linebuf, self->cursor->y);
-        if (UNLIKELY(self->linebuf->bidi_stamped)) bidi_line_gets_text(self, self->cursor->y);
+        if (UNLIKELY(self->linebuf->bidi_stamped)) {
+            bidi_line_gets_text(self, self->cursor->y);
+            self->linebuf->line_attrs[self->cursor->y].bidi_may_reorder |= self->linebuf->line_attrs[ypos].bidi_may_reorder;
+        }
         cp[self->cursor->x] = c;
         self->cursor->x++;
         cp[self->cursor->x] = c;
@@ -3134,7 +3193,9 @@ static size_t
 draw_combining_char_run_implicit(Screen *self, text_loop_state *s, char_type ch, CharProps props, const uint32_t *rest, size_t num_rest, uint8_t record) {
     const char_type before = s->prev.cc->ch_and_idx;
     const size_t n = draw_combining_char_run(self, s, ch, props, rest, num_rest);
-    record_combining_write(self, s, before, record);
+    bool may_reorder = bidi_char_sets_may_reorder(ch);
+    for (size_t i = 0; i < n && !may_reorder; i++) may_reorder = bidi_char_sets_may_reorder(map_char(self, rest[i]));
+    record_combining_write(self, s, before, record, may_reorder);
     return n;
 }
 
@@ -3391,7 +3452,10 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
                 !batched_non_ascii_draw_disabled_for_tests) {
                 const size_t n = draw_non_ascii_run(self, s, chars + i, num_chars - i);
                 if (n) {
-                    if (implicit) record_written_line(self, self->cursor->y, record);
+                    if (implicit) {
+                        record_written_line(self, self->cursor->y, record);
+                        bidi_note_run(self, self->cursor->y, chars + i, n);
+                    }
                     i += n - 1;
                     continue;
                 }
@@ -3420,7 +3484,7 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
                     if (s->prev.cc) {
                         const char_type before = s->prev.cc->ch_and_idx;
                         draw_combining_char(self, s, ch);
-                        if (implicit) record_combining_write(self, s, before, record);
+                        if (implicit) record_combining_write(self, s, before, record, bidi_char_sets_may_reorder(ch));
                     } else if (implicit && (ch | 1) == 0x200f) { // LRM, RLM
                         set_record_at_leading_mark(self, ch, record);
                     }
@@ -3490,7 +3554,10 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
             self->cursor->x++;
             fc->is_multicell = false;
         }
-        if (implicit) record_written_line(self, s->prev.y, record);
+        if (implicit) {
+            record_written_line(self, s->prev.y, record);
+            bidi_note_may_reorder(self, s->prev.y, bidi_codepoint_may_reorder(ch));
+        }
     }
 #undef init_line
 #undef TEMPLATE_CELLS
@@ -3620,6 +3687,8 @@ handle_fixed_width_multicell_command(Screen *self, CPUCell mcd, ListOfChars *lc)
     }
     // Only a record written in bidi mode sets the flag, so with the mode off it cannot change in the loop
     const bool records_rows = self->modes.mBDSM || self->linebuf->bidi_stamped;
+    bool may_reorder = mcd.scale > 1;
+    for (size_t i = 0; records_rows && i < lc->count && !may_reorder; i++) may_reorder = bidi_char_sets_may_reorder(lc->chars[i]);
     for (index_type y = self->cursor->y; y < self->cursor->y + height; y++) {
         linebuf_init_cells(self->linebuf, y, &s.cp, NULL);
         linebuf_mark_line_dirty(self->linebuf, y);
@@ -3627,6 +3696,7 @@ handle_fixed_width_multicell_command(Screen *self, CPUCell mcd, ListOfChars *lc)
             if (self->linebuf->bidi_stamped && moved_to_other_rows) bidi_line_gets_text(self, y);
             // The first record written to a buffer is written while its flag is still unset
             record_written_line(self, y, current_bidi_record(self).val);
+            bidi_note_may_reorder(self, y, may_reorder);
         }
         mcd.x = 0;
         mcd.y = y - self->cursor->y;
@@ -5295,7 +5365,10 @@ screen_erase_in_display(Screen *self, unsigned int how, bool private) {
             LineAttrs *a = self->linebuf->line_attrs + self->cursor->y;
             const LineAttrs record = *a;
             linebuf_clear_attrs_and_dirty(self->linebuf, self->cursor->y);
-            if (UNLIKELY(self->linebuf->bidi_stamped)) line_attrs_set_bidi(a, record);
+            if (UNLIKELY(self->linebuf->bidi_stamped)) {
+                line_attrs_set_bidi(a, record);
+                a->bidi_may_reorder = record.bidi_may_reorder;
+            }
         }
     }
     if (how == 3 && self->linebuf == self->main_linebuf) { screen_clear_scrollback(self); }
@@ -10388,6 +10461,17 @@ test_bidi_line_record(Screen *self, PyObject *val) {
 }
 
 static PyObject *
+test_bidi_may_reorder(Screen *self, PyObject *val) {
+    unsigned long y = PyLong_AsUnsignedLong(val);
+    if (PyErr_Occurred()) return NULL;
+    if (y >= self->lines) {
+        PyErr_SetString(PyExc_IndexError, "line out of range");
+        return NULL;
+    }
+    return Py_NewRef(self->linebuf->line_attrs[y].bidi_may_reorder ? Py_True : Py_False);
+}
+
+static PyObject *
 test_bidi_v2l(Screen *self, PyObject *val) {
     const unsigned long r = PyLong_AsUnsignedLong(val);
     if (PyErr_Occurred()) return NULL;
@@ -10502,6 +10586,7 @@ static PyMethodDef methods[] = {
     METHODB(style_table_info, METH_NOARGS),
     METHODB(test_set_style_table_limit, METH_O),
     METHODB(test_bidi_line_record, METH_O),
+    METHODB(test_bidi_may_reorder, METH_O),
     METHODB(test_bidi_v2l, METH_O),
     METHODB(test_render_levels, METH_VARARGS),
     METHODB(test_bidi_resolved, METH_NOARGS),

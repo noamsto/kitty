@@ -414,6 +414,76 @@ class TestBidiReorder(BaseTest):
         draw_coloured(s, MIXED)
         self.ae(styles(s)[:6], [s.cell_style_idx(0, x) for x in range(6)])
 
+    def test_may_reorder_writers(self):
+        # on a stamped buffer each writer marks the row it stores a char that may reorder on, and nothing else does
+        from kitty.fast_data_types import test_set_batched_non_ascii_draw
+
+        def stamped(*seqs):
+            s = self.screen('x\x1b[2H', *seqs, cols=10, lines=3)
+            frame(s)
+            return s
+
+        s = stamped()
+        self.ae([s.test_bidi_may_reorder(y) for y in range(3)], [False] * 3)
+        pb(s, 'ab' + A)
+        self.ae((s.test_bidi_may_reorder(1), visual(s, 1)), (True, 'abגבא'))
+        s = stamped()
+        test_set_batched_non_ascii_draw(False)
+        try:
+            pb(s, 'ab' + A)
+        finally:
+            test_set_batched_non_ascii_draw(True)
+        self.ae((s.test_bidi_may_reorder(1), visual(s, 1)), (True, 'abגבא'))
+        for added in ('\u05b0', RLM, '\u2067', '\u061c'):
+            s = stamped()
+            pb(s, 'a' + added)
+            self.assertTrue(s.test_bidi_may_reorder(1), repr(added))
+        s = stamped()
+        pb(s, 'a' + LRM + '\u0301b')
+        self.assertFalse(s.test_bidi_may_reorder(1))
+        s = stamped('\x1b]66;s=2;ab\x07')
+        self.ae([s.test_bidi_may_reorder(y) for y in range(3)], [False, True, True])
+
+    def test_may_reorder_when_stamped(self):
+        # a buffer getting its first record marks the rows written before, on screen and in the history paragraph its first row
+        # continues
+        s = self.create_screen(cols=10, lines=3, options={})
+        s.draw(A)
+        pb(s, '\x1b[8hx')
+        self.ae((s.test_bidi_may_reorder(0), visual(s, 0)), (True, 'גבאx'))
+        s = self.create_screen(cols=5, lines=2, scrollback=10, options={'pixel_scroll': False})
+        s.draw('אבגדה' + 'וזח')
+        pb(s, '\r\n\x1b[8hab')
+        self.ae((str(s.historybuf.line(0)), s.test_bidi_may_reorder(0)), ('אבגדה', True))
+        # without a record its history line stays in logical order
+        s = self.create_screen(cols=5, lines=2, scrollback=10, options={'pixel_scroll': False})
+        s.draw(A)
+        pb(s, '\r\n\r\n\x1b[8hab')
+        self.ae(s.historybuf.count, 1)
+        s.scroll(1, True)
+        self.assertIsNone(orders(s)[0])
+
+    def test_may_reorder_base(self):
+        # a stamped paragraph with nothing that may reorder still has odd levels at a right-to-left base
+        s = self.screen(SCP_RTL, AUTO, text='12 34')
+        self.ae((s.test_bidi_may_reorder(0), visual(s)), (False, ' ' * 5 + '34 12'))
+
+    def test_may_reorder_reflow(self):
+        # rows joined by a reflow keep the bit of each, also when only the continuation has it
+        s = self.screen(cols=5, text='abcde')
+        pb(s, '\x1b[8l' + A)
+        self.ae((s.test_bidi_line_record(1)[0], s.test_bidi_may_reorder(1), visual(s, 1)), (0, True, 'גבא'))
+        s.resize(5, 10)
+        self.ae((s.test_bidi_may_reorder(0), visual(s, 0)), (True, 'abcdeגבא'))
+        # the lower row of a scaled char rewrapped onto a row of its own keeps the bit
+        s = self.screen(cols=6, lines=4, text='abcd')
+        pb(s, '\x1b]66;s=2;x\x07' + A)
+        s.resize(4, 3)
+        rows = [y for y in range(4) if any(s.cpu_cells(y, x)['mcd'] for x in range(3))]
+        self.ae(len(rows), 2)
+        self.ae([s.test_bidi_may_reorder(y) for y in rows], [True, True])
+        frame(s)
+
     def test_paragraph_over_rows(self):
         # the continuation row has no RTL char of its own and is laid out with its paragraph, also from the history
         s = self.paragraph('אבגדה', '12 34')
@@ -1811,8 +1881,7 @@ class TestBidiReorder(BaseTest):
                         frame(framed)
                         name += ' frame'
                     done.append(name)
-            # the upload memoizes in a row's stamp whether it holds right-to-left text
-            records = [[(bool(r[0]), *r[1:]) for r in map(x.test_bidi_line_record, range(x.lines))] for x in (framed, unframed)]
+            records = [list(map(x.test_bidi_line_record, range(x.lines))) for x in (framed, unframed)]
             self.ae(records[0], records[1], f'seed {seed}: {done}')
             self.ae(frame(framed), frame(unframed), f'seed {seed}: {done}')
 
@@ -2092,9 +2161,9 @@ class TestBidiReorder(BaseTest):
             ('bidi off text onto a row a mark primed', AUTO + '\x1b[H' + RLM, at(2) + off('abc'), (20,), (' ' * 5 + 'abc', (0, False, False))),
             # a row with text beside the region keeps what it has
             ('recorded text onto bidi off text', off(A), at(2) + A, (20,), (A + '  ' + A, (0, False, False))),
-            ('onto a recorded row with text beside', SCP_RTL + 'אבגדה', at(2) + SCP_LTR + 'abc', (20,), ('הדגבא' + ' ' * 7 + 'abc', (2, True, False))),
+            ('onto a recorded row with text beside', SCP_RTL + 'אבגדה', at(2) + SCP_LTR + 'abc', (20,), ('הדגבא' + ' ' * 7 + 'abc', (1, True, False))),
             # through a kept row and back, with a frame while the row holds no text
-            ('through a kept row', at(1) + SCP_RTL + A, '', (20, -20), (' ' * 12 + 'גבא', (2, True, False))),
+            ('through a kept row', at(1) + SCP_RTL + A, '', (20, -20), (' ' * 12 + 'גבא', (1, True, False))),
         ):
             with self.subTest(name):
                 s = self.screen('\x1b[H' + row0 + '\x1b[2H' + row1, cols=20, lines=3, pixel_scroll=False)
