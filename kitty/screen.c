@@ -3653,15 +3653,10 @@ draw_text_implicit(Screen *self, const uint32_t *chars, size_t num_chars) {
     draw_text_loop_(self, chars, num_chars, &s, true, current_bidi_record(self).val);
 }
 
-static inline bool
-writes_are_recorded(Screen *self) {
-    return self->modes.mBDSM || self->linebuf->bidi_stamped;
-}
-
 static void
 draw_text_in_mode(Screen *self, const uint32_t *chars, size_t num_chars) {
 #ifdef DEBUG
-    if (writes_are_recorded(self) && !self->bidi_records_writes) fatal("bidi: writes that must be recorded take the plain draw loop");
+    if ((self->modes.mBDSM || self->linebuf->bidi_stamped) && !self->bidi_records_writes) fatal("bidi: writes that must be recorded take the plain draw loop");
 #endif
     if (UNLIKELY(self->bidi_records_writes)) draw_text_implicit(self, chars, num_chars);
     else draw_text(self, chars, num_chars);
