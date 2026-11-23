@@ -530,6 +530,24 @@ class TestBidiReorder(BaseTest):
         frame(s)
         self.assertFalse(s.test_writes_are_recorded())
 
+    def test_writes_follow_the_active_buffer_across_the_alternate_screen(self):
+        s = self.create_screen(cols=5, lines=2, scrollback=10, options={'pixel_scroll': False})
+        pb(s, '\x1b[?1049h\x1b[8hab\x1b[8l')
+        frame(s)
+        self.assertTrue(s.test_writes_are_recorded())
+        pb(s, '\x1b[?1049l')
+        frame(s)
+        self.assertFalse(s.test_writes_are_recorded())
+        # a record on the main screen takes no hold on the alternate one
+        s = self.create_screen(cols=5, lines=2, scrollback=10, options={'pixel_scroll': False})
+        pb(s, '\x1b[8h' + A + '\x1b[8l')
+        frame(s)
+        self.assertTrue(s.test_writes_are_recorded())
+        pb(s, '\x1b[?1049h')
+        self.assertFalse(s.test_writes_are_recorded())
+        pb(s, '\x1b[?1049l')
+        self.assertTrue(s.test_writes_are_recorded())
+
     def test_may_reorder_base(self):
         # a stamped paragraph with nothing that may reorder still has odd levels at a right-to-left base
         s = self.screen(SCP_RTL, AUTO, text='12 34')
