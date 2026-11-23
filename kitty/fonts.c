@@ -1870,9 +1870,11 @@ render_group(
     if (rtl_group && !subscaled && !center_glyph && !was_colored) {
         // A glyph narrower than its group (lam-alef in a monospace font) sits in the group's last cells, so that it
         // touches the letter it joins. Advances can be zero and ink narrower than the box, so use the larger of the two.
-        const unsigned used = MIN(ri.canvas_width, MAX(inked_width(canvas, ri.canvas_width, scaled_metrics.cell_height), ri.rendered_width));
+        // The shift never moves ink off the canvas.
+        const unsigned inked = inked_width(canvas, ri.canvas_width, scaled_metrics.cell_height);
+        const unsigned used = MIN(ri.canvas_width, MAX(inked, ri.rendered_width));
         const unsigned unused = MIN(ri.canvas_width - used + scaled_metrics.cell_width / 8, ri.canvas_width - 1);
-        const unsigned delta = (unused / scaled_metrics.cell_width) * scaled_metrics.cell_width;
+        const unsigned delta = MIN((unused / scaled_metrics.cell_width) * scaled_metrics.cell_width, ri.canvas_width - inked);
         if (delta) right_shift_canvas(canvas, ri.canvas_width, scaled_metrics.cell_height, delta);
     }
     if (PyErr_Occurred()) PyErr_Print();
