@@ -731,6 +731,20 @@ bidi_paragraph_of(const BidiRows *src, int y, int lo, int hi, int *first, int *l
     *last = l;
 }
 
+// Whether a row of [first, last) has text not rendered yet
+static bool
+bidi_rows_dirty(const BidiRows *src, int first, int last) {
+    int y = first;
+    for (; y < MIN(last, 0); y++) {
+        if (bidi_row_attrs(src, y)->has_dirty_text) return true;
+    }
+    const LineAttrs *a = src->screen->linebuf->line_attrs;
+    for (; y < last; y++) {
+        if (a[y].has_dirty_text) return true;
+    }
+    return false;
+}
+
 // Sets the levels of every render row, each paragraph bounded by bidi_window(). A walk not shown leaves the window of the last
 // shown one, which the rendered levels are for. With reuse, the walk the maps are from showed the same rows, which cannot have
 // moved, so only the dirty paragraphs are mapped again.
@@ -763,7 +777,10 @@ bidi_map_rows(BidiMaps *b, const BidiRows *src, bool shown, bool reuse) {
             b->relevel[y - top] = false;
         }
     }
-    for (int y = MAX(top, src->lowest); y < MIN(end, src->end);) {
+    // No paragraph of the rows on view can have a dirty row: rows above the view are not checked, and the rows below it in the
+    // window are those down to hi
+    if (reuse && !bidi_rows_dirty(src, MAX(top, src->lowest), hi)) memset(b->relevel, 0, b->rows * sizeof(b->relevel[0]));
+    else for (int y = MAX(top, src->lowest); y < MIN(end, src->end);) {
         int first, last;
         bidi_paragraph_of(src, y, lo, hi, &first, &last);
         const bool cut = (lo_moved && first == lo && range_line_is_continued(src->screen, first)) ||
