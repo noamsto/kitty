@@ -267,7 +267,6 @@ do_screen_reset(Screen *self, bool is_hard_reset) {
         self->main_linebuf->bidi_stamped = self->alt_linebuf->bidi_stamped = false;
         bidi_maps_free(self->bidi_maps);
         self->bidi_maps = NULL;
-        self->bidi_mode_was_set = false;
         // all buffers are now empty
         self->multiline_chars_used = false;
         zero_at_ptr(&self->multiline_chars_cut_off_at_bottom);
@@ -3594,9 +3593,12 @@ draw_text_implicit(Screen *self, const uint32_t *chars, size_t num_chars) {
     draw_text_loop_(self, chars, num_chars, &s, true, current_bidi_record(self).val);
 }
 
+static inline bool
+writes_are_recorded(Screen *self) { return self->modes.mBDSM || self->linebuf->bidi_stamped; }
+
 static void
 draw_text_in_mode(Screen *self, const uint32_t *chars, size_t num_chars) {
-    if (UNLIKELY(self->bidi_mode_was_set)) draw_text_implicit(self, chars, num_chars);
+    if (UNLIKELY(writes_are_recorded(self))) draw_text_implicit(self, chars, num_chars);
     else draw_text(self, chars, num_chars);
 }
 
@@ -4277,7 +4279,6 @@ set_mode_from_const(Screen *self, unsigned int mode, bool val) {
         case DECNRCM: break; // we ignore these modes
         case BDSM:
             self->modes.mBDSM = val;
-            if (val) self->bidi_mode_was_set = true;
             break;
         case BIDI_AUTODETECT: self->modes.mBIDI_AUTODETECT = val; break;
         case DECCKM: self->modes.mDECCKM = val; break;
@@ -10461,6 +10462,11 @@ test_bidi_line_record(Screen *self, PyObject *val) {
 }
 
 static PyObject *
+test_writes_are_recorded(Screen *self, PyObject *args UNUSED) {
+    return PyBool_FromLong(writes_are_recorded(self));
+}
+
+static PyObject *
 test_bidi_may_reorder(Screen *self, PyObject *val) {
     unsigned long y = PyLong_AsUnsignedLong(val);
     if (PyErr_Occurred()) return NULL;
@@ -10587,6 +10593,7 @@ static PyMethodDef methods[] = {
     METHODB(test_set_style_table_limit, METH_O),
     METHODB(test_bidi_line_record, METH_O),
     METHODB(test_bidi_may_reorder, METH_O),
+    METHODB(test_writes_are_recorded, METH_NOARGS),
     METHODB(test_bidi_v2l, METH_O),
     METHODB(test_render_levels, METH_VARARGS),
     METHODB(test_bidi_resolved, METH_NOARGS),

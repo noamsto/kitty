@@ -383,8 +383,6 @@ typedef struct {
         } main_stash; // main's controls while alt is active
     } bidi;
     struct BidiMaps *bidi_maps; // allocated by the first upload of a stamped buffer
-    // Bidi mode was set since the last hard reset: text is written by the copy of the draw loop that keeps the line records
-    bool bidi_mode_was_set;
 } Screen;
 
 #define live_pixel_scroll_enabled(screen) (OPT(pixel_scroll) && (screen)->linebuf == (screen)->main_linebuf)

@@ -121,6 +121,17 @@ class TestBidi(BaseTest):
                 pb(s, pre + '\x1b[8h' + data)
                 self.ae(tuple(y for y in range(s.lines) if s.test_bidi_line_record(y)[0]), want)
 
+    def test_writes_are_recorded_while_mode_is_on_or_a_record_is_held(self):
+        s = self.screen()
+        self.assertFalse(s.test_writes_are_recorded())
+        pb(s, '\x1b[8h\x1b[8l')
+        self.assertFalse(s.test_writes_are_recorded())
+        pb(s, '\x1b[8h')
+        self.assertTrue(s.test_writes_are_recorded())
+        s = self.screen()
+        pb(s, '\x1b[8ha\x1b[8l')
+        self.assertTrue(s.test_writes_are_recorded())
+
     def test_controls_mark_nothing_dirty(self):
         s = self.screen()
         pb(s, '\x1b[8ha\r\nb\r\x1b[K')
