@@ -376,7 +376,7 @@ bidi_recompute_may_reorder(Screen *self, LineBuf *lb) {
     if (lb == self->main_linebuf) screen_bidi_recompute_history_may_reorder(self);
 }
 
-static void __attribute__((noinline, cold))
+static void
 bidi_buffer_gets_stamp(Screen *self, LineBuf *lb) {
     bidi_layout_moved(self);
     lb->bidi_maybe_unstamp = true;
@@ -1867,7 +1867,7 @@ ssr_render_overflow_line(Screen *self, SmoothScrollRegion *r, index_type y, Line
     linebuf_mark_line_clean(r->overflow, y);
 }
 
-static void __attribute__((noinline))
+static void
 ssr_write_strip_cells_in_order(BidiMaps *b, const Line *line, index_type x, index_type width, CellGPUData *dest) {
     // The cells in the order the screen shows them, see bidi_row_order()
     const uint16_t *v2l = bidi_span_order(b, line->render_cells + x, width);
@@ -3712,7 +3712,7 @@ decode_utf8_safe_string(const uint8_t *src, size_t sz, uint32_t *dest) {
     return d;
 }
 
-static bool __attribute__((noinline))
+static bool
 multicell_may_reorder(unsigned scale, const ListOfChars *lc) {
     if (scale > 1) return true;
     for (size_t i = 0; i < lc->count; i++) {
