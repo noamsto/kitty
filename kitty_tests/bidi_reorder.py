@@ -2128,6 +2128,27 @@ class TestBidiReorder(BaseTest):
                     seen.append(strips(s, frame(s))[1][row])
                     self._screens_to_verify_styles.remove(s)
                 self.ae(seen[0], seen[1])
+        # a kept row whose paragraph reaches into the history, where a pop in the step before left the bits unrefreshed
+        seen = []
+        for framed in (True, False):
+            s = self.create_screen(cols=5, lines=3, scrollback=10, options={'pixel_scroll': False})
+            pb(s, AUTO)
+            s.draw('אבגדה' + 'ab')
+            self.assertTrue(s.smooth_scroll_define(1, 0, 0, 5, 2, 1, False))
+            self.ae(s.smooth_scroll(1, 40), 2)
+            self.ae(s.historybuf.count, 2)
+            pb(s, '\x1b[3;1H\x1b[8hx\x1b[8l')
+            self.ae(s.smooth_scroll(1, -20), -1)
+            self.ae((s.historybuf.count, str(s.historybuf.line(0))), (1, 'אבגדה'))
+            pb(s, '\x1b[1;5H\x1b[8hbc\x1b[8l')
+            self.assertTrue(s.linebuf.is_continued(1))
+            s.scroll(1, True)
+            if framed:
+                frame(s)
+            s.smooth_scroll(1, -5)
+            seen.append(strips(s, frame(s))[1][-1])
+            self._screens_to_verify_styles.remove(s)
+        self.ae(seen[0], seen[1])
 
     def test_full_width_region_strip_paused(self):
         # a paused frame shows the strip the live frame showed, the scrollback line without pixel scroll as with bidi mode off
