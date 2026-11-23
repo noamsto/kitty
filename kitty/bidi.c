@@ -997,6 +997,7 @@ bidi_prepare_live(Screen *self, bool shown) {
     }
 #endif
     b->last_walk_reused = reuse;
+    b->mapped = memchr(b->has_levels, true, rows) || memchr(b->relevel, true, rows);
     b->reusable = shown;
     b->walk_generation = self->bidi_layout_generation;
     b->walk_pushed = hb->num_pushed;

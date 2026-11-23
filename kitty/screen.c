@@ -2570,16 +2570,12 @@ bidi_note_may_reorder(Screen *self, index_type y, bool may_reorder) {
     if (may_reorder) self->linebuf->line_attrs[y].bidi_may_reorder = true;
 }
 
-// After a batched run of n chars drawn on row y
-static void
-bidi_note_run(Screen *self, index_type y, const uint32_t *chars, size_t n) {
-    if (self->linebuf->line_attrs[y].bidi_may_reorder) return;
-    for (size_t i = 0; i < n; i++) {
-        if (bidi_codepoint_may_reorder(chars[i])) {
-            self->linebuf->line_attrs[y].bidi_may_reorder = true;
-            return;
-        }
-    }
+// After a batched run drawn on row y. Its chars are not looked at: the bit may be set for a row that cannot reorder, which the
+// walk resolving the dirty row clears.
+static inline void
+bidi_note_run(Screen *self, index_type y) {
+    LineAttrs *a = self->linebuf->line_attrs + y;
+    if (!a->bidi_may_reorder) a->bidi_may_reorder = true;
 }
 
 // Called before text is stored on line y: a record the line kept while it held no text is not the record of that text
@@ -3506,7 +3502,7 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
                 if (n) {
                     if (implicit) {
                         record_written_line(self, self->cursor->y, record);
-                        bidi_note_run(self, self->cursor->y, chars + i, n);
+                        bidi_note_run(self, self->cursor->y);
                     }
                     i += n - 1;
                     continue;
@@ -6849,6 +6845,15 @@ screen_ime_anchor_x(Screen *self) {
 }
 // }}}
 
+#ifdef DEBUG
+static void
+bidi_check_unmapped_levels(const Line *line) {
+    for (index_type x = 0; x < line->xnum; x++) {
+        if (line->render_cells[x].level) fatal("bidi: a row of a frame with no row mapped holds levels");
+    }
+}
+#endif
+
 void
 screen_update_cell_data(Screen *self, void *address, FONTS_DATA_HANDLE fonts_data, bool cursor_has_moved) {
     if (self->paused_rendering.expires_at) {
@@ -6891,6 +6896,8 @@ screen_update_cell_data(Screen *self, void *address, FONTS_DATA_HANDLE fonts_dat
     const int render_row_offset = pixel_scroll_enabled(self);
     BidiMaps *b = UNLIKELY(bidi_live_frame_reorders(self)) ? bidi_prepare_live(self, true) : NULL;
     if (!b && self->bidi_maps) bidi_frame_unmapped(self);
+    // With no row mapped the rows are uploaded as without maps, and the levels stored in their render cells are already 0
+    const bool mapped = UNLIKELY(b) && b->mapped;
     Line line = {.text_cache = self->text_cache};
     const uint8_t *levels = NULL;
     const uint16_t *v2l = NULL;
@@ -6904,7 +6911,7 @@ screen_update_cell_data(Screen *self, void *address, FONTS_DATA_HANDLE fonts_dat
             update_line_data_blank(self->columns, render_row, address);
             continue;
         }
-        if (UNLIKELY(b)) {
+        if (UNLIKELY(mapped)) {
             levels = NULL;
             v2l = NULL;
             relevel = bidi_row(b, render_row, &levels, &v2l);
@@ -6915,14 +6922,20 @@ screen_update_cell_data(Screen *self, void *address, FONTS_DATA_HANDLE fonts_dat
             screen_render_line_graphics(self, linep, virtual_y - (int)self->scrolled_by);
             if (force_history_render || linep->attrs.has_dirty_text || relevel) {
                 render_line(fonts_data, linep, lnum, self->cursor, self->disable_ligatures, self->lc, levels);
-                if (UNLIKELY(b)) bidi_store_levels(b, render_row, linep);
+                if (UNLIKELY(mapped)) bidi_store_levels(b, render_row, linep);
+#ifdef DEBUG
+                else if (b) bidi_check_unmapped_levels(linep);
+#endif
                 if (screen_has_marker(self)) mark_text_in_line(self->marker, linep, &self->as_ansi_buf);
                 historybuf_mark_line_clean(self->historybuf, lnum);
             }
         } else {
             if (linep->attrs.has_dirty_text || (cursor_has_moved && (self->cursor->y == lnum || self->last_rendered.cursor.y == lnum)) || relevel) {
                 render_line(fonts_data, linep, lnum, self->cursor, self->disable_ligatures, self->lc, levels);
-                if (UNLIKELY(b)) bidi_store_levels(b, render_row, linep);
+                if (UNLIKELY(mapped)) bidi_store_levels(b, render_row, linep);
+#ifdef DEBUG
+                else if (b) bidi_check_unmapped_levels(linep);
+#endif
                 screen_render_line_graphics(self, linep, virtual_y - (int)self->scrolled_by);
                 if (linep->attrs.has_dirty_text && screen_has_marker(self)) mark_text_in_line(self->marker, linep, &self->as_ansi_buf);
                 if (is_overlay_active && lnum == self->overlay_line.ynum) render_overlay_line(self, linep, fonts_data);

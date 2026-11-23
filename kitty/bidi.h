@@ -77,6 +77,7 @@ typedef struct BidiMaps {
     const struct BidiRows *walk; // the rows of the walk in progress
     unsigned resolved;           // paragraphs mapped from their text by the walk of the last upload
     bool last_walk_reused;       // the walk of the last upload kept the maps of the paragraphs without a change
+    bool mapped;                 // some row of the last walk has levels or must be rendered again
     // The rows resolved by the last shown walk, numbered as history lines are
     int64_t window_lo, window_hi;
     // Per screen row below the view, which stays dirty until shown: a hash of it as the last shown resolve read it, valid
