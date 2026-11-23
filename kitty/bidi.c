@@ -1039,7 +1039,7 @@ bidi_strip_line_levels(BidiMaps *b, Line *line, bool fixed) {
 
 // The paragraph of row y is bounded by bidi_window() and its rows checked as in bidi_map_paragraph(), but by dirty text
 // alone: no walk keeps a window edge that moved or the hash of a row below the view here.
-void
+void __attribute__((noinline, cold))
 bidi_store_kept_row_levels(Screen *self, index_type y, index_type left, index_type width, RenderCell *rc) {
     if (UNLIKELY(self->bidi_history_bits_stale)) screen_bidi_recompute_history_may_reorder(self);
     const int top = -(int)(self->scrolled_by + pixel_scroll_enabled(self));
