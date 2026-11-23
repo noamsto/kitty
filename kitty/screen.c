@@ -3213,7 +3213,7 @@ is_plain_combining_char(char_type ch, GraphemeSegmentationResult seg, CharProps 
     return ch != VS15 && ch != VS16 && !(seg.grapheme_break == GBP_SpacingMark && wcwidth_std(props) > 0);
 }
 
-static inline size_t
+static inline __attribute__((always_inline)) size_t
 draw_combining_char_run(Screen *self, text_loop_state *s, char_type ch, CharProps props, const uint32_t *rest, size_t num_rest) {
     // ch has been through grapheme segmentation, which added it to the previous
     // cell. Plain combining chars directly following it are added along with it,
