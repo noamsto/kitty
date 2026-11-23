@@ -388,11 +388,10 @@ typedef struct {
     bool bidi_history_bits_stale;    // see bidi_note_line_from_history()
 } Screen;
 
-// Text is drawn by the recording loop while bidi mode is on or either buffer has a stamp. With the mode off, the recording loop
-// leaves a buffer without a stamp as the plain one does, so the stamp of the other buffer does no harm, and one load picks the loop.
+// Text is drawn by the recording loop while bidi mode is on or the active buffer has a stamp, so that one load picks the loop
 static inline void
 screen_bidi_records_writes_changed(Screen *self) {
-    self->bidi_records_writes = self->modes.mBDSM || self->main_linebuf->bidi_stamped || self->alt_linebuf->bidi_stamped;
+    self->bidi_records_writes = self->modes.mBDSM || self->linebuf->bidi_stamped;
 }
 
 static inline void

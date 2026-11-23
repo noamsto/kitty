@@ -4288,8 +4288,8 @@ screen_toggle_screen_buffer(Screen *self, bool save_cursor, bool clear_alt_scree
         self->bidi.main_stash.mBIDI_AUTODETECT = self->modes.mBIDI_AUTODETECT;
         self->bidi.main_stash.rtl = self->bidi.rtl;
         self->modes.mBDSM = self->modes.mBIDI_AUTODETECT = self->bidi.rtl = false;
-        screen_bidi_records_writes_changed(self);
         self->linebuf = self->alt_linebuf;
+        screen_bidi_records_writes_changed(self);
         self->tabstops = self->alt_tabstops;
         self->key_encoding_flags = self->alt_key_encoding_flags;
         self->grman = self->alt_grman;
@@ -4299,10 +4299,10 @@ screen_toggle_screen_buffer(Screen *self, bool save_cursor, bool clear_alt_scree
     } else {
         self->alternate_screen.exited_at = monotonic();
         self->modes.mBDSM = self->bidi.main_stash.mBDSM;
-        screen_bidi_records_writes_changed(self);
         self->modes.mBIDI_AUTODETECT = self->bidi.main_stash.mBIDI_AUTODETECT;
         self->bidi.rtl = self->bidi.main_stash.rtl;
         self->linebuf = self->main_linebuf;
+        screen_bidi_records_writes_changed(self);
         self->tabstops = self->main_tabstops;
         self->key_encoding_flags = self->main_key_encoding_flags;
         if (save_cursor) screen_restore_cursor(self);
@@ -10572,7 +10572,7 @@ test_bidi_line_record(Screen *self, PyObject *val) {
 
 static PyObject *
 test_writes_are_recorded(Screen *self, PyObject *args UNUSED) {
-    return PyBool_FromLong(writes_are_recorded(self));
+    return PyBool_FromLong(self->bidi_records_writes);
 }
 
 static PyObject *
