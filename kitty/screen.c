@@ -3626,7 +3626,9 @@ draw_text_implicit(Screen *self, const uint32_t *chars, size_t num_chars) {
 }
 
 static inline bool
-writes_are_recorded(Screen *self) { return self->modes.mBDSM || self->linebuf->bidi_stamped; }
+writes_are_recorded(Screen *self) {
+    return self->modes.mBDSM || self->linebuf->bidi_stamped;
+}
 
 static void
 draw_text_in_mode(Screen *self, const uint32_t *chars, size_t num_chars) {
