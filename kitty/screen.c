@@ -2602,7 +2602,7 @@ draw_loop_line_gets_text(Screen *self, index_type y) {
     if (self->linebuf->line_attrs[y].bidi_stamp != BIDI_STAMP_NONE) bidi_line_gets_text(self, y);
 }
 
-static void __attribute__((noinline, cold))
+static void
 set_record_at_leading_mark(Screen *self, char_type ch, uint8_t record) {
     // A leading mark fixes the direction of a line that would otherwise take it from its text. A line without a record gets
     // none: its first text written in bidi mode takes the direction.
