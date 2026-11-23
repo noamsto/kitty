@@ -982,7 +982,6 @@ ssr_copy_row_to_slot(Screen *self, SmoothScrollRegion *r, index_type y, index_ty
     // The kept row carries the line's settings, as that layout left them, and the frames keep their bidi maps while it is drawn
     const LineAttrs laid_out = self->linebuf->line_attrs[y];
     line_attrs_set_bidi(dest, laid_out);
-    // Kept rows are drawn at their stored levels, never resolved, so their bits need no recompute
     if (line_has_bidi_bits(laid_out)) r->overflow->bidi_stamped = true;
 }
 

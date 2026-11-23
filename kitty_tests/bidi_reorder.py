@@ -20,6 +20,7 @@ from kitty.fast_data_types import (
     send_mock_mouse_event_to_window,
     sprite_idx_to_pos,
     test_render_line,
+    test_set_batched_non_ascii_draw,
 )
 from kitty.fonts.render import setup_for_testing
 
@@ -416,8 +417,6 @@ class TestBidiReorder(BaseTest):
 
     def test_may_reorder_writers(self):
         # on a stamped buffer each writer marks the row it stores a char that may reorder on, and nothing else does
-        from kitty.fast_data_types import test_set_batched_non_ascii_draw
-
         def stamped(*seqs):
             s = self.screen('x\x1b[2H', *seqs, cols=10, lines=3)
             frame(s)

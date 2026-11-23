@@ -655,8 +655,7 @@ bidi_map_paragraph(BidiMaps *b, const BidiRows *src, int first, int last, bool c
         return;
     }
     // Without a stamp the paragraph has no levels, and the bits of its rows may be stale. With one but no row holding a cell
-    // that may reorder, nor a right-to-left base, its levels are zero too; a raw stamp on a row without text only makes this
-    // stricter.
+    // that may reorder, nor a right-to-left base, its levels are zero too.
     bool stamped = false, reorders = false;
     for (int y = first; y <= last; y++) {
         const LineAttrs a = *bidi_row_attrs(src, y);

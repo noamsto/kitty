@@ -43,8 +43,7 @@ typedef struct {
     // num_pushed at the last bidi walk of a view of history lines only, 0
     // once lines were removed, see bidi_map_paragraph()
     uint64_t bidi_walked;
-    // Cache of bidi_history_line0_recorded(), keyed on what changes the history's lines: the pushed and count
-    // fields, and the screen height that bounds the walk
+    // Cache of bidi_history_line0_recorded(), keyed on the pushed and count fields and the screen height
     bool line0_recorded, line0_cache_valid;
     uint64_t line0_cache_pushed;
     index_type line0_cache_count, line0_cache_lines;
