@@ -1085,7 +1085,7 @@ ensure_glyph_render_scratch_space(size_t sz) {
 // HarfBuzz positions the glyphs of a right-to-left run for its visual order, which shape() reversed cluster by cluster,
 // so the runs of equal cluster are copied last to first, each in its own order. The originals stay as they are, the
 // shaped run cache keeps them.
-static void
+static __attribute__((noinline)) void
 copy_rtl_glyphs_in_visual_order(const hb_glyph_info_t *info, const hb_glyph_position_t *positions, unsigned num_glyphs) {
 #define a global_glyph_render_scratch
     ensure_space_for(&a, info, hb_glyph_info_t, num_glyphs, info_capacity, 64, false);
