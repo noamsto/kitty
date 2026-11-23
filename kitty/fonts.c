@@ -1754,7 +1754,7 @@ inked_width(const pixel *canvas, unsigned width, unsigned height) {
     return ans;
 }
 
-static void
+static inline __attribute__((always_inline)) void
 render_group(
     FontGroup *fg,
     unsigned num_cells,
