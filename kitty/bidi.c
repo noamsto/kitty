@@ -969,7 +969,10 @@ bidi_prepare_live(Screen *self, bool shown) {
                 stamped = line_has_bidi_record(a, &line);
             }
         }
-        if (!stamped) bidi_unstamp(lb);
+        if (!stamped) {
+            bidi_unstamp(lb);
+            screen_bidi_records_writes_changed(self);
+        }
     }
     // The history is the main screen's, shown above the alternate screen too when scrolled back
     if (!bidi_live_frame_reorders(self)) return NULL;

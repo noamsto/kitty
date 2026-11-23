@@ -377,6 +377,7 @@ bidi_buffer_gets_stamp(Screen *self, LineBuf *lb) {
     lb->bidi_maybe_unstamp = true;
     bidi_recompute_may_reorder(self, lb);
     lb->bidi_stamped = true;
+    screen_bidi_records_writes_changed(self);
 }
 
 static inline void
