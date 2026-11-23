@@ -356,9 +356,8 @@ bidi_note_maybe_unstamp(LineBuf *lb) {
 
 // Writes to a buffer without a stamp do not keep bidi_may_reorder, so it is recomputed for every row when the buffer gets one, and
 // for the main buffer also for the history rows its row 0 continues, which its first paragraph takes in
-static void
-bidi_buffer_stamped(Screen *self, LineBuf *lb) {
-    if (lb->bidi_stamped) return;
+static void __attribute__((noinline, cold))
+bidi_buffer_gets_stamp(Screen *self, LineBuf *lb) {
     bidi_layout_moved(self);
     lb->bidi_maybe_unstamp = true;
     for (index_type y = 0; y < lb->ynum; y++)
@@ -369,6 +368,12 @@ bidi_buffer_stamped(Screen *self, LineBuf *lb) {
             historybuf_attrs(hb, l)->bidi_may_reorder = bidi_cells_may_reorder(historybuf_cpu_cells(hb, l), hb->xnum, self->text_cache);
     }
     lb->bidi_stamped = true;
+}
+
+static inline void
+bidi_buffer_stamped(Screen *self, LineBuf *lb) {
+    if (LIKELY(lb->bidi_stamped)) return;
+    bidi_buffer_gets_stamp(self, lb);
 }
 
 // A rewrap can pull rows holding a record from the history into a buffer without a stamp
@@ -2553,6 +2558,7 @@ bidi_note_may_reorder(Screen *self, index_type y, bool may_reorder) {
 // After a batched run of n chars drawn on row y
 static void
 bidi_note_run(Screen *self, index_type y, const uint32_t *chars, size_t n) {
+    if (self->linebuf->line_attrs[y].bidi_may_reorder) return;
     for (size_t i = 0; i < n; i++) {
         if (bidi_codepoint_may_reorder(chars[i])) {
             self->linebuf->line_attrs[y].bidi_may_reorder = true;
@@ -3587,7 +3593,8 @@ draw_text_loop_(Screen *self, const uint32_t *chars, size_t num_chars, text_loop
         }
         if (implicit) {
             record_written_line(self, s->prev.y, record);
-            bidi_note_may_reorder(self, s->prev.y, bidi_codepoint_may_reorder(ch));
+            LineAttrs *a = self->linebuf->line_attrs + s->prev.y;
+            if (!a->bidi_may_reorder && bidi_codepoint_may_reorder(ch)) a->bidi_may_reorder = true;
         }
     }
 #undef init_line
