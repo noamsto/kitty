@@ -445,6 +445,7 @@ historybuf_pop_line(HistoryBuf *self, Line *line) {
     self->count--;
     self->num_pushed--;
     self->bidi_walked = 0;
+    self->line0_cache_valid = false;
     return true;
 }
 
@@ -464,6 +465,7 @@ historybuf_delete_newest_lines(HistoryBuf *self, index_type count) {
     count = MIN(self->count, count);
     self->num_pushed -= count;
     self->bidi_walked = 0;
+    self->line0_cache_valid = false;
     self->count -= count - 1;
     // now nuke multi cell chars that overlap onto the last line
     index_type idx = (self->start_of_data + self->count - 1) % self->ynum;
@@ -532,6 +534,7 @@ historybuf_delete_lines(HistoryBuf *self, index_type num_newer, index_type count
     // so their render cache rows, the moved newer lines are marked dirty above.
     self->num_pushed -= count;
     self->bidi_walked = 0;
+    self->line0_cache_valid = false;
 }
 
 static PyObject *

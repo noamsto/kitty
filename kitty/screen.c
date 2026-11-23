@@ -354,19 +354,27 @@ bidi_note_maybe_unstamp(LineBuf *lb) {
     if (UNLIKELY(lb->bidi_stamped)) lb->bidi_maybe_unstamp = true;
 }
 
-// Writes to a buffer without a stamp do not keep bidi_may_reorder, so it is recomputed for every row when the buffer gets one, and
-// for the main buffer also for the history rows its row 0 continues, which its first paragraph takes in
+static inline void
+bidi_line_may_reorder_from_cells(Screen *self, LineBuf *lb, index_type y) {
+    lb->line_attrs[y].bidi_may_reorder = bidi_cells_may_reorder(linebuf_cpu_cells_for_line(lb, y), lb->xnum, self->text_cache);
+}
+
+// Writes to a buffer without a stamp do not keep bidi_may_reorder, so it is recomputed for every row, and for the main buffer
+// also for the history rows its row 0 continues, which its first paragraph takes in however far a view scrolled back reaches
+static void
+bidi_recompute_may_reorder(Screen *self, LineBuf *lb) {
+    for (index_type y = 0; y < lb->ynum; y++) bidi_line_may_reorder_from_cells(self, lb, y);
+    if (lb != self->main_linebuf) return;
+    HistoryBuf *hb = self->historybuf;
+    for (index_type l = 0; l < hb->count && (l ? historybuf_is_line_continued(hb, l - 1) : history_buf_endswith_wrap(hb)); l++)
+        historybuf_attrs(hb, l)->bidi_may_reorder = bidi_cells_may_reorder(historybuf_cpu_cells(hb, l), hb->xnum, self->text_cache);
+}
+
 static void __attribute__((noinline, cold))
 bidi_buffer_gets_stamp(Screen *self, LineBuf *lb) {
     bidi_layout_moved(self);
     lb->bidi_maybe_unstamp = true;
-    for (index_type y = 0; y < lb->ynum; y++)
-        lb->line_attrs[y].bidi_may_reorder = bidi_cells_may_reorder(linebuf_cpu_cells_for_line(lb, y), lb->xnum, self->text_cache);
-    if (lb == self->main_linebuf) {
-        HistoryBuf *hb = self->historybuf;
-        for (index_type l = 0; l < hb->count && l < self->lines && (l ? historybuf_is_line_continued(hb, l - 1) : history_buf_endswith_wrap(hb)); l++)
-            historybuf_attrs(hb, l)->bidi_may_reorder = bidi_cells_may_reorder(historybuf_cpu_cells(hb, l), hb->xnum, self->text_cache);
-    }
+    bidi_recompute_may_reorder(self, lb);
     lb->bidi_stamped = true;
 }
 
@@ -376,10 +384,13 @@ bidi_buffer_stamped(Screen *self, LineBuf *lb) {
     bidi_buffer_gets_stamp(self, lb);
 }
 
-// A rewrap can pull rows holding a record from the history into a buffer without a stamp
+// A rewrap can pull rows holding a record, or a bit gone stale while the history kept them, from the history into a buffer
 static void
 bidi_buffer_rewrapped(Screen *self, LineBuf *lb) {
-    if (lb->bidi_stamped) return;
+    if (lb->bidi_stamped) {
+        bidi_recompute_may_reorder(self, lb);
+        return;
+    }
     bool stamped = lb == self->main_linebuf && self->historybuf->bidi_stamped && self->historybuf->count && history_buf_endswith_wrap(self->historybuf);
     for (index_type y = 0; y < lb->ynum && !stamped; y++) stamped = line_has_bidi_bits(lb->line_attrs[y]);
     if (stamped) bidi_buffer_stamped(self, lb);
@@ -633,10 +644,14 @@ bidi_index_up_seams(Screen *self, index_type top, index_type bottom, bool to_his
     if (bottom + 1 < lb->ynum) linebuf_mark_line_dirty(lb, bottom + 1);
 }
 
-// A line back from the history can hold a record, or continue a history line that holds one, while the main buffer holds none
+// A line back from the history in main buffer row y can hold a record, or continue a history line that holds one, while the main
+// buffer holds none. Its bit is stale if it was written to the buffer without a stamp.
 static void
-bidi_note_line_from_history(Screen *self, LineAttrs a) {
-    if (line_has_bidi_bits(a) || (self->historybuf->bidi_stamped && history_buf_endswith_wrap(self->historybuf))) bidi_buffer_stamped(self, self->main_linebuf);
+bidi_note_line_from_history(Screen *self, index_type y) {
+    LineBuf *lb = self->main_linebuf;
+    if (lb->bidi_stamped) bidi_line_may_reorder_from_cells(self, lb, y);
+    else if (line_has_bidi_bits(lb->line_attrs[y]) || (self->historybuf->bidi_stamped && history_buf_endswith_wrap(self->historybuf)))
+        bidi_buffer_gets_stamp(self, lb);
 }
 
 static void
@@ -1382,7 +1397,7 @@ ssr_shift_by_one_row(Screen *self, SmoothScrollRegion *r, bool up) {
             if (historybuf_pop_line(self->historybuf, self->alt_linebuf->line)) {
                 r->pushed_to_history--;
                 linebuf_copy_line_to(self->main_linebuf, self->alt_linebuf->line, top);
-                bidi_note_line_from_history(self, self->alt_linebuf->line->attrs);
+                bidi_note_line_from_history(self, top);
                 ssr_mark_row_dirty(self, top);
                 // Keep a scrolled back viewport anchored on the same content
                 if (self->scrolled_by) self->scrolled_by--;
@@ -2337,7 +2352,7 @@ screen_resize(Screen *self, unsigned int lines, unsigned int columns) {
             if (!historybuf_pop_line(self->historybuf, self->alt_linebuf->line)) break;
             INDEX_DOWN(true);
             linebuf_copy_line_to(self->main_linebuf, self->alt_linebuf->line, 0);
-            bidi_note_line_from_history(self, self->alt_linebuf->line->attrs);
+            bidi_note_line_from_history(self, 0);
             self->cursor->y++;
             sp->cursor.y = MIN(sp->cursor.y + 1, self->lines - 1);
         }
@@ -3663,6 +3678,7 @@ screen_align(Screen *self) {
     self->margin_bottom = self->lines - 1;
     screen_cursor_position(self, 1, 1);
     linebuf_clear(self->linebuf, 'E');
+    bidi_note_maybe_unstamp(self->linebuf);
 }
 
 static size_t
@@ -4954,7 +4970,7 @@ _reverse_scroll(Screen *self, unsigned int count, bool fill_from_scrollback) {
         INDEX_DOWN(copied);
         if (copied) {
             linebuf_copy_line_to(self->main_linebuf, self->alt_linebuf->line, 0);
-            bidi_note_line_from_history(self, self->alt_linebuf->line->attrs);
+            bidi_note_line_from_history(self, 0);
         }
     }
 }

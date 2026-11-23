@@ -462,6 +462,31 @@ class TestBidiReorder(BaseTest):
         self.ae(s.historybuf.count, 1)
         s.scroll(1, True)
         self.assertIsNone(orders(s)[0])
+        # also for a history row of that paragraph more than a screen height above row 0, which a view scrolled back lays out
+        s = self.create_screen(cols=5, lines=3, scrollback=50, options={'pixel_scroll': False})
+        s.draw('אבגדה' + 'a' * 30)
+        pb(s, '\x1b[H\x1b[8ha')
+        frame(s)
+        s.scroll(4, True)
+        frame(s)
+        self.ae(order(s, 0), (4, 3, 2, 1, 0))
+        # a history row written without a stamp and back in a stamped buffer gets its bit from its cells
+        s = self.create_screen(cols=5, lines=3, scrollback=10, options={'pixel_scroll': False})
+        pb(s, A + '\r\n\r\n\r\n\x1b[2;1H\x1b[8hy\x1b[8l')
+        s.reverse_scroll(1, True)
+        pb(s, '\x1b[1;4H\x1b[8hz\x1b[8l')
+        frame(s)
+        self.ae((str(s.line(0)), s.test_bidi_may_reorder(0), order(s, 0)), (A + 'z', True, (2, 1, 0, 3, 4)))
+
+    def test_pixel_scroll_row_after_history_pops(self):
+        # the leading row of pixel scrolling shows history line 0, which a pop and a push leave a different line with the same
+        # number of lines pushed
+        s = self.create_screen(cols=5, lines=3, scrollback=10, options={'pixel_scroll': True})
+        pb(s, '\x1b[8h' + A + '\r\n\x1b[8l' + 'x\r\n' * 4)
+        frame(s)
+        pb(s, '\x1b[1+T\x1b[H\x1b[8hבגד\x1b[8l\x1b[3;1H\n')
+        frame(s)
+        self.ae((str(s.historybuf.line(0)), s.test_bidi_v2l(0)), ('בגד', (2, 1, 0, 3, 4)))
 
     def test_writes_leave_the_recording_loop_after_the_last_record(self):
         opts = {'pixel_scroll': False}
@@ -485,6 +510,13 @@ class TestBidiReorder(BaseTest):
         # the record lapses at the first frame after the erase
         pb(s, '\x1b[2K')
         self.assertTrue(s.test_writes_are_recorded())
+        frame(s)
+        self.assertFalse(s.test_writes_are_recorded())
+        # and after a screen alignment test fills the screen
+        s = self.create_screen(cols=5, lines=2, scrollback=10, options=opts)
+        pb(s, '\x1b[8h' + A + '\x1b[8l')
+        frame(s)
+        pb(s, '\x1b#8')
         frame(s)
         self.assertFalse(s.test_writes_are_recorded())
 
