@@ -384,7 +384,15 @@ typedef struct {
     } bidi;
     struct BidiMaps *bidi_maps; // allocated by the first upload of a stamped buffer
     uint64_t bidi_layout_generation; // bumped where rows move or the inputs of their layout change, which reused maps would miss
+    bool bidi_records_writes;        // see screen_bidi_records_writes_changed()
 } Screen;
+
+// Text is drawn by the recording loop while bidi mode is on or either buffer has a stamp. With the mode off, the recording loop
+// leaves a buffer without a stamp as the plain one does, so the stamp of the other buffer does no harm, and one load picks the loop.
+static inline void
+screen_bidi_records_writes_changed(Screen *self) {
+    self->bidi_records_writes = self->modes.mBDSM || self->main_linebuf->bidi_stamped || self->alt_linebuf->bidi_stamped;
+}
 
 static inline void
 bidi_layout_moved(Screen *self) {

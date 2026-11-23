@@ -283,6 +283,7 @@ do_screen_reset(Screen *self, bool is_hard_reset) {
     self->modes = empty_modes;
     self->saved_modes = empty_modes;
     zero_at_ptr(&self->bidi);
+    screen_bidi_records_writes_changed(self);
     self->active_hyperlink_id = 0;
     zero_at_ptr(&self->color_profile->overridden);
     reset_vt_parser(self->vt_parser);
@@ -458,6 +459,7 @@ rewrap(
     screen->historybuf = mr.hb;
     screen->alt_linebuf = ar.lb;
     screen->linebuf = main_is_active ? screen->main_linebuf : screen->alt_linebuf;
+    screen_bidi_records_writes_changed(screen);
     bidi_buffer_rewrapped(screen, screen->main_linebuf);
     bidi_buffer_rewrapped(screen, screen->alt_linebuf);
     bidi_note_maybe_unstamp(screen->main_linebuf);
@@ -3650,7 +3652,10 @@ writes_are_recorded(Screen *self) {
 
 static void
 draw_text_in_mode(Screen *self, const uint32_t *chars, size_t num_chars) {
-    if (UNLIKELY(writes_are_recorded(self))) draw_text_implicit(self, chars, num_chars);
+#ifdef DEBUG
+    if (writes_are_recorded(self) && !self->bidi_records_writes) fatal("bidi: writes that must be recorded take the plain draw loop");
+#endif
+    if (UNLIKELY(self->bidi_records_writes)) draw_text_implicit(self, chars, num_chars);
     else draw_text(self, chars, num_chars);
 }
 
@@ -4274,6 +4279,7 @@ screen_toggle_screen_buffer(Screen *self, bool save_cursor, bool clear_alt_scree
         self->bidi.main_stash.mBIDI_AUTODETECT = self->modes.mBIDI_AUTODETECT;
         self->bidi.main_stash.rtl = self->bidi.rtl;
         self->modes.mBDSM = self->modes.mBIDI_AUTODETECT = self->bidi.rtl = false;
+        screen_bidi_records_writes_changed(self);
         self->linebuf = self->alt_linebuf;
         self->tabstops = self->alt_tabstops;
         self->key_encoding_flags = self->alt_key_encoding_flags;
@@ -4284,6 +4290,7 @@ screen_toggle_screen_buffer(Screen *self, bool save_cursor, bool clear_alt_scree
     } else {
         self->alternate_screen.exited_at = monotonic();
         self->modes.mBDSM = self->bidi.main_stash.mBDSM;
+        screen_bidi_records_writes_changed(self);
         self->modes.mBIDI_AUTODETECT = self->bidi.main_stash.mBIDI_AUTODETECT;
         self->bidi.rtl = self->bidi.main_stash.rtl;
         self->linebuf = self->main_linebuf;
@@ -4342,6 +4349,7 @@ set_mode_from_const(Screen *self, unsigned int mode, bool val) {
         case DECNRCM: break; // we ignore these modes
         case BDSM:
             self->modes.mBDSM = val;
+            screen_bidi_records_writes_changed(self);
             break;
         case BIDI_AUTODETECT: self->modes.mBIDI_AUTODETECT = val; break;
         case DECCKM: self->modes.mDECCKM = val; break;
