@@ -778,14 +778,17 @@ bidi_map_rows(BidiMaps *b, const BidiRows *src, bool shown, bool reuse) {
     }
     // No paragraph of the rows on view can have a dirty row: rows above the view are not checked, and the rows below it in the
     // window are those down to hi
-    if (reuse && !bidi_rows_dirty(src, MAX(top, src->lowest), hi)) memset(b->relevel, 0, b->rows * sizeof(b->relevel[0]));
-    else for (int y = MAX(top, src->lowest); y < MIN(end, src->end);) {
-        int first, last;
-        bidi_paragraph_of(src, y, lo, hi, &first, &last);
-        const bool cut = (lo_moved && first == lo && range_line_is_continued(src->screen, first)) ||
-                         (hi_moved && last + 1 == hi && range_line_is_continued(src->screen, hi));
-        bidi_map_paragraph(b, src, first, last, cut, shown, reuse);
-        y = last + 1;
+    if (reuse && !bidi_rows_dirty(src, MAX(top, src->lowest), hi)) {
+        memset(b->relevel, 0, b->rows * sizeof(b->relevel[0]));
+    } else {
+        for (int y = MAX(top, src->lowest); y < MIN(end, src->end);) {
+            int first, last;
+            bidi_paragraph_of(src, y, lo, hi, &first, &last);
+            const bool cut = (lo_moved && first == lo && range_line_is_continued(src->screen, first)) ||
+                             (hi_moved && last + 1 == hi && range_line_is_continued(src->screen, hi));
+            bidi_map_paragraph(b, src, first, last, cut, shown, reuse);
+            y = last + 1;
+        }
     }
     // A dirty row's soft wrap can change the paragraph of the row below it, which is checked only once shown
     const int below = MIN(end, src->end);
@@ -912,8 +915,8 @@ bidi_live_rows(Screen *self) {
 static bool
 bidi_walk_reusable(const BidiMaps *b, const BidiRows *src) {
     const HistoryBuf *hb = src->screen->historybuf;
-    return b->reusable && b->walk_generation == src->screen->bidi_layout_generation && b->walk_top == src->top &&
-           b->walk_pushed == hb->num_pushed && b->walk_count == hb->count && !b->edges_changed;
+    return b->reusable && b->walk_generation == src->screen->bidi_layout_generation && b->walk_top == src->top && b->walk_pushed == hb->num_pushed &&
+           b->walk_count == hb->count && !b->edges_changed;
 }
 
 bool

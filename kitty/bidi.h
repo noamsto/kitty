@@ -67,8 +67,8 @@ typedef struct BidiMaps {
     bool live;    // the last live upload ran the walk
     bool changed; // some row's levels changed since the selection last used the map
     bool selection_used_maps;
-    bool edges_changed;          // the edges of a region narrower than the screen moved: the next walk orders every row again
-    int walk_top;                // the row shown in render row 0 by the last walk
+    bool edges_changed; // the edges of a region narrower than the screen moved: the next walk orders every row again
+    int walk_top;       // the row shown in render row 0 by the last walk
     // The last walk was a shown live walk, after which no upload marked rows clean without one: the next walk keeps the maps of
     // its clean paragraphs when the layout generation, the history and walk_top are as it left them
     bool reusable;
@@ -144,11 +144,14 @@ bidi_kept_rows_stamped(const Screen *self) {
 static inline bool
 bidi_history_line0_recorded(const Screen *self) {
     HistoryBuf *hb = self->historybuf;
-    if (hb->line0_cache_valid && hb->line0_cache_pushed == hb->num_pushed && hb->line0_cache_count == hb->count &&
-            hb->line0_cache_lines == self->lines) return hb->line0_recorded;
+    if (hb->line0_cache_valid && hb->line0_cache_pushed == hb->num_pushed && hb->line0_cache_count == hb->count && hb->line0_cache_lines == self->lines)
+        return hb->line0_recorded;
     bool ans = false;
     for (index_type l = 0; l < hb->count && l <= self->lines; l++) {
-        if (historybuf_attrs(hb, l)->bidi_stamp != BIDI_STAMP_NONE) { ans = true; break; }
+        if (historybuf_attrs(hb, l)->bidi_stamp != BIDI_STAMP_NONE) {
+            ans = true;
+            break;
+        }
         if (!historybuf_is_line_continued(hb, l)) break;
     }
     hb->line0_recorded = ans;
