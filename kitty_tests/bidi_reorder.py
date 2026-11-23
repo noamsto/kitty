@@ -997,15 +997,27 @@ class TestBidiReorder(BaseTest):
         self.ae(s.test_bidi_resolved(), 3)
         before = maps()
         frame(s)
-        self.ae(s.test_bidi_resolved(), 0)
+        self.ae((s.test_bidi_resolved(), s.test_bidi_walk_reused()), (0, True))
         self.ae(maps(), before)
         self.assertTrue(s.test_bidi_walk_matches_full())
         pb(s, '\x1b[3;1Hאב')
         frame(s)
-        self.ae(s.test_bidi_resolved(), 1)
+        self.ae((s.test_bidi_resolved(), s.test_bidi_walk_reused()), (1, True))
         self.ae(maps()[0][:2], before[0][:2])
         self.assertNotEqual(order(s, 2), before[0][2])
         self.assertTrue(s.test_bidi_walk_matches_full())
+        # a resize or a scroll moves the rows, and the next frame maps every paragraph again
+        s.resize(4, 10)
+        frame(s)
+        self.ae((s.test_bidi_resolved(), s.test_bidi_walk_reused()), (4, False))
+        frame(s)
+        self.assertTrue(s.test_bidi_walk_reused())
+        pb(s, '\x1b[4;1H' + 'ab גד\r\n' * 3)
+        frame(s)
+        s.scroll(1, True)
+        frame(s)
+        self.assertIsNotNone(s.test_bidi_resolved())
+        self.assertFalse(s.test_bidi_walk_reused())
 
     def test_idle_uploads_with_output_below_the_view(self):
         # scrolled back, the rows below the view stay dirty, as they are not rendered: the paragraph they continue is resolved
@@ -1951,6 +1963,7 @@ class TestBidiReorder(BaseTest):
         # a seeded random stream given to a screen uploaded after random operations and to one uploaded only at the end leaves
         # the same records and the same final frame. Every frame of the first leaves maps a full walk would leave.
         kinds = {**self.DIFF_KINDS, **self.WRITER_KINDS, **self.REGION_KINDS, **self.RUN_KINDS, **self.BETWEEN_FRAMES_KINDS}
+        reused = []
         for seed in range(40):
             rng = random.Random(seed)
             framed, unframed = self.screen(cols=8, lines=6, scrollback=50), self.screen(cols=8, lines=6, scrollback=50)
@@ -1958,6 +1971,7 @@ class TestBidiReorder(BaseTest):
                 self._screens_to_verify_styles.remove(x)
                 parse_bytes(x, self.FLIP_START)
             done = []
+            reused.append(0)
             for _ in range(120):
                 kind = rng.choices(tuple(kinds), tuple(kinds.values()))[0]
                 if kind in self.REGION_KINDS or kind in self.RUN_KINDS:
@@ -1972,12 +1986,15 @@ class TestBidiReorder(BaseTest):
                     if kind in self.BETWEEN_FRAMES_KINDS or rng.random() < (0.5 if len(steps) > 1 else 0.3):
                         for _ in range(1 + (kind == 'again')):
                             frame(framed)
+                            reused[-1] += framed.test_bidi_walk_reused()
                             self.assertTrue(framed.test_bidi_walk_matches_full(), f'seed {seed}: {done + [name]}')
                         name += ' frame'
                     done.append(name)
             records = [list(map(x.test_bidi_line_record, range(x.lines))) for x in (framed, unframed)]
             self.ae(records[0], records[1], f'seed {seed}: {done}')
             self.ae(frame(framed), frame(unframed), f'seed {seed}: {done}')
+        # the frames reusing the maps are those whose debug builds compare them with a full walk
+        self.assertGreater(sum(reused), 0, reused)
 
     def test_full_width_region_scroll_joins_paragraphs(self):
         # a scroll of a full width region by a row joins or splits the auto-direction paragraphs across its top or bottom edge:

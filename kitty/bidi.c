@@ -996,6 +996,7 @@ bidi_prepare_live(Screen *self, bool shown) {
         bidi_maps_snapshot_free(&before);
     }
 #endif
+    b->last_walk_reused = reuse;
     b->reusable = shown;
     b->walk_generation = self->bidi_layout_generation;
     b->walk_pushed = hb->num_pushed;

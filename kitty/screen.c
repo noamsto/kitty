@@ -10603,6 +10603,11 @@ test_bidi_walk_matches_full(Screen *self, PyObject *a UNUSED) {
     return PyBool_FromLong(bidi_walk_matches_full(self));
 }
 
+static PyObject *
+test_bidi_walk_reused(Screen *self, PyObject *a UNUSED) {
+    return PyBool_FromLong(screen_bidi_maps_usable(self) && self->bidi_maps->last_walk_reused);
+}
+
 // Uploads repeat frames without a GPU, with the font group of the given size and dpi, returning the cell data of the last
 static PyObject *
 test_update_cell_data(Screen *self, PyObject *args) {
@@ -10682,6 +10687,7 @@ static PyMethodDef methods[] = {
     METHODB(test_render_levels, METH_VARARGS),
     METHODB(test_bidi_resolved, METH_NOARGS),
     METHODB(test_bidi_walk_matches_full, METH_NOARGS),
+    METHODB(test_bidi_walk_reused, METH_NOARGS),
     METHODB(test_update_cell_data, METH_VARARGS),
     METHODB(test_bidi_bracket_limit, METH_NOARGS),
     METHODB(test_bidi_logical_click, METH_VARARGS),
