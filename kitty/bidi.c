@@ -957,6 +957,7 @@ bidi_prepare_live(Screen *self, bool shown) {
     if (OPT(force_ltr)) return NULL;
     LineBuf *lb = self->linebuf;
     HistoryBuf *hb = self->historybuf;
+    if (UNLIKELY(self->bidi_history_bits_stale)) screen_bidi_recompute_history_may_reorder(self);
     if (lb->bidi_stamped && lb->bidi_maybe_unstamp && !(lb == self->main_linebuf && hb->bidi_stamped && hb->count && history_buf_endswith_wrap(hb))) {
         lb->bidi_maybe_unstamp = false;
         bool stamped = bidi_kept_rows_stamped(self);

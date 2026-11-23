@@ -362,13 +362,18 @@ bidi_line_may_reorder_from_cells(Screen *self, LineBuf *lb, index_type y) {
 
 // Writes to a buffer without a stamp do not keep bidi_may_reorder, so it is recomputed for every row, and for the main buffer
 // also for the history rows its row 0 continues, which its first paragraph takes in however far a view scrolled back reaches
-static void
-bidi_recompute_may_reorder(Screen *self, LineBuf *lb) {
-    for (index_type y = 0; y < lb->ynum; y++) bidi_line_may_reorder_from_cells(self, lb, y);
-    if (lb != self->main_linebuf) return;
+void
+screen_bidi_recompute_history_may_reorder(Screen *self) {
+    self->bidi_history_bits_stale = false;
     HistoryBuf *hb = self->historybuf;
     for (index_type l = 0; l < hb->count && (l ? historybuf_is_line_continued(hb, l - 1) : history_buf_endswith_wrap(hb)); l++)
         historybuf_attrs(hb, l)->bidi_may_reorder = bidi_cells_may_reorder(historybuf_cpu_cells(hb, l), hb->xnum, self->text_cache);
+}
+
+static void
+bidi_recompute_may_reorder(Screen *self, LineBuf *lb) {
+    for (index_type y = 0; y < lb->ynum; y++) bidi_line_may_reorder_from_cells(self, lb, y);
+    if (lb == self->main_linebuf) screen_bidi_recompute_history_may_reorder(self);
 }
 
 static void __attribute__((noinline, cold))
@@ -648,12 +653,15 @@ bidi_index_up_seams(Screen *self, index_type top, index_type bottom, bool to_his
 }
 
 // A line back from the history in main buffer row y can hold a record, or continue a history line that holds one, while the main
-// buffer holds none. Its bit is stale if it was written to the buffer without a stamp.
+// buffer holds none. Its bit is stale if it was written to the buffer without a stamp, and so are those of the history lines it
+// continues, which the next upload recomputes once for any number of pops.
 static void
 bidi_note_line_from_history(Screen *self, index_type y) {
     LineBuf *lb = self->main_linebuf;
-    if (lb->bidi_stamped) bidi_line_may_reorder_from_cells(self, lb, y);
-    else if (line_has_bidi_bits(lb->line_attrs[y]) || (self->historybuf->bidi_stamped && history_buf_endswith_wrap(self->historybuf)))
+    if (lb->bidi_stamped) {
+        bidi_line_may_reorder_from_cells(self, lb, y);
+        if (history_buf_endswith_wrap(self->historybuf)) self->bidi_history_bits_stale = true;
+    } else if (line_has_bidi_bits(lb->line_attrs[y]) || (self->historybuf->bidi_stamped && history_buf_endswith_wrap(self->historybuf)))
         bidi_buffer_gets_stamp(self, lb);
 }
 

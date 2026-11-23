@@ -478,6 +478,16 @@ class TestBidiReorder(BaseTest):
         frame(s)
         self.ae((str(s.line(0)), s.test_bidi_may_reorder(0), order(s, 0)), (A + 'z', True, (2, 1, 0, 3, 4)))
 
+    def test_may_reorder_of_history_rows_a_popped_row_continues(self):
+        # the history rows above a line popped into a stamped buffer were written without a stamp, and a record later
+        # written on that line lays them out
+        s = self.create_screen(cols=5, lines=3, scrollback=10, options={'pixel_scroll': False})
+        s.draw('אבגדה' + 'a' * 5)
+        pb(s, '\r\n\n\n\x1b[2;1H\x1b[8hx\x1b[8l\x1b[1+T\x1b[1;5H\x1b[8hb\x1b[8l')
+        s.scroll(1, True)
+        frame(s)
+        self.ae((str(s.historybuf.line(0)), order(s, 0)), ('אבגדה', (4, 3, 2, 1, 0)))
+
     def test_pixel_scroll_row_after_history_pops(self):
         # the leading row of pixel scrolling shows history line 0, which a pop and a push leave a different line with the same
         # number of lines pushed

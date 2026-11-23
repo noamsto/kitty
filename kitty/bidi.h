@@ -126,6 +126,8 @@ unsigned screen_bidi_span_edges(const Screen *self, index_type y, index_type *ed
 void screen_bidi_fixed_columns(const Screen *self, index_type y, BidiFixedColumns *ans);
 // Whether the strip of a shifted region shows the newest scrollback line, and that line has a record
 bool screen_bidi_strip_shows_recorded_history(const Screen *self);
+// Recomputes bidi_may_reorder of the history lines main buffer row 0 continues
+void screen_bidi_recompute_history_may_reorder(Screen *self);
 
 // Whether the rows kept by a region may hold a record, which their strip shows at the levels they were rendered at
 static inline bool
