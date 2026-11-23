@@ -38,6 +38,9 @@ type run_settings struct {
 	main_screen bool
 	// Allow the terminal to render while the data is being sent
 	render bool
+	// Turn on bidi mode (CSI 8 h) before the data, and off again in the
+	// reset that ends each loop
+	bidi bool
 }
 
 func default_settings() run_settings {
@@ -88,6 +91,9 @@ func benchmark_data(description string, data string, settings run_settings) (dur
 
 	start := time.Now()
 	end_of_loop_reset := desc
+	if settings.bidi {
+		end_of_loop_reset += "\x1b[8l"
+	}
 	if !settings.render {
 		end_of_loop_reset += resume_rendering + pause_rendering
 	}
@@ -226,6 +232,14 @@ func ascii_with_rendering() (r result, err error) {
 	s := default_settings()
 	s.render = true
 	return text_benchmark("ASCII text with rendering", data, cells, s)
+}
+
+func ascii_with_bidi() (r result, err error) {
+	data, cells := ascii_text()
+	s := default_settings()
+	s.render = true
+	s.bidi = true
+	return text_benchmark("ASCII text with rendering in bidi mode", "\x1b[8h"+data, cells, s)
 }
 
 func unicode_text() (string, int) {
@@ -445,6 +459,7 @@ func all_benchmarks() []benchmark {
 		{"unicode", "lines of non-ASCII text, the same lines, in cells, as ascii", unicode},
 		{"scrollback", "the ascii text, on the main screen so lines scrolled off the screen go into the scrollback", ascii_with_scrollback},
 		{"render", "the ascii text, with rendering allowed while it is processed", ascii_with_rendering},
+		{"bidi", "the ascii text, with rendering allowed while it is processed, in bidi mode", ascii_with_bidi},
 		{"unique_unicode", "cells with many distinct multi-codepoint graphemes", unique_unicode},
 		{"csi", "ASCII text mixed with many CSI escape codes", ascii_with_csi},
 		{"long_escape_codes", "long OSC escape codes", long_escape_codes},
