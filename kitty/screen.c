@@ -2553,7 +2553,7 @@ set_record_at_leading_mark(Screen *self, char_type ch, uint8_t record) {
     LineAttrs *a = self->linebuf->line_attrs + self->cursor->y;
     a->bidi_auto = a->bidi_stamp == BIDI_STAMP_NONE;
     a->bidi_rtl = ch == 0x200f; // RLM
-    self->linebuf->bidi_stamped = true;
+    bidi_buffer_stamped(self, self->linebuf);
 }
 
 // After a combining char was drawn, before is the text its cell held: the cell is the loop's previous cell now, which a widening
