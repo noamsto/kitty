@@ -1473,6 +1473,22 @@ class BidiRendering(BidiRenderingBase):
             rtl_idx, rtl = self.render_cells(self.line(lam_alef), [1, 1], sprites)
             self.ae(alpha(rtl), alpha(guessed))
             self.assertNotEqual(rtl_idx, guessed_idx)
+        # shifting the group towards the letter it joins must not push ink off the canvas, which depends on the cell width
+        with setup_for_testing(size=11.0, dpi=96.0, main_face_path=self.path_for_font('DejaVuSansMono.ttf')) as (sprites, cell_width, _):
+            for word in ('\u0633\u0644\u0627\u0645', '\u0633\u0644\u0627', '\u0628\u0644\u0627\u062f'):
+                with self.subTest(word=word):
+                    cols = len(word)
+
+                    def ink(levels):
+                        return [sum(c[0::4]) for c in self.render_cells(self.line(word, cols), levels, sprites)[1]]
+
+                    rtl_ink = ink([1] * cols)
+                    self.ae(sum(rtl_ink), sum(ink(None)))
+                    # the group is drawn right to left, its first cell on the right
+                    first = word.index('\u0644')
+                    self.assertGreater(rtl_ink[first], rtl_ink[first + 1])
+                    cell = self.render_cells(self.line(word, cols), [1] * cols, sprites)[1][first]
+                    self.assertTrue(any(cell[(cell_width - 1) * 4::cell_width * 4]))
 
     def test_rtl_combining_mark_position(self):
         # a mark that is not composed with its base is a cluster of its own in the base's cell, it must sit where it does
