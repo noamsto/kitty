@@ -198,8 +198,10 @@ apply again.
 
 The settings are per screen, like other per-screen modes. They are not carried
 into the alternate screen, which starts with them off, and the main screen's
-settings are restored on leaving it. ``CSI ? s`` and ``CSI ? r`` save and
-restore both modes and the direction set by SCP.
+settings are restored on leaving it. The exception is a soft reset (DECSTR) on
+the alternate screen, which clears them, so they are off when the main screen
+returns. ``CSI ? s`` and ``CSI ? r`` save and restore both modes and the
+direction set by SCP.
 
 Only the display is reordered. Text stays in logical order, so selecting and
 copying work on logical cells, and cell-based mouse reports carry logical

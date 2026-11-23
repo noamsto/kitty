@@ -46,8 +46,9 @@ typedef struct RenderCell {
     uint8_t level;
     uint8_t padding[2];
 } RenderCell;
-// The level of a scaled cell: never reordered, and its text shaped in the direction guessed from it. Even, and above the
-// levels FriBidi resolves.
+// The level of cells that are never reordered and are shaped in the direction guessed from their text: scaled cells,
+// cells of a horizontally scrolling region, multicells across a span edge, and rows of a recorded paragraph that are
+// left unreordered. Even, and above the levels FriBidi resolves.
 #define BIDI_LEVEL_FIXED 0x80
 static_assert(sizeof(RenderCell) == 8, "Fix the ordering of RenderCell");
 
