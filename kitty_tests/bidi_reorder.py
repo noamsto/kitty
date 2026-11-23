@@ -480,6 +480,13 @@ class TestBidiReorder(BaseTest):
         pb(s, '\x1b[8h' + A + '\x1b[8l')
         frame(s)
         self.assertTrue(s.test_writes_are_recorded())
+        frame(s)
+        self.assertTrue(s.test_writes_are_recorded())
+        # the record lapses at the first frame after the erase
+        pb(s, '\x1b[2K')
+        self.assertTrue(s.test_writes_are_recorded())
+        frame(s)
+        self.assertFalse(s.test_writes_are_recorded())
 
     def test_may_reorder_base(self):
         # a stamped paragraph with nothing that may reorder still has odd levels at a right-to-left base

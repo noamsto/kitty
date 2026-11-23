@@ -348,12 +348,19 @@ typedef struct CursorTrack {
     } temp;
 } CursorTrack;
 
+// A line only becomes empty by an erase, a shift or a scroll, which is when prepare looks for a buffer left without a record
+static inline void
+bidi_note_maybe_unstamp(LineBuf *lb) {
+    if (UNLIKELY(lb->bidi_stamped)) lb->bidi_maybe_unstamp = true;
+}
+
 // Writes to a buffer without a stamp do not keep bidi_may_reorder, so it is recomputed for every row when the buffer gets one, and
 // for the main buffer also for the history rows its row 0 continues, which its first paragraph takes in
 static void
 bidi_buffer_stamped(Screen *self, LineBuf *lb) {
     if (lb->bidi_stamped) return;
     bidi_layout_moved(self);
+    lb->bidi_maybe_unstamp = true;
     for (index_type y = 0; y < lb->ynum; y++)
         lb->line_attrs[y].bidi_may_reorder = bidi_cells_may_reorder(linebuf_cpu_cells_for_line(lb, y), lb->xnum, self->text_cache);
     if (lb == self->main_linebuf) {
@@ -437,6 +444,8 @@ rewrap(
     screen->linebuf = main_is_active ? screen->main_linebuf : screen->alt_linebuf;
     bidi_buffer_rewrapped(screen, screen->main_linebuf);
     bidi_buffer_rewrapped(screen, screen->alt_linebuf);
+    bidi_note_maybe_unstamp(screen->main_linebuf);
+    bidi_note_maybe_unstamp(screen->alt_linebuf);
     if (main_is_active) {
         *nclb = mr.num_content_lines_before;
         *ncla = mr.num_content_lines_after;
@@ -610,6 +619,7 @@ static inline void
 bidi_index_up_seams(Screen *self, index_type top, index_type bottom, bool to_history) {
     LineBuf *lb = self->linebuf;
     if (LIKELY(!lb->bidi_stamped)) return;
+    lb->bidi_maybe_unstamp = true;
     bidi_layout_moved(self);
     if (to_history) historybuf_note_bidi(self->historybuf, lb->line_attrs[top]);
     if (!to_history && top) linebuf_mark_line_dirty(lb, top - 1);
@@ -627,6 +637,7 @@ bidi_note_line_from_history(Screen *self, LineAttrs a) {
 static void
 bidi_index_down_seams(Screen *self, index_type top, index_type bottom) {
     if (LIKELY(!self->linebuf->bidi_stamped)) return;
+    self->linebuf->bidi_maybe_unstamp = true;
     bidi_layout_moved(self);
     bidi_mark_seam(self, top);
     bidi_mark_seam(self, top + 1);
@@ -713,6 +724,7 @@ nuke_multicell_char_at(Screen *self, index_type x_, index_type y_, bool replace_
         nuke_in_line(line->cpu_cells, x_, x_limit, ch);
         mark_range_line_dirty(self, y);
     }
+    bidi_note_maybe_unstamp(self->linebuf);
     self->is_dirty = true;
 }
 
@@ -950,6 +962,7 @@ ssr_copy_row_to_slot(Screen *self, SmoothScrollRegion *r, index_type y, index_ty
 static void
 ssr_carry_bidi_record(Screen *self, const SmoothScrollRegion *r, index_type y, const CPUCell *moved, LineAttrs src) {
     self->linebuf->line_attrs[y].bidi_may_reorder |= src.bidi_may_reorder;
+    self->linebuf->bidi_maybe_unstamp = true;
     const CPUCell *c = linebuf_cpu_cells_for_line(self->linebuf, y);
     for (index_type x = 0; x < r->left; x++)
         if (c[x].ch_and_idx) return;
@@ -1379,7 +1392,10 @@ ssr_shift_by_one_row(Screen *self, SmoothScrollRegion *r, bool up) {
         if (entered_blank && last > top) ssr_nuke_chars_next_to_blank_row(self, r, top + 1, false);
     }
     ssr_move_images(self, r, up, via_history);
-    if (UNLIKELY(self->linebuf->bidi_stamped)) bidi_layout_moved(self);
+    if (UNLIKELY(self->linebuf->bidi_stamped)) {
+        self->linebuf->bidi_maybe_unstamp = true;
+        bidi_layout_moved(self);
+    }
     self->is_dirty = true;
 }
 
@@ -1536,7 +1552,10 @@ ssr_remove_at(Screen *self, unsigned idx) {
     ssr_dirty_line_graphics(self, r);
     if (self->bidi_maps && !ssr_is_full_width(self, r)) bidi_maps_edges_changed(self->bidi_maps);
     bidi_layout_moved(self);
-    if (UNLIKELY(self->linebuf->bidi_stamped)) ssr_dirty_bidi_rows(self, r);
+    if (UNLIKELY(self->linebuf->bidi_stamped)) {
+        self->linebuf->bidi_maybe_unstamp = true;
+        ssr_dirty_bidi_rows(self, r);
+    }
     ssr_free(r);
     SmoothScroll *ss = &self->smooth_scroll;
     ss->count--;
@@ -1602,7 +1621,10 @@ screen_smooth_scroll_define(
     ssr_dirty_line_graphics(self, r);
     if (self->bidi_maps && !ssr_is_full_width(self, r)) bidi_maps_edges_changed(self->bidi_maps);
     bidi_layout_moved(self);
-    if (UNLIKELY(self->linebuf->bidi_stamped)) ssr_dirty_bidi_rows(self, r);
+    if (UNLIKELY(self->linebuf->bidi_stamped)) {
+        self->linebuf->bidi_maybe_unstamp = true;
+        ssr_dirty_bidi_rows(self, r);
+    }
     return true;
 }
 
@@ -2689,6 +2711,7 @@ insert_characters(Screen *self, index_type at, index_type num, index_type y, boo
     nuke_split_multicell_char_at_left_boundary(self, at, y, replace_with_spaces);
     CPUCell *cp;
     linebuf_init_cells(self->linebuf, y, &cp, NULL);
+    bidi_note_maybe_unstamp(self->linebuf);
     // right shift
     for (index_type i = self->columns - 1; i >= at + num; i--) cp[i] = cp[i - num];
     linebuf_mark_line_dirty(self->linebuf, y);
@@ -4214,6 +4237,7 @@ screen_toggle_screen_buffer(Screen *self, bool save_cursor, bool clear_alt_scree
     if (to_alt) {
         if (clear_alt_screen) {
             linebuf_clear(self->alt_linebuf, BLANK_CHAR);
+            bidi_note_maybe_unstamp(self->alt_linebuf);
             grman_clear(self->alt_grman, true, self->cell_size);
         }
         if (save_cursor) screen_save_cursor(self);
@@ -5225,6 +5249,7 @@ screen_erase_in_line(Screen *self, unsigned int how, bool private) {
         default: break;
     }
     if (n > 0) {
+        bidi_note_maybe_unstamp(self->linebuf);
         nuke_multicell_char_intersecting_with(self, s, s + n, self->cursor->y, self->cursor->y + 1, false);
         screen_dirty_line_graphics(self, self->cursor->y, self->cursor->y, self->linebuf == self->main_linebuf);
         linebuf_init_line(self->linebuf, self->cursor->y);
@@ -5323,6 +5348,7 @@ screen_erase_in_display(Screen *self, unsigned int how, bool private) {
         :param bool private: when ``True`` character attributes are left unchanged
     */
     unsigned int a, b;
+    bidi_note_maybe_unstamp(self->linebuf);
     switch (how) {
         case 0:
             a = self->cursor->y + 1;
@@ -5405,6 +5431,7 @@ screen_insert_lines(Screen *self, unsigned int count) {
         screen_dirty_line_graphics(self, top, bottom, self->linebuf == self->main_linebuf);
         linebuf_insert_lines(self->linebuf, count, self->cursor->y, bottom);
         if (UNLIKELY(self->linebuf->bidi_stamped)) {
+            self->linebuf->bidi_maybe_unstamp = true;
             bidi_layout_moved(self);
             bidi_mark_seam(self, self->cursor->y);
             bidi_mark_seam(self, self->cursor->y + MIN(count, bottom + 1 - self->cursor->y));
@@ -5454,6 +5481,7 @@ screen_delete_lines_impl(Screen *self, index_type start, index_type count, index
     screen_dirty_line_graphics(self, top, bottom, self->linebuf == self->main_linebuf);
     linebuf_delete_lines(self->linebuf, count, start, bottom);
     if (UNLIKELY(self->linebuf->bidi_stamped)) {
+        self->linebuf->bidi_maybe_unstamp = true;
         bidi_layout_moved(self);
         bidi_mark_seam(self, start);
         bidi_mark_seam(self, bottom + 1 - MIN(count, bottom + 1 - start));
@@ -5527,6 +5555,7 @@ screen_delete_characters(Screen *self, unsigned int count) {
         unsigned int x = self->cursor->x;
         unsigned int num = MIN(self->columns - x, count);
         if (!num) return; // cursor is in pending wrap state
+        bidi_note_maybe_unstamp(self->linebuf);
         remove_characters(self, x, num, self->cursor->y, false);
         linebuf_init_line(self->linebuf, self->cursor->y);
         line_apply_cursor(self->linebuf->line, self->cursor, self->columns - num, num, true);
@@ -5542,6 +5571,7 @@ screen_erase_characters(Screen *self, unsigned int count) {
     if (count == 0) count = 1;
     unsigned int x = self->cursor->x;
     unsigned int num = MIN(self->columns - x, count);
+    bidi_note_maybe_unstamp(self->linebuf);
     nuke_multicell_char_intersecting_with(self, x, x + num, self->cursor->y, self->cursor->y + 1, false);
     linebuf_init_line(self->linebuf, self->cursor->y);
     line_apply_cursor(self->linebuf->line, self->cursor, x, num, true);

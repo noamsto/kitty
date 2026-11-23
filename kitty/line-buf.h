@@ -20,6 +20,7 @@ typedef struct {
     Line *line;
     TextCache *text_cache;
     bool bidi_stamped; // set by the first bidi record written into this buffer, cleared by RIS or when no record is left
+    bool bidi_maybe_unstamp; // a line may have become empty since the last look for a record, see bidi_prepare_live
 } LineBuf;
 
 
