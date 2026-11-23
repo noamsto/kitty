@@ -1085,7 +1085,7 @@ ensure_glyph_render_scratch_space(size_t sz) {
 // HarfBuzz positions the glyphs of a right-to-left run for its visual order, which shape() reversed cluster by cluster,
 // so the runs of equal cluster are copied last to first, each in its own order. The originals stay as they are, the
 // shaped run cache keeps them.
-static __attribute__((noinline)) void
+static void
 copy_rtl_glyphs_in_visual_order(const hb_glyph_info_t *info, const hb_glyph_position_t *positions, unsigned num_glyphs) {
 #define a global_glyph_render_scratch
     ensure_space_for(&a, info, hb_glyph_info_t, num_glyphs, info_capacity, 64, false);
@@ -1754,7 +1754,7 @@ inked_width(const pixel *canvas, unsigned width, unsigned height) {
     return ans;
 }
 
-static inline __attribute__((always_inline)) void
+static void
 render_group(
     FontGroup *fg,
     unsigned num_cells,
@@ -2506,7 +2506,7 @@ render_groups_(FontGroup *fg, RunFont rf, bool center_glyph, const TextCache *tc
     }
 }
 
-// LTR runs, nearly all of them, get a copy of the group loop with the RTL handling compiled out
+// The group loop has one copy for each direction
 static void
 render_groups_ltr(FontGroup *fg, RunFont rf, bool center_glyph, const TextCache *tc) {
     render_groups_(fg, rf, center_glyph, tc, false);
@@ -2517,7 +2517,7 @@ render_groups_rtl(FontGroup *fg, RunFont rf, bool center_glyph, const TextCache 
     render_groups_(fg, rf, center_glyph, tc, true);
 }
 
-// Always inlined, so that a call with a constant direction goes straight to its copy
+// A call with a constant direction goes straight to its copy of the group loop
 static inline __attribute__((always_inline)) void
 render_groups(FontGroup *fg, RunFont rf, bool center_glyph, const TextCache *tc, bool rtl) {
     if (rtl) render_groups_rtl(fg, rf, center_glyph, tc);
@@ -2693,7 +2693,7 @@ render_shaped_run(
     render_groups(fg, rf, center_glyph, tc, rtl);
 }
 
-static __attribute__((noinline)) void
+static void
 render_box_run(FontGroup *fg, CPUCell *first_cpu_cell, GPUCell *first_gpu_cell, index_type num_cells, RunFont rf, const TextCache *tc) {
     while (num_cells) {
         render_box_cell(fg, rf, first_cpu_cell, first_gpu_cell, tc);
@@ -2838,7 +2838,7 @@ render_split_multicell_char(
     for (index_type k = 0; k < count; k++) line->render_cells[start + k].sprite_idx = render_cells[first->x + k].sprite_idx;
 }
 
-static __attribute__((noinline)) index_type
+static index_type
 level_stretch_end(const uint8_t *levels, index_type i, index_type xnum) {
     index_type end = i + 1;
     while (end < xnum && levels[end] == levels[i]) end++;
