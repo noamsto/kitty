@@ -286,6 +286,7 @@ historybuf_clear(HistoryBuf *self) {
     add_segment(self, 1);
     historybuf_invalidate_render_cache(self);
     self->bidi_stamped = false;
+    self->line0_cache_valid = false;
 }
 
 static bool
@@ -896,6 +897,7 @@ historybuf_fast_rewrap(HistoryBuf *dest, HistoryBuf *src, index_type count, bool
     dest->num_pushed = dest->count;
     dest->start_of_data = src->start_of_data;
     dest->bidi_stamped = src->bidi_stamped;
+    dest->line0_cache_valid = false;
     if (steal) {
         SWAP(dest->segments, src->segments);
         SWAP(dest->num_segments, src->num_segments);

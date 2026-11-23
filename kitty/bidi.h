@@ -140,11 +140,19 @@ bidi_kept_rows_stamped(const Screen *self) {
 static inline bool
 bidi_history_line0_recorded(const Screen *self) {
     HistoryBuf *hb = self->historybuf;
+    if (hb->line0_cache_valid && hb->line0_cache_pushed == hb->num_pushed && hb->line0_cache_count == hb->count &&
+            hb->line0_cache_lines == self->lines) return hb->line0_recorded;
+    bool ans = false;
     for (index_type l = 0; l < hb->count && l <= self->lines; l++) {
-        if (historybuf_attrs(hb, l)->bidi_stamp != BIDI_STAMP_NONE) return true;
-        if (!historybuf_is_line_continued(hb, l)) return false;
+        if (historybuf_attrs(hb, l)->bidi_stamp != BIDI_STAMP_NONE) { ans = true; break; }
+        if (!historybuf_is_line_continued(hb, l)) break;
     }
-    return false;
+    hb->line0_recorded = ans;
+    hb->line0_cache_valid = true;
+    hb->line0_cache_pushed = hb->num_pushed;
+    hb->line0_cache_count = hb->count;
+    hb->line0_cache_lines = self->lines;
+    return ans;
 }
 
 bool bidi_live_frame_reorders_unstamped(const Screen *self);
