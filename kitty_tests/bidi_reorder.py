@@ -463,6 +463,24 @@ class TestBidiReorder(BaseTest):
         s.scroll(1, True)
         self.assertIsNone(orders(s)[0])
 
+    def test_writes_leave_the_recording_loop_after_the_last_record(self):
+        opts = {'pixel_scroll': False}
+        s = self.create_screen(cols=5, lines=2, scrollback=10, options=opts)
+        pb(s, '\x1b[8h' + A + '\r\n\r\n\x1b[8l')
+        self.ae(s.historybuf.count, 1)
+        self.assertTrue(s.test_writes_are_recorded())
+        frame(s)
+        self.assertFalse(s.test_writes_are_recorded())
+        pb(s, 'ab')
+        self.assertFalse(s.test_writes_are_recorded())
+        s.scroll(1, True)
+        self.ae(tuple(orders(s)[0][:3]), (2, 1, 0))
+        # a record left on screen keeps the loop
+        s = self.create_screen(cols=5, lines=2, scrollback=10, options=opts)
+        pb(s, '\x1b[8h' + A + '\x1b[8l')
+        frame(s)
+        self.assertTrue(s.test_writes_are_recorded())
+
     def test_may_reorder_base(self):
         # a stamped paragraph with nothing that may reorder still has odd levels at a right-to-left base
         s = self.screen(SCP_RTL, AUTO, text='12 34')
