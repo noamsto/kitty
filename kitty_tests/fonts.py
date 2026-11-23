@@ -1488,7 +1488,7 @@ class BidiRendering(BidiRenderingBase):
                     first = word.index('\u0644')
                     self.assertGreater(rtl_ink[first], rtl_ink[first + 1])
                     cell = self.render_cells(self.line(word, cols), [1] * cols, sprites)[1][first]
-                    self.assertTrue(any(cell[(cell_width - 1) * 4::cell_width * 4]))
+                    self.assertTrue(any(cell[(cell_width - 1) * 4 :: cell_width * 4]))
 
     def test_rtl_combining_mark_position(self):
         # a mark that is not composed with its base is a cluster of its own in the base's cell, it must sit where it does
